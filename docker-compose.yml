@@ -1,0 +1,15 @@
+services:
+  secretnode:
+    build: .
+    image: secretnode:2.2.0
+    container_name: secretnode
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env               # copy .env.example -> .env and fill it in first
+    volumes:
+      - secretnode-data:/app/backend/data   # persist scan history across restarts
+    restart: unless-stopped
+
+volumes:
+  secretnode-data:

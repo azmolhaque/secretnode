@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "secretnode"
+version = "2.2.0"
+description = "Real-time passive attack-surface scanner for credential-leak detection, with AI validation, SARIF export, and a live dashboard."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Md. Azmol Haque Rony" }]
+keywords = ["security", "asm", "secrets-detection", "bug-bounty", "sarif", "appsec"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Security",
+  "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Homepage = "https://github.com/azmolhaque/secretnode"
+Issues = "https://github.com/azmolhaque/secretnode/issues"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["backend/tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["frontend"]
+
+[tool.ruff.lint]
+# Critical correctness rules only — pyflakes (undefined names, unused imports,
+# f-string bugs) plus syntax errors. Style is intentionally not enforced so the
+# gate flags real bugs, not formatting opinions.
+select = ["E9", "F"]

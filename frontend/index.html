@@ -1,0 +1,1335 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SecretNode v2.0 — ASM Scanner</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Exo+2:wght@300;400;600&display=swap" rel="stylesheet" />
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono:    ['"Share Tech Mono"', 'monospace'],
+            display: ['Orbitron', 'monospace'],
+            body:    ['"Exo 2"', 'sans-serif'],
+          },
+          colors: {
+            phosphor: {
+              50:  '#f0fff4',
+              100: '#c6f6d5',
+              200: '#9ae6b4',
+              300: '#68d391',
+              400: '#48bb78',
+              500: '#38a169',
+              600: '#2f855a',
+              700: '#276749',
+              800: '#22543d',
+              900: '#1c4532',
+            },
+            terminal: {
+              bg:      '#080c0a',
+              panel:   '#0d1410',
+              border:  '#1a2e1f',
+              muted:   '#2d4a35',
+              glow:    '#00ff88',
+              dim:     '#4a7c59',
+            },
+            threat: {
+              critical: '#ff3b3b',
+              high:     '#ff7b00',
+              medium:   '#ffd700',
+              low:      '#48bb78',
+              info:     '#63b3ed',
+            },
+          },
+          animation: {
+            'scan-line':  'scanLine 3s linear infinite',
+            'pulse-glow': 'pulseGlow 2s ease-in-out infinite',
+            'blink':      'blink 1s step-end infinite',
+            'slide-in':   'slideIn 0.3s ease-out',
+            'fade-in':    'fadeIn 0.5s ease-out',
+            'matrix-bg':  'matrixBg 20s linear infinite',
+          },
+          keyframes: {
+            scanLine: {
+              '0%':   { transform: 'translateY(-100%)' },
+              '100%': { transform: 'translateY(100vh)' },
+            },
+            pulseGlow: {
+              '0%, 100%': { boxShadow: '0 0 5px #00ff88, 0 0 10px #00ff88' },
+              '50%':      { boxShadow: '0 0 20px #00ff88, 0 0 40px #00ff88, 0 0 60px #00ff88' },
+            },
+            blink: {
+              '0%, 100%': { opacity: '1' },
+              '50%':      { opacity: '0' },
+            },
+            slideIn: {
+              from: { opacity: '0', transform: 'translateY(-8px)' },
+              to:   { opacity: '1', transform: 'translateY(0)' },
+            },
+            fadeIn: {
+              from: { opacity: '0' },
+              to:   { opacity: '1' },
+            },
+          },
+          boxShadow: {
+            'glow-green':    '0 0 15px rgba(0, 255, 136, 0.3)',
+            'glow-green-lg': '0 0 30px rgba(0, 255, 136, 0.5)',
+            'glow-red':      '0 0 15px rgba(255, 59, 59, 0.5)',
+            'glow-orange':   '0 0 15px rgba(255, 123, 0, 0.5)',
+          },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    /* ── Global ── */
+    * { box-sizing: border-box; }
+
+    body {
+      background-color: #080c0a;
+      background-image:
+        radial-gradient(ellipse at 20% 10%, rgba(0, 255, 136, 0.04) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 90%, rgba(0, 255, 136, 0.03) 0%, transparent 50%),
+        repeating-linear-gradient(
+          0deg,
+          transparent,
+          transparent 2px,
+          rgba(0, 255, 136, 0.012) 2px,
+          rgba(0, 255, 136, 0.012) 4px
+        );
+      color: #9ae6b4;
+      font-family: 'Exo 2', sans-serif;
+      overflow-x: hidden;
+    }
+
+    /* CRT scan-line overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.07) 0px,
+        rgba(0, 0, 0, 0.07) 1px,
+        transparent 1px,
+        transparent 2px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0d1410; }
+    ::-webkit-scrollbar-thumb { background: #2f855a; border-radius: 2px; }
+
+    /* ── Terminal Console ── */
+    #console-output {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      height: 380px;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+    }
+
+    .log-INFO  { color: #68d391; }
+    .log-WARN  { color: #ffd700; }
+    .log-ERROR { color: #ff3b3b; text-shadow: 0 0 8px rgba(255, 59, 59, 0.6); }
+    .log-SYS   { color: #63b3ed; }
+
+    /* ── Glowing border panels ── */
+    .panel {
+      border: 1px solid #1a2e1f;
+      background: #0d1410;
+      border-radius: 4px;
+      transition: border-color 0.3s;
+    }
+    .panel:focus-within,
+    .panel.active {
+      border-color: #38a169;
+      box-shadow: 0 0 0 1px rgba(56, 161, 105, 0.2), inset 0 0 20px rgba(0, 255, 136, 0.03);
+    }
+
+    /* ── Input ── */
+    .scan-input {
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #9ae6b4;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 14px;
+      width: 100%;
+      caret-color: #00ff88;
+    }
+    .scan-input::placeholder { color: #2d4a35; }
+
+    /* ── Scan button ── */
+    .btn-scan {
+      font-family: 'Orbitron', monospace;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 10px 28px;
+      background: linear-gradient(135deg, #276749 0%, #38a169 100%);
+      color: #f0fff4;
+      border: 1px solid #48bb78;
+      border-radius: 3px;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+      position: relative;
+      overflow: hidden;
+    }
+    .btn-scan::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, transparent 0%, rgba(0,255,136,0.1) 100%);
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .btn-scan:hover::before { opacity: 1; }
+    .btn-scan:hover {
+      box-shadow: 0 0 20px rgba(0,255,136,0.4);
+      transform: translateY(-1px);
+    }
+    .btn-scan:active { transform: translateY(0); }
+    .btn-scan:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn-stop {
+      font-family: 'Orbitron', monospace;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 10px 24px;
+      background: linear-gradient(135deg, #742a2a 0%, #c53030 100%);
+      color: #fff5f5;
+      border: 1px solid #ff3b3b;
+      border-radius: 3px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-stop:hover {
+      box-shadow: 0 0 20px rgba(255,59,59,0.4);
+      transform: translateY(-1px);
+    }
+    .btn-stop:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    /* ── Status Badge ── */
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+    }
+    .status-dot.idle     { background: #4a7c59; }
+    .status-dot.running  { background: #00ff88; animation: pulseGlow 1s ease-in-out infinite; }
+    .status-dot.complete { background: #48bb78; }
+    .status-dot.error    { background: #ff3b3b; }
+
+    /* ── Findings Table ── */
+    .findings-table { width: 100%; border-collapse: collapse; }
+    .findings-table th {
+      font-family: 'Orbitron', monospace;
+      font-size: 9px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: #4a7c59;
+      padding: 10px 12px;
+      border-bottom: 1px solid #1a2e1f;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .findings-table td {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 11px;
+      padding: 10px 12px;
+      border-bottom: 1px solid #0d1a10;
+      vertical-align: top;
+      color: #9ae6b4;
+    }
+    .findings-table tr:hover td { background: rgba(0, 255, 136, 0.03); }
+    .findings-table tr.animate-slide-in td { animation: slideIn 0.35s ease-out; }
+
+    .confidence-bar {
+      height: 4px;
+      background: #1a2e1f;
+      border-radius: 2px;
+      margin-top: 4px;
+      overflow: hidden;
+    }
+    .confidence-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width 0.6s ease-out;
+    }
+
+    /* ── Severity badges ── */
+    .badge {
+      font-family: 'Orbitron', monospace;
+      font-size: 8px;
+      letter-spacing: 0.1em;
+      padding: 2px 8px;
+      border-radius: 2px;
+      text-transform: uppercase;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .badge-critical { background: rgba(255,59,59,0.15);  color: #ff3b3b;  border: 1px solid rgba(255,59,59,0.3); }
+    .badge-high     { background: rgba(255,123,0,0.15); color: #ff7b00;  border: 1px solid rgba(255,123,0,0.3); }
+    .badge-medium   { background: rgba(255,215,0,0.12); color: #ffd700;  border: 1px solid rgba(255,215,0,0.3); }
+    .badge-info     { background: rgba(99,179,237,0.12);color: #63b3ed;  border: 1px solid rgba(99,179,237,0.3);}
+
+    /* ── Stats cards ── */
+    .stat-card {
+      background: #0d1410;
+      border: 1px solid #1a2e1f;
+      border-radius: 4px;
+      padding: 16px 20px;
+      text-align: center;
+      transition: border-color 0.3s, box-shadow 0.3s;
+    }
+    .stat-card:hover {
+      border-color: #38a169;
+      box-shadow: 0 0 15px rgba(0,255,136,0.1);
+    }
+    .stat-value {
+      font-family: 'Orbitron', monospace;
+      font-size: 28px;
+      font-weight: 700;
+      color: #00ff88;
+      text-shadow: 0 0 10px rgba(0,255,136,0.5);
+      line-height: 1;
+    }
+    .stat-label {
+      font-family: 'Exo 2', sans-serif;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #4a7c59;
+      margin-top: 6px;
+    }
+
+    /* ── Header ── */
+    .header-title {
+      font-family: 'Orbitron', monospace;
+      font-weight: 900;
+      font-size: clamp(18px, 3vw, 26px);
+      letter-spacing: 0.08em;
+      background: linear-gradient(90deg, #00ff88 0%, #48bb78 50%, #68d391 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      text-shadow: none;
+    }
+
+    /* ── Progress bar ── */
+    #progress-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #38a169, #00ff88);
+      box-shadow: 0 0 8px rgba(0,255,136,0.6);
+      transition: width 0.4s ease-out;
+    }
+
+    /* ── Snippet code ── */
+    .code-snippet {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 10px;
+      color: #68d391;
+      background: rgba(0,0,0,0.4);
+      padding: 4px 6px;
+      border-radius: 2px;
+      border-left: 2px solid #276749;
+      max-width: 280px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      display: block;
+    }
+
+    /* ── Blinking cursor ── */
+    .cursor::after {
+      content: '▋';
+      animation: blink 1s step-end infinite;
+      color: #00ff88;
+    }
+
+    /* ── Hexagon decorations ── */
+    .hex-decoration {
+      position: fixed;
+      opacity: 0.03;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 10px;
+      color: #00ff88;
+      pointer-events: none;
+      line-height: 1.2;
+      white-space: pre;
+      user-select: none;
+    }
+
+    /* ── Toast notifications ── */
+    #toast-container {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .toast {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 11px;
+      padding: 10px 16px;
+      border-radius: 3px;
+      border: 1px solid;
+      animation: slideIn 0.3s ease-out;
+      max-width: 340px;
+      backdrop-filter: blur(10px);
+    }
+    .toast-success { background: rgba(56,161,105,0.15); border-color: #38a169; color: #68d391; }
+    .toast-error   { background: rgba(255,59,59,0.15);  border-color: #ff3b3b;  color: #ff3b3b; }
+    .toast-warn    { background: rgba(255,215,0,0.12);  border-color: #ffd700;  color: #ffd700; }
+    .toast-info    { background: rgba(99,179,237,0.12); border-color: #63b3ed;  color: #63b3ed; }
+
+    /* ── Modal overlay ── */
+    #modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(8,12,10,0.92);
+      z-index: 5000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(4px);
+    }
+    #modal-overlay.show { display: flex; animation: fadeIn 0.2s ease-out; }
+    #modal-box {
+      background: #0d1410;
+      border: 1px solid #38a169;
+      border-radius: 4px;
+      padding: 28px 32px;
+      max-width: 640px;
+      width: 90%;
+      box-shadow: 0 0 40px rgba(0,255,136,0.2);
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+
+<body class="h-full min-h-screen">
+
+  <!-- Decorative ASCII corner art -->
+  <div class="hex-decoration" style="top:60px;left:20px;font-size:8px;">
+    ╔══════════╗<br>║ SCANNING ║<br>╚══════════╝
+  </div>
+  <div class="hex-decoration" style="bottom:80px;right:20px;font-size:8px;">
+    ┌─────────┐<br>│ NODE/RPI│<br>└─────────┘
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container"></div>
+
+  <!-- Detail Modal -->
+  <div id="modal-overlay" onclick="closeModal(event)">
+    <div id="modal-box">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+        <span class="font-display text-phosphor-300" style="font-size:13px;letter-spacing:0.1em;">FINDING DETAIL</span>
+        <button onclick="closeModal()" style="color:#4a7c59;font-family:monospace;font-size:18px;cursor:pointer;line-height:1;">✕</button>
+      </div>
+      <div id="modal-content"></div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════ -->
+  <!-- HEADER -->
+  <!-- ══════════════════════════════════════════════════════════════ -->
+  <header style="border-bottom:1px solid #1a2e1f;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;background:#0d1410;">
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div style="width:36px;height:36px;border:1px solid #38a169;border-radius:3px;display:flex;align-items:center;justify-content:center;box-shadow:0 0 10px rgba(0,255,136,0.3);">
+        <span style="font-family:monospace;color:#00ff88;font-size:16px;">⬡</span>
+      </div>
+      <div>
+        <div class="header-title">SecretNode</div>
+        <div style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.0 — ATTACK SURFACE MONITOR</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:24px;">
+      <div style="text-align:right;">
+        <div id="ws-status" style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;">
+          <span class="status-dot idle" id="ws-dot"></span>WS: DISCONNECTED
+        </div>
+        <div id="clock" style="font-family:'Orbitron';font-size:11px;color:#2d4a35;margin-top:2px;"></div>
+      </div>
+      <div style="width:1px;height:36px;background:#1a2e1f;"></div>
+      <div style="font-family:'Share Tech Mono';font-size:10px;color:#2d4a35;">
+        ARM64 / RPI5
+      </div>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════════════════════════════════════ -->
+  <!-- MAIN LAYOUT -->
+  <!-- ══════════════════════════════════════════════════════════════ -->
+  <main style="padding:20px 24px;max-width:1600px;margin:0 auto;">
+
+    <!-- ── SCAN CONTROL ROW ── -->
+    <div class="panel" style="padding:16px 20px;margin-bottom:16px;" id="control-panel">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <span style="font-family:'Orbitron';font-size:9px;letter-spacing:0.2em;color:#4a7c59;">TARGET</span>
+        <div style="flex:1;height:1px;background:#1a2e1f;"></div>
+        <div id="scan-status-display" style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;">
+          <span class="status-dot idle" id="scan-dot"></span><span id="scan-status-text">IDLE</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:stretch;">
+        <div style="flex:1;border:1px solid #1a2e1f;border-radius:3px;padding:10px 14px;display:flex;align-items:center;gap:10px;background:#080c0a;">
+          <span style="color:#2d4a35;font-family:monospace;font-size:14px;">$</span>
+          <input
+            type="text"
+            id="target-input"
+            class="scan-input"
+            placeholder="https://example.com"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <div style="border:1px solid #1a2e1f;border-radius:3px;padding:10px 12px;display:flex;align-items:center;gap:6px;background:#080c0a;" title="Number of same-domain pages to crawl (1 = target page only)">
+          <span style="color:#4a7c59;font-family:'Share Tech Mono';font-size:9px;letter-spacing:0.05em;">PAGES</span>
+          <input
+            type="number"
+            id="crawl-pages-input"
+            value="1"
+            min="1"
+            max="15"
+            style="width:44px;background:transparent;border:none;color:#68d391;font-family:'Share Tech Mono';font-size:12px;text-align:center;"
+          />
+        </div>
+        <button id="btn-scan" class="btn-scan" onclick="startScan()">
+          ▶ START SCAN
+        </button>
+        <button id="btn-stop" class="btn-stop" onclick="stopScan()" disabled>
+          ■ STOP
+        </button>
+        <button class="btn-scan" onclick="clearAll()" style="background:linear-gradient(135deg,#1a2e1f,#2d4a35);border-color:#2d4a35;font-size:10px;padding:10px 18px;">
+          CLEAR
+        </button>
+      </div>
+
+      <!-- Progress bar -->
+      <div style="margin-top:12px;height:3px;background:#1a2e1f;border-radius:2px;overflow:hidden;">
+        <div id="progress-bar-fill" style="width:0%;height:100%;"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:5px;">
+        <span id="stage-text" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.1em;"></span>
+        <span id="scan-id-display" style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;"></span>
+      </div>
+    </div>
+
+    <!-- ── STATS ROW ── -->
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px;">
+      <div class="stat-card">
+        <div class="stat-value" id="stat-assets">0</div>
+        <div class="stat-label">Assets Fetched</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-raw">0</div>
+        <div class="stat-label">Raw Candidates</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-confirmed" style="color:#ff3b3b;text-shadow:0 0 10px rgba(255,59,59,0.5);">0</div>
+        <div class="stat-label">Confirmed Secrets</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-scans">0</div>
+        <div class="stat-label">Total Scans</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-duration">0s</div>
+        <div class="stat-label">Last Duration</div>
+      </div>
+    </div>
+
+    <!-- ── LOWER TWO-COLUMN GRID ── -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+
+      <!-- LEFT: Live Terminal -->
+      <div class="panel" style="display:flex;flex-direction:column;">
+        <div style="padding:10px 14px;border-bottom:1px solid #1a2e1f;display:flex;align-items:center;justify-content:space-between;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="font-family:'Orbitron';font-size:9px;letter-spacing:0.2em;color:#4a7c59;">LIVE TERMINAL</span>
+            <div id="terminal-activity" style="width:6px;height:6px;border-radius:50%;background:#1a2e1f;transition:background 0.2s;"></div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button onclick="copyConsole()" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;cursor:pointer;padding:3px 8px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#2d4a35'">COPY</button>
+            <button onclick="clearConsole()" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;cursor:pointer;padding:3px 8px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#2d4a35'">CLR</button>
+          </div>
+        </div>
+        <div id="console-output" style="padding:12px 14px;flex:1;">
+          <div class="log-SYS">SecretNode v2.0 initialised. Awaiting target...<span class="cursor"></span></div>
+        </div>
+      </div>
+
+      <!-- RIGHT: Asset Discovery -->
+      <div class="panel" style="display:flex;flex-direction:column;">
+        <div style="padding:10px 14px;border-bottom:1px solid #1a2e1f;display:flex;align-items:center;justify-content:space-between;">
+          <span style="font-family:'Orbitron';font-size:9px;letter-spacing:0.2em;color:#4a7c59;">DISCOVERED ASSETS</span>
+          <span id="asset-count-badge" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;padding:2px 8px;border:1px solid #1a2e1f;border-radius:10px;">0 URLs</span>
+        </div>
+        <div id="asset-list" style="padding:10px;flex:1;overflow-y:auto;height:380px;font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;">
+          <div style="color:#2d4a35;text-align:center;margin-top:60px;">No assets discovered yet</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── VERIFIED FINDINGS TABLE ── -->
+    <div class="panel">
+      <div style="padding:10px 14px;border-bottom:1px solid #1a2e1f;display:flex;align-items:center;justify-content:space-between;">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <span style="font-family:'Orbitron';font-size:9px;letter-spacing:0.2em;color:#4a7c59;">VERIFIED FINDINGS</span>
+          <span id="findings-count-badge" style="font-family:'Orbitron';font-size:8px;color:#ff3b3b;padding:2px 8px;border:1px solid rgba(255,59,59,0.3);border-radius:10px;background:rgba(255,59,59,0.08);">0 CONFIRMED</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button onclick="downloadReport('html')" title="Download client-ready HTML report (printable to PDF)"
+            style="font-family:'Orbitron';font-size:8px;letter-spacing:0.06em;color:#4a7c59;padding:4px 9px;border:1px solid #2d4a35;border-radius:2px;background:transparent;cursor:pointer;"
+            onmouseover="this.style.color='#00ff88';this.style.borderColor='#38a169'"
+            onmouseout="this.style.color='#4a7c59';this.style.borderColor='#2d4a35'">
+            ⬇ HTML REPORT
+          </button>
+          <button onclick="downloadReport('csv')" title="Download CSV export"
+            style="font-family:'Orbitron';font-size:8px;letter-spacing:0.06em;color:#4a7c59;padding:4px 9px;border:1px solid #2d4a35;border-radius:2px;background:transparent;cursor:pointer;"
+            onmouseover="this.style.color='#00ff88';this.style.borderColor='#38a169'"
+            onmouseout="this.style.color='#4a7c59';this.style.borderColor='#2d4a35'">
+            ⬇ CSV
+          </button>
+          <button onclick="downloadReport('sarif')" title="Download SARIF 2.1.0 (GitHub code scanning / CI)"
+            style="font-family:'Orbitron';font-size:8px;letter-spacing:0.06em;color:#4a7c59;padding:4px 9px;border:1px solid #2d4a35;border-radius:2px;background:transparent;cursor:pointer;"
+            onmouseover="this.style.color='#00ff88';this.style.borderColor='#38a169'"
+            onmouseout="this.style.color='#4a7c59';this.style.borderColor='#2d4a35'">
+            ⬇ SARIF
+          </button>
+          <!-- Filter -->
+          <select id="filter-type" onchange="filterFindings()" style="font-family:'Share Tech Mono';font-size:9px;color:#4a7c59;background:#080c0a;border:1px solid #1a2e1f;border-radius:2px;padding:3px 8px;outline:none;cursor:pointer;">
+            <option value="">ALL TYPES</option>
+          </select>
+          <button onclick="exportFindings()" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;cursor:pointer;padding:3px 10px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#2d4a35'">EXPORT JSON</button>
+          <button onclick="clearFindings()" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;cursor:pointer;padding:3px 10px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#2d4a35'">CLEAR</button>
+        </div>
+      </div>
+
+      <div style="overflow-x:auto;max-height:420px;overflow-y:auto;">
+        <table class="findings-table">
+          <thead style="position:sticky;top:0;background:#0d1410;z-index:10;">
+            <tr>
+              <th>#</th>
+              <th>SECRET TYPE</th>
+              <th>TARGET / SOURCE</th>
+              <th>SNIPPET</th>
+              <th>ENTROPY</th>
+              <th>CONFIDENCE</th>
+              <th>AI REASON</th>
+              <th>TIME</th>
+              <th>ACTION</th>
+            </tr>
+          </thead>
+          <tbody id="findings-tbody">
+            <tr id="empty-row">
+              <td colspan="9" style="text-align:center;padding:40px;color:#2d4a35;font-size:12px;">
+                No confirmed secrets detected yet. Start a scan to begin.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── FOOTER ── -->
+    <div style="margin-top:16px;padding:10px 0;border-top:1px solid #1a2e1f;display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;letter-spacing:0.1em;">
+        SECRETNODE v2.0 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
+      </span>
+      <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;">
+        ⚠ FOR AUTHORIZED SECURITY TESTING ONLY
+      </span>
+    </div>
+  </main>
+
+
+  <!-- ══════════════════════════════════════════════════════════════ -->
+  <!-- APPLICATION JAVASCRIPT -->
+  <!-- ══════════════════════════════════════════════════════════════ -->
+  <script>
+  (() => {
+    'use strict';
+
+    // ── State ────────────────────────────────────────────────────────────────
+    const state = {
+      ws:           null,
+      scanId:       null,
+      scanning:     false,
+      findings:     [],         // all ValidatedFinding objects
+      allFindings:  [],         // unfiltered master list
+      totalScans:   0,
+      wsConnected:  false,
+      pingInterval: null,
+    };
+
+    // ── Utility ─────────────────────────────────────────────────────────────
+    const $  = id => document.getElementById(id);
+    const escapeHtml = (s) => String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
+    // ── API key handling ────────────────────────────────────────────────────
+    // The backend now requires X-API-Key on every /api call, and ?api_key=
+    // on WebSocket connections (browsers can't set custom headers on WS).
+    // The key is asked for once per browser session and kept in memory only.
+    function getApiKey() {
+      let key = sessionStorage.getItem('secretnode_api_key');
+      if (!key) {
+        key = prompt('Enter SecretNode API key (set as SECRETNODE_API_KEY in .env):') || '';
+        sessionStorage.setItem('secretnode_api_key', key);
+      }
+      return key;
+    }
+    function apiHeaders(extra = {}) {
+      return { 'X-API-Key': getApiKey(), ...extra };
+    }
+    const ts = () => new Date().toISOString().replace('T',' ').slice(0,19);
+
+    function severityFromType(type) {
+      const crit = ['AWS Access Key','AWS Secret Access Key','GitHub Personal Access Token','Stripe Secret Key','Private Key Block'];
+      const high = ['Google Cloud API Key','Slack Webhook','GitHub OAuth Token','SendGrid API Key','Twilio Auth Token','Heroku API Key','Shopify Access Token','Mailgun API Key','JWT Token'];
+      if (crit.includes(type)) return 'critical';
+      if (high.includes(type)) return 'high';
+      return 'medium';
+    }
+
+    function confidenceColor(c) {
+      if (c >= 90) return '#ff3b3b';
+      if (c >= 75) return '#ff7b00';
+      if (c >= 60) return '#ffd700';
+      return '#68d391';
+    }
+
+    // ── Clock ────────────────────────────────────────────────────────────────
+    function updateClock() {
+      const now = new Date();
+      $('clock').textContent = now.toUTCString().slice(17, 25) + ' UTC';
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    // ── Toast ────────────────────────────────────────────────────────────────
+    function toast(msg, type = 'info', duration = 4000) {
+      const el = document.createElement('div');
+      el.className = `toast toast-${type}`;
+      el.textContent = msg;
+      $('toast-container').appendChild(el);
+      setTimeout(() => el.remove(), duration);
+    }
+
+    // ── Console ──────────────────────────────────────────────────────────────
+    let consoleLines = 0;
+    const MAX_CONSOLE_LINES = 500;
+
+    function appendLog(msg, level = 'INFO') {
+      const out = $('console-output');
+
+      // Remove old cursor line if present
+      const oldCursor = out.querySelector('.cursor');
+      if (oldCursor) oldCursor.parentElement.remove();
+
+      // Prune
+      while (consoleLines >= MAX_CONSOLE_LINES && out.firstChild) {
+        out.removeChild(out.firstChild);
+        consoleLines--;
+      }
+
+      const line = document.createElement('div');
+      line.className = `log-${level}`;
+      line.textContent = `[${ts()}] [${level.padEnd(5)}] ${msg}`;
+      out.appendChild(line);
+      consoleLines++;
+
+      // Flash activity dot
+      const dot = $('terminal-activity');
+      dot.style.background = level === 'ERROR' ? '#ff3b3b' : level === 'WARN' ? '#ffd700' : '#00ff88';
+      setTimeout(() => { dot.style.background = '#1a2e1f'; }, 300);
+
+      // Auto-scroll
+      out.scrollTop = out.scrollHeight;
+    }
+
+    function clearConsole() {
+      $('console-output').innerHTML = '';
+      consoleLines = 0;
+      appendLog('Console cleared.', 'SYS');
+    }
+
+    function copyConsole() {
+      const text = Array.from($('console-output').querySelectorAll('div'))
+        .map(d => d.textContent).join('\n');
+      navigator.clipboard.writeText(text).then(() => toast('Console copied to clipboard', 'success'));
+    }
+
+    // ── Asset List ────────────────────────────────────────────────────────────
+    function addAsset(url) {
+      const container = $('asset-list');
+      if (container.querySelector('.empty-msg')) container.innerHTML = '';
+
+      const el = document.createElement('div');
+      el.style.cssText = `
+        padding: 5px 8px;
+        border-bottom: 1px solid #0d1a10;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        animation: slideIn 0.3s ease-out;
+        cursor: pointer;
+        transition: color 0.2s;
+        color: #4a7c59;
+      `;
+      el.textContent = '→ ' + url;
+      el.title = url;
+      el.onmouseover = () => el.style.color = '#68d391';
+      el.onmouseout  = () => el.style.color = '#4a7c59';
+      el.onclick = () => window.open(url, '_blank');
+      container.appendChild(el);
+      container.scrollTop = container.scrollHeight;
+
+      const count = container.querySelectorAll('div').length;
+      $('asset-count-badge').textContent = `${count} URLs`;
+    }
+
+    function clearAssets() {
+      $('asset-list').innerHTML = '<div class="empty-msg" style="color:#2d4a35;text-align:center;margin-top:60px;">No assets discovered yet</div>';
+      $('asset-count-badge').textContent = '0 URLs';
+    }
+
+    // ── Findings Table ────────────────────────────────────────────────────────
+    function renderFinding(finding, index) {
+      const tbody = $('findings-tbody');
+      $('empty-row')?.remove();
+
+      const sev = severityFromType(finding.secret_type);
+      const cc  = confidenceColor(finding.confidence);
+      const time = finding.found_at
+        ? new Date(finding.found_at).toLocaleTimeString()
+        : ts().slice(11);
+
+      const tr = document.createElement('tr');
+      tr.className = 'animate-slide-in';
+      tr.dataset.index = index;
+      tr.dataset.type  = finding.secret_type;
+
+      const snippet = escapeHtml((finding.context_snippet || '').slice(0, 80));
+      const reason  = escapeHtml((finding.reason || '').slice(0, 100));
+      const source  = escapeHtml(finding.source_url || finding.target_url || '');
+      const sourceRaw = finding.source_url || finding.target_url || '';
+      const sourceShort = escapeHtml(sourceRaw.length > 40 ? '…' + sourceRaw.slice(-37) : sourceRaw);
+
+      const newBadge = finding.is_new === false
+        ? '<span style="background:#2d3748;color:#a0aec0;font-size:8px;padding:1px 6px;border-radius:8px;margin-left:5px;">RECURRING</span>'
+        : '<span style="background:#742a2a;color:#feb2b2;font-size:8px;padding:1px 6px;border-radius:8px;margin-left:5px;">NEW</span>';
+
+      tr.innerHTML = `
+        <td style="color:#2d4a35;width:40px;">${index + 1}</td>
+        <td>
+          <span class="badge badge-${sev}">${sev.toUpperCase()}</span>${newBadge}
+          <div style="margin-top:5px;color:#9ae6b4;font-size:10px;">${finding.secret_type}</div>
+        </td>
+        <td style="max-width:180px;">
+          <div style="color:#4a7c59;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${source}">${sourceShort}</div>
+        </td>
+        <td><code class="code-snippet" title="${snippet}">${snippet}</code></td>
+        <td style="white-space:nowrap;">
+          <span style="color:#63b3ed;">${finding.entropy.toFixed(2)}</span>
+          <span style="color:#2d4a35;font-size:9px;"> bits</span>
+        </td>
+        <td style="width:100px;">
+          <div style="color:${cc};font-size:13px;font-weight:700;">${finding.confidence}%</div>
+          <div class="confidence-bar">
+            <div class="confidence-fill" style="width:${finding.confidence}%;background:${cc};"></div>
+          </div>
+        </td>
+        <td style="color:#68d391;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${reason}">${reason}</td>
+        <td style="color:#2d4a35;white-space:nowrap;">${time}</td>
+        <td style="white-space:nowrap;">
+          <button onclick="showFindingDetail(${index})"
+            style="font-family:'Orbitron';font-size:8px;letter-spacing:0.08em;color:#4a7c59;padding:4px 8px;border:1px solid #2d4a35;border-radius:2px;background:transparent;cursor:pointer;transition:all 0.2s;"
+            onmouseover="this.style.color='#00ff88';this.style.borderColor='#38a169'"
+            onmouseout="this.style.color='#4a7c59';this.style.borderColor='#2d4a35'">
+            DETAIL
+          </button>
+          <button onclick="suppressFinding(${index}, this)"
+            title="Mark as false positive — future scans of this target won't re-alert on it"
+            style="font-family:'Orbitron';font-size:8px;letter-spacing:0.08em;color:#975a16;padding:4px 8px;border:1px solid #744210;border-radius:2px;background:transparent;cursor:pointer;transition:all 0.2s;margin-left:4px;"
+            onmouseover="this.style.color='#f6ad55';this.style.borderColor='#dd6b20'"
+            onmouseout="this.style.color='#975a16';this.style.borderColor='#744210'">
+            FP
+          </button>
+        </td>
+      `;
+
+      tbody.appendChild(tr);
+      tbody.scrollTop = tbody.scrollHeight;
+
+      // Update badge
+      $('findings-count-badge').textContent = `${state.allFindings.length} CONFIRMED`;
+      $('stat-confirmed').textContent = state.allFindings.length;
+    }
+
+    function showFindingDetail(index) {
+      const f = state.allFindings[index];
+      if (!f) return;
+
+      const sev = severityFromType(f.secret_type);
+      const mc  = $('modal-content');
+      mc.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+          <div style="font-family:'Share Tech Mono';font-size:10px;">
+            <div style="color:#4a7c59;margin-bottom:3px;letter-spacing:0.1em;">SECRET TYPE</div>
+            <div style="color:#9ae6b4;"><span class="badge badge-${sev}">${sev.toUpperCase()}</span> ${f.secret_type}</div>
+          </div>
+          <div style="font-family:'Share Tech Mono';font-size:10px;">
+            <div style="color:#4a7c59;margin-bottom:3px;letter-spacing:0.1em;">AI CONFIDENCE</div>
+            <div style="color:${confidenceColor(f.confidence)};font-family:'Orbitron';font-size:16px;">${f.confidence}%</div>
+          </div>
+        </div>
+        <div style="margin-bottom:14px;">
+          <div style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;margin-bottom:5px;">TARGET URL</div>
+          <div style="font-family:'Share Tech Mono';font-size:11px;color:#63b3ed;word-break:break-all;">${escapeHtml(f.target_url)}</div>
+        </div>
+        <div style="margin-bottom:14px;">
+          <div style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;margin-bottom:5px;">SOURCE ASSET</div>
+          <div style="font-family:'Share Tech Mono';font-size:11px;color:#63b3ed;word-break:break-all;">${escapeHtml(f.source_url || f.target_url)}</div>
+        </div>
+        <div style="margin-bottom:14px;">
+          <div style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;margin-bottom:5px;">ENTROPY</div>
+          <div style="font-family:'Share Tech Mono';font-size:11px;color:#68d391;">${f.entropy.toFixed(4)} bits/char</div>
+        </div>
+        <div style="margin-bottom:14px;">
+          <div style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;margin-bottom:5px;">AI REASONING</div>
+          <div style="font-family:'Share Tech Mono';font-size:11px;color:#9ae6b4;">${escapeHtml(f.reason)}</div>
+        </div>
+        <div style="margin-bottom:14px;">
+          <div style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;margin-bottom:5px;">CODE SNIPPET</div>
+          <pre style="font-family:'Share Tech Mono';font-size:10px;color:#68d391;background:rgba(0,0,0,0.4);padding:10px;border-radius:3px;border-left:2px solid #276749;overflow-x:auto;white-space:pre-wrap;word-break:break-all;">${escapeHtml(f.context_snippet||'')}</pre>
+        </div>
+        <div>
+          <div style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;margin-bottom:5px;">MATCHED VALUE (PARTIAL)</div>
+          <code style="font-family:'Share Tech Mono';font-size:11px;color:#ff3b3b;background:rgba(255,59,59,0.08);padding:4px 8px;border-radius:2px;border:1px solid rgba(255,59,59,0.2);">${escapeHtml((f.raw_match||'').slice(0,60))}…</code>
+        </div>
+      `;
+      $('modal-overlay').classList.add('show');
+    }
+
+    window.showFindingDetail = showFindingDetail;
+
+    window.closeModal = function(e) {
+      if (!e || e.target === $('modal-overlay')) {
+        $('modal-overlay').classList.remove('show');
+      }
+    };
+
+    // Keyboard escape
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') $('modal-overlay').classList.remove('show');
+    });
+
+    function clearFindings() {
+      state.findings = [];
+      state.allFindings = [];
+      const tbody = $('findings-tbody');
+      tbody.innerHTML = `<tr id="empty-row"><td colspan="9" style="text-align:center;padding:40px;color:#2d4a35;font-size:12px;">No confirmed secrets detected yet. Start a scan to begin.</td></tr>`;
+      $('findings-count-badge').textContent = '0 CONFIRMED';
+      $('stat-confirmed').textContent = '0';
+      toast('Findings cleared', 'info');
+    }
+    window.clearFindings = clearFindings;
+
+    function filterFindings() {
+      const type = $('filter-type').value;
+      const rows = $('findings-tbody').querySelectorAll('tr[data-index]');
+      rows.forEach(row => {
+        row.style.display = (!type || row.dataset.type === type) ? '' : 'none';
+      });
+    }
+    window.filterFindings = filterFindings;
+
+    function updateFilterOptions() {
+      const select = $('filter-type');
+      const types  = [...new Set(state.allFindings.map(f => f.secret_type))];
+      const current = select.value;
+      select.innerHTML = '<option value="">ALL TYPES</option>' +
+        types.map(t => `<option value="${t}">${t}</option>`).join('');
+      select.value = current;
+    }
+
+    function exportFindings() {
+      const blob = new Blob([JSON.stringify(state.allFindings, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `secretnode-findings-${Date.now()}.json`;
+      a.click();
+      toast(`Exported ${state.allFindings.length} finding(s)`, 'success');
+    }
+    window.exportFindings = exportFindings;
+
+    // ── Stats ─────────────────────────────────────────────────────────────────
+    function updateStats(data) {
+      if (data.assets_fetched !== undefined) animateNumber('stat-assets', data.assets_fetched);
+      if (data.raw_findings   !== undefined) animateNumber('stat-raw',    data.raw_findings);
+      if (data.duration_seconds !== undefined) $('stat-duration').textContent = data.duration_seconds.toFixed(1) + 's';
+    }
+
+    function animateNumber(id, target) {
+      const el = $(id);
+      const current = parseInt(el.textContent, 10) || 0;
+      if (current === target) return;
+      const step = Math.ceil(Math.abs(target - current) / 10);
+      let v = current;
+      const iv = setInterval(() => {
+        v = Math.min(v + step, target);
+        el.textContent = v;
+        if (v >= target) clearInterval(iv);
+      }, 30);
+    }
+
+    // ── Progress ──────────────────────────────────────────────────────────────
+    const stageProgress = {
+      spidering:   25,
+      validating:  60,
+      dispatching: 90,
+      complete:    100,
+    };
+
+    function setProgress(pct, stageText) {
+      $('progress-bar-fill').style.width = pct + '%';
+      if (stageText) $('stage-text').textContent = stageText.toUpperCase();
+    }
+
+    // ── Scan UI State ─────────────────────────────────────────────────────────
+    function setScanningUI(active) {
+      state.scanning = active;
+      $('btn-scan').disabled = active;
+      $('btn-stop').disabled = !active;
+      $('target-input').disabled = active;
+
+      const dot  = $('scan-dot');
+      const text = $('scan-status-text');
+      if (active) {
+        dot.className  = 'status-dot running';
+        text.textContent = 'SCANNING';
+        text.style.color = '#00ff88';
+      } else {
+        dot.className  = 'status-dot idle';
+        text.textContent = 'IDLE';
+        text.style.color = '#4a7c59';
+      }
+    }
+
+    // ── WebSocket ─────────────────────────────────────────────────────────────
+    function connectWS(scanId) {
+      if (state.ws) {
+        state.ws.close();
+        state.ws = null;
+      }
+
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const wsUrl = `${proto}://${location.host}/ws/logs/${scanId}?api_key=${encodeURIComponent(getApiKey())}`;
+      appendLog(`Connecting WebSocket...`, 'SYS');
+
+      state.ws = new WebSocket(wsUrl);
+
+      state.ws.onopen = () => {
+        state.wsConnected = true;
+        $('ws-dot').className = 'status-dot running';
+        $('ws-status').innerHTML = '<span class="status-dot running" id="ws-dot"></span>WS: LIVE';
+        appendLog('WebSocket connected — streaming live events', 'SYS');
+
+        state.pingInterval = setInterval(() => {
+          if (state.ws?.readyState === WebSocket.OPEN) {
+            state.ws.send('ping');
+          }
+        }, 25000);
+      };
+
+      state.ws.onmessage = evt => {
+        let msg;
+        try { msg = JSON.parse(evt.data); }
+        catch { return; }
+        handleWsEvent(msg);
+      };
+
+      state.ws.onerror = err => {
+        appendLog('WebSocket error — check server connection', 'ERROR');
+      };
+
+      state.ws.onclose = () => {
+        state.wsConnected = false;
+        clearInterval(state.pingInterval);
+        $('ws-dot').className = 'status-dot idle';
+        $('ws-status').innerHTML = '<span class="status-dot idle" id="ws-dot"></span>WS: DISCONNECTED';
+        if (state.scanning) {
+          appendLog('WebSocket disconnected — scan may still be running server-side', 'WARN');
+        }
+      };
+    }
+
+    function handleWsEvent(msg) {
+      switch (msg.type) {
+        case 'pong':
+          break;
+
+        case 'log':
+          appendLog(msg.message, msg.level || 'INFO');
+          break;
+
+        case 'scan_start':
+          appendLog(`Scan started: ${msg.scan_id}`, 'SYS');
+          $('scan-id-display').textContent = `ID: ${msg.scan_id.slice(0, 8)}…`;
+          clearAssets();
+          setProgress(5, 'initialising');
+          break;
+
+        case 'status':
+          const pct = stageProgress[msg.stage] || 10;
+          setProgress(pct, msg.stage);
+          break;
+
+        case 'assets_found':
+          animateNumber('stat-assets', msg.count);
+          (msg.urls || []).forEach(u => addAsset(u));
+          setProgress(30, 'assets fetched');
+          break;
+
+        case 'raw_count':
+          animateNumber('stat-raw', msg.count);
+          break;
+
+        case 'finding':
+          const f = msg.data;
+          state.allFindings.push(f);
+          state.findings.push(f);
+          renderFinding(f, state.allFindings.length - 1);
+          updateFilterOptions();
+          toast(`🚨 Confirmed: ${f.secret_type} (${f.confidence}%)`, 'error', 6000);
+          appendLog(`CONFIRMED FINDING: ${f.secret_type} — confidence ${f.confidence}%`, 'ERROR');
+          break;
+
+        case 'finding_needs_review':
+          const nr = msg.data;
+          toast(`⚠️ NEEDS REVIEW: ${nr.secret_type} — AI validation failed, check manually`, 'warn', 10000);
+          appendLog(`NEEDS REVIEW (AI validation failed): ${nr.secret_type} in ${nr.source_url || nr.target_url} — ${nr.reason}`, 'ERROR');
+          break;
+
+        case 'scan_complete':
+          setScanningUI(false);
+          setProgress(100, 'complete');
+          state.totalScans++;
+          animateNumber('stat-scans', state.totalScans);
+          updateStats(msg.result || {});
+          const reviewCount = (msg.result?.needs_review_findings || []).length;
+          if (reviewCount > 0) {
+            toast(`Scan complete — ${state.allFindings.length} confirmed, ${reviewCount} need manual review`, 'warn', 8000);
+          } else {
+            toast(`Scan complete — ${state.allFindings.length} confirmed finding(s)`, 'success', 6000);
+          }
+          appendLog(`=== Scan complete in ${msg.result?.duration_seconds?.toFixed(2)}s ===`, 'SYS');
+
+          // Disconnect WS gracefully after a short delay
+          setTimeout(() => {
+            if (state.ws) state.ws.close();
+          }, 2000);
+          break;
+
+        case 'scan_cancelled':
+          setScanningUI(false);
+          setProgress(0, 'cancelled');
+          appendLog('Scan cancelled by user', 'WARN');
+          toast('Scan stopped', 'warn');
+          break;
+
+        case 'scan_error':
+          setScanningUI(false);
+          setProgress(0, 'error');
+          appendLog(`Scan error: ${msg.error}`, 'ERROR');
+          toast(`Scan failed: ${msg.error}`, 'error', 8000);
+          break;
+      }
+    }
+
+    // ── Start Scan ────────────────────────────────────────────────────────────
+    async function startScan() {
+      const url = $('target-input').value.trim();
+      if (!url) { toast('Please enter a target URL', 'warn'); return; }
+      if (!url.startsWith('http')) { toast('URL must begin with http:// or https://', 'warn'); return; }
+
+      clearFindings();
+      clearAssets();
+      clearConsole();
+      setProgress(0, '');
+      $('stage-text').textContent = '';
+
+      appendLog(`Starting scan for: ${url}`, 'INFO');
+      setScanningUI(true);
+
+      try {
+        const resp = await fetch('/api/scans', {
+          method: 'POST',
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            target_url: url,
+            crawl_pages: parseInt($('crawl-pages-input').value, 10) || 1,
+          }),
+        });
+
+        if (resp.status === 401) {
+          sessionStorage.removeItem('secretnode_api_key');
+          throw new Error('Invalid API key — refresh the page and re-enter it.');
+        }
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+          throw new Error(err.detail || 'API error');
+        }
+
+        const data = await resp.json();
+        state.scanId = data.scan_id;
+        $('scan-id-display').textContent = `ID: ${data.scan_id.slice(0, 8)}…`;
+        appendLog(`Scan queued — ID: ${data.scan_id}`, 'SYS');
+
+        connectWS(data.scan_id);
+
+      } catch (err) {
+        appendLog(`Failed to start scan: ${err.message}`, 'ERROR');
+        toast(`Error: ${err.message}`, 'error');
+        setScanningUI(false);
+      }
+    }
+    window.startScan = startScan;
+
+    // ── Stop Scan ─────────────────────────────────────────────────────────────
+    async function stopScan() {
+      if (!state.scanId) { setScanningUI(false); return; }
+      appendLog('Sending stop signal…', 'WARN');
+      try {
+        await fetch(`/api/scans/${state.scanId}/stop`, { method: 'POST', headers: apiHeaders() });
+        toast('Stop signal sent', 'warn');
+      } catch (err) {
+        appendLog(`Stop error: ${err.message}`, 'ERROR');
+      }
+    }
+    window.stopScan = stopScan;
+
+    // ── False Positive Suppression ──────────────────────────────────────────
+    async function suppressFinding(index, btnEl) {
+      const f = state.allFindings[index];
+      if (!f) return;
+      if (!confirm(`Mark this ${f.secret_type} finding as a FALSE POSITIVE?\n\nFuture scans of ${f.target_url} will silently skip it and never alert on it again.`)) {
+        return;
+      }
+      try {
+        const resp = await fetch('/api/findings/suppress', {
+          method: 'POST',
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            fingerprint: f.fingerprint,
+            target_url: f.target_url,
+            secret_type: f.secret_type,
+            source_url: f.source_url || f.target_url,
+            note: 'Marked from dashboard',
+          }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        toast(`Marked as false positive — won't re-alert on future scans`, 'success');
+        if (btnEl) {
+          btnEl.textContent = '✓ FP';
+          btnEl.disabled = true;
+          btnEl.style.opacity = '0.5';
+        }
+      } catch (err) {
+        toast(`Failed to suppress: ${err.message}`, 'error');
+      }
+    }
+    window.suppressFinding = suppressFinding;
+
+    // ── Report Export ──────────────────────────────────────────────────────
+    async function downloadReport(format) {
+      if (!state.scanId) { toast('No completed scan to export', 'warn'); return; }
+      try {
+        const resp = await fetch(`/api/scans/${state.scanId}/report?format=${format}`, {
+          headers: apiHeaders(),
+        });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          throw new Error(body.detail || `HTTP ${resp.status}`);
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const ext = ({ html: 'html', csv: 'csv', sarif: 'sarif', json: 'json' })[format] || 'json';
+        a.href = url;
+        a.download = `secretnode_report_${state.scanId.slice(0, 8)}.${ext}`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast(`${format.toUpperCase()} report downloaded`, 'success');
+      } catch (err) {
+        toast(`Report export failed: ${err.message}`, 'error');
+      }
+    }
+    window.downloadReport = downloadReport;
+
+    // ── Clear All ─────────────────────────────────────────────────────────────
+    window.clearAll = function() {
+      clearConsole();
+      clearAssets();
+      clearFindings();
+      setProgress(0, '');
+      $('stage-text').textContent = '';
+      $('scan-id-display').textContent = '';
+      $('stat-raw').textContent     = '0';
+      $('stat-assets').textContent  = '0';
+      $('stat-duration').textContent = '0s';
+      toast('Dashboard cleared', 'info');
+    };
+
+    // ── Enter key to scan ──────────────────────────────────────────────────────
+    $('target-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !state.scanning) startScan();
+    });
+
+    // ── Initial greeting ──────────────────────────────────────────────────────
+    setTimeout(() => {
+      appendLog('System ready. Enter a target URL and click START SCAN.', 'SYS');
+      appendLog('WebSocket will connect automatically when scan begins.', 'SYS');
+    }, 500);
+
+  })();
+  </script>
+</body>
+</html>

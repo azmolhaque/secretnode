@@ -1,0 +1,33 @@
+# Secrets & local config
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime data / SQLite
+backend/data/*.db
+backend/data/*.db-wal
+backend/data/*.db-shm
+*.sqlite3
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Reports / build artifacts
+*.sarif
+!.github/**/*.sarif
+dist/
+build/
