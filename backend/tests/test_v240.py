@@ -24,12 +24,26 @@ import pytest
 import scanner
 
 
+# Detection requires the candidate to clear the entropy gate. A raw random draw
+# occasionally lands below it (a 40-char hex string is only ~4% likely to dip under
+# 3.5), which used to flake these tests. Regenerate until the value is comfortably
+# above the threshold so the vectors are deterministic — the margin absorbs the small
+# entropy dilution from fixed prefixes (e.g. "sbp_", "ntn_").
+_ENTROPY_FLOOR = scanner.MIN_ENTROPY_THRESHOLD + 0.15
+
+
 def _rnd(n: int) -> str:
-    return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(n))
+    while True:
+        s = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(n))
+        if scanner.shannon_entropy(s) >= _ENTROPY_FLOOR:
+            return s
 
 
 def _hex(n: int) -> str:
-    return "".join(secrets.choice("0123456789abcdef") for _ in range(n))
+    while True:
+        s = "".join(secrets.choice("0123456789abcdef") for _ in range(n))
+        if scanner.shannon_entropy(s) >= _ENTROPY_FLOOR:
+            return s
 
 
 def _hits(body: str) -> set[str]:

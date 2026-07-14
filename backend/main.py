@@ -32,15 +32,15 @@ import uvicorn
 # On some platforms (ARM64 wheels, partial installs) it may be missing or broken —
 # fall back to the stdlib asyncio loop rather than crashing the whole server on import.
 try:
-    import uvloop
+    import uvloop  # noqa: F401 — presence gates the fast event loop selection below
     _HAS_UVLOOP = True
 except Exception:  # noqa: BLE001 — any import/runtime failure must degrade gracefully
-    uvloop = None
     _HAS_UVLOOP = False
 
 load_dotenv()
-if _HAS_UVLOOP:
-    uvloop.install()
+# We deliberately do NOT call uvloop.install() here: it is deprecated on Python
+# 3.12+, and uvicorn already selects the event loop itself via --loop (auto/uvloop),
+# so the speed-up is preserved without a module-level global side effect.
 
 from scanner import run_scan, ScanState
 from storage import (
