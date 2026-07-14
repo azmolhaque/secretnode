@@ -98,12 +98,17 @@ fi
 # C-extension — missing, which crashes the service silently). Importing the real
 # app module exercises the whole dependency graph the server needs.
 IMPORT_CHECK=$(cd "$SCRIPT_DIR/backend" && SECRETNODE_API_KEY=setup-probe "$VENV/bin/python" -c "
-import importlib, sys
-missing = [m for m in ('fastapi','uvicorn','httpx','websockets','bs4','lxml','aiosqlite','pydantic')
-           if importlib.util.find_spec(m) is None]
-if importlib.util.find_spec('google.genai') is None: missing.append('google-genai')
+import importlib.util, sys  # note: importlib.util must be imported explicitly
+mods = ('fastapi','uvicorn','httpx','websockets','bs4','lxml','aiosqlite','pydantic','google.genai')
+missing = []
+for m in mods:
+    try:
+        if importlib.util.find_spec(m) is None:
+            missing.append(m)
+    except Exception:
+        missing.append(m)
 if missing:
-    print('MISSING:' + ','.join(missing)); sys.exit(1)
+    print('MISSING: ' + ', '.join(missing)); sys.exit(1)
 import main  # noqa: F401 — importing the app surfaces any startup/import error
 print('OK')
 " 2>&1) || {
