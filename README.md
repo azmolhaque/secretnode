@@ -3,12 +3,12 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-82%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-111%20passing-brightgreen)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
 Passive Attack Surface Management scanner for detecting credential leaks in public-facing infrastructure.
-Pipeline: **spider → regex (44 patterns) + base64 decode → entropy filter → AI validation (Gemini) → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV** report export. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
+Pipeline: **browser-like spider (+ source-map mining) → regex (54 patterns) + base64 decode → entropy filter → AI validation (Gemini) → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV** report export. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
@@ -59,6 +59,15 @@ Pipeline: **spider → regex (44 patterns) + base64 decode → entropy filter �
 > - **CLI (`backend/cli.py`) + GitHub Action (`action.yml`)** — scan and emit SARIF from CI with `--fail-on-findings` as a build gate.
 > - **Registry now 44 patterns** (added Slack app-level, GitHub server/refresh, OpenAI service-account, New Relic, Grafana, HCP Terraform).
 > - **Suite grew 58 → 82 tests.**
+
+> **v2.4.0 — Field-hardening: WAF-resilient fetching, deeper coverage, current-gen detectors**
+> Driven by real Pi-5 dashboard runs against live targets that exposed three gaps.
+> - **Browser-like HTTP client (headline fix)** — a `SecretNode-bot` User-Agent got an instant **HTTP 403** from Cloudflare/WAF-fronted sites, so the scan couldn't even fetch the root. Now presents a current Chrome fingerprint (UA + Client-Hints + `Sec-Fetch-*` + HTTP/2) and, on a WAF challenge, **retries with a rotated fingerprint** and prints a diagnostic naming the likely cause. Resilience for *authorized* testing — scope, SSRF guard, passive-only behaviour and the authorization gate are unchanged (`SECRETNODE_USER_AGENT` to override).
+> - **Source-map mining** — declared `//# sourceMappingURL=` maps (`.js.map`) are fetched and scanned. Source maps carry the **un-minified original source** (comments, endpoints, hard-coded secrets stripped from the shipped bundle). `FOLLOW_SOURCE_MAPS` / `MAX_SOURCE_MAPS`.
+> - **Broader discovery** — `<script type="module">`, `<link rel="modulepreload">` and `preload as="script">` are now discovered; a **content-type gate** skips binary assets early.
+> - **10 current-generation detectors** — Supabase (2), Sentry DSN, Linear, Notion, Doppler, PostHog, Figma, Cloudflare (2026 prefixes), and Google Cloud **service-account JSON** keys. **Registry now 54 patterns.**
+> - **Dashboard** — live-verification `VERIFY` toggle; a clean post-scan WS close shows `WS: IDLE` (not a red error) and a mid-scan drop auto-reconnects once; the assets panel reflects every collected asset.
+> - **Suite grew 82 → 111 tests.** New optional deps `h2` + `brotli` degrade gracefully if absent.
 
 ---
 
@@ -121,7 +130,7 @@ Pipeline: **spider → regex (44 patterns) + base64 decode → entropy filter �
 secretnode/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + WebSocket + static server + auth/SSRF guards
-│   ├── scanner.py           # Async scan engine (44 patterns, entropy, base64, Gemini, Discord)
+│   ├── scanner.py           # Async scan engine (54 patterns, source maps, entropy, base64, Gemini, Discord)
 │   ├── verifier.py          # Optional live credential verification (off by default)
 │   ├── cli.py               # CLI entrypoint (scan → SARIF/JSON/CSV/HTML; CI gate)
 │   ├── storage.py           # SQLite persistence: scan history + false-positive suppression
@@ -211,7 +220,7 @@ http://<raspberry-pi-ip>:8000
 | `scan_start` | `{scan_id, target_url}` | Scan initiated |
 | `log` | `{level, message}` | Terminal log line |
 | `status` | `{stage}` | Pipeline stage change |
-| `assets_found` | `{count, urls[]}` | JS assets discovered |
+| `assets_found` | `{count, urls[]}` | Assets collected (JS + source maps) |
 | `raw_count` | `{count}` | Raw regex candidates |
 | `finding` | `{data: ValidatedFinding}` | Confirmed secret |
 | `scan_complete` | `{scan_id, result}` | Scan finished |
@@ -383,3 +392,19 @@ All of these are now **environment variables** (set them in `.env`) — no code 
 - To reduce Gemini API costs, set `MIN_ENTROPY_THRESHOLD=4.0`.
 - To scan deeper, set `CONCURRENCY_LIMIT=40` (watch RAM with `htop`).
 - See `.env.example` for the full list of tunables.
+
+### Fetching & coverage (v2.4.0)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SECRETNODE_USER_AGENT` | *(unset → real Chrome UA)* | Force a specific User-Agent (e.g. a client-approved test-agent string). Unset = current-Chrome fingerprint with automatic rotation on a WAF challenge. |
+| `FOLLOW_SOURCE_MAPS` | `true` | Follow declared `//# sourceMappingURL=` maps (`.js.map`) and scan their un-minified original source. |
+| `MAX_SOURCE_MAPS` | `40` | Cap on source maps fetched per scan. |
+| `SCOPE_SAME_DOMAIN` | `true` | Keep asset/source-map discovery on the target's own registrable domain. |
+
+> **Why a browser User-Agent?** A `SecretNode-bot` agent gets an instant HTTP 403 from
+> Cloudflare/WAF-fronted sites, so an authorized scan of a target *you own* couldn't reach the
+> same surface an attacker would. Presenting a normal browser fingerprint is standard for
+> security scanners (Burp, ZAP, nuclei all do it) and is resilience for **authorized** testing —
+> the SSRF guard, same-domain scope, passive-only behaviour and the authorization gate
+> (see [`SECURITY.md`](SECURITY.md)) are all unchanged.

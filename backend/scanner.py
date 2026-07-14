@@ -457,6 +457,78 @@ SECRET_PATTERNS: list[SecretPattern] = [
         description="HCP Terraform (Terraform Cloud) API token",
         severity="CRITICAL",
     ),
+    # ── v2.4.0: current-generation providers (GitHub/GitGuardian 2026 patterns) ──
+    SecretPattern(
+        name="Supabase Access Token",
+        regex=re.compile(r"\b(sbp_[a-f0-9]{40})\b"),
+        description="Supabase personal/management access token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Supabase Secret Key",
+        regex=re.compile(r"\b(sb_secret_[A-Za-z0-9_\-]{24,})\b"),
+        description="Supabase service-role secret key (service_role replacement)",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Sentry DSN",
+        regex=re.compile(
+            r"(https://[0-9a-f]{32}@(?:o\d+\.ingest\.)?[a-z0-9.\-]*sentry\.io/\d+)"
+        ),
+        description="Sentry DSN (allows event/error injection into the project)",
+        severity="MEDIUM",
+    ),
+    SecretPattern(
+        name="Linear API Key",
+        regex=re.compile(r"\b(lin_api_[A-Za-z0-9]{40})\b"),
+        description="Linear API key",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Notion Integration Token",
+        regex=re.compile(r"\b((?:ntn_|secret_)[A-Za-z0-9]{43,50})\b"),
+        description="Notion internal integration token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Doppler Token",
+        regex=re.compile(r"\b(dp\.(?:pt|st|ct|sa|scim|audit)\.[A-Za-z0-9]{40,44})\b"),
+        description="Doppler service/personal/CLI token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="PostHog Project API Key",
+        regex=re.compile(r"\b(ph[cx]_[A-Za-z0-9]{43})\b"),
+        description="PostHog project API key",
+        severity="MEDIUM",
+    ),
+    SecretPattern(
+        name="Figma Personal Access Token",
+        regex=re.compile(r"\b(figd_[A-Za-z0-9_\-]{40,})\b"),
+        description="Figma personal access token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Cloudflare API Token",
+        regex=re.compile(r"\b((?:cfat|cfut|cfk)_[A-Za-z0-9_\-]{32,})\b"),
+        description="Cloudflare API token (2026 prefixed format)",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="GCP Service Account Key (JSON)",
+        regex=re.compile(
+            r'"private_key_id"\s*:\s*"([0-9a-f]{40})"'
+        ),
+        description="Google Cloud service-account JSON key (private_key_id)",
+        severity="CRITICAL",
+        cwe="CWE-798",
+        remediation=(
+            "A leaked service-account JSON key grants API access as that "
+            "service account. Disable/delete the key in the GCP console "
+            "immediately, rotate to a new key stored server-side, and audit "
+            "the account's IAM roles for least privilege."
+        ),
+    ),
 ]
 
 # Fast name -> pattern lookup (severity / CWE / remediation metadata).
@@ -507,20 +579,79 @@ def redact_snippet(snippet: str, secret_value: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP Client
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# Real-world lesson (v2.4.0): a "compatible; SecretNode-bot" User-Agent gets an
+# instant HTTP 403 from Cloudflare/Akamai/AWS-WAF-fronted sites, so the scanner
+# could not even fetch the root of a WAF-protected target you legitimately own.
+# An authorized ASM scanner must look like a normal browser to reach the same
+# surface an attacker would — every serious scanner (Burp, ZAP, nuclei) ships a
+# browser UA. We present a current Chrome fingerprint (UA + Client-Hints +
+# Sec-Fetch metadata + HTTP/2) and rotate the UA on a WAF challenge. This is
+# resilience for authorized testing, not evasion: scope, SSRF guard, passive-only
+# behaviour and the authorization gate (SECURITY.md) are unchanged.
 
-def build_client() -> httpx.AsyncClient:
+# A small pool of current, real desktop browser User-Agents. On a WAF block we
+# retry with the next one before giving up.
+_USER_AGENTS: tuple[str, ...] = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0",
+)
+# Operator override (e.g. to match a client's approved test-agent string).
+_UA_OVERRIDE = os.environ.get("SECRETNODE_USER_AGENT", "").strip()
+
+# HTTP status codes that usually mean "a WAF/CDN edge challenged this automated
+# request" rather than "this resource is truly gone" — worth one more try with a
+# different browser fingerprint before we treat the asset as unreachable.
+_WAF_BLOCK_CODES = frozenset({401, 403, 406, 429, 503})
+
+
+def _browser_headers(user_agent: str) -> dict[str, str]:
+    """A realistic modern-Chrome header set. Client-Hints + Sec-Fetch-* are what
+    modern WAFs look for; sending them lets an authorized scan reach a
+    WAF-protected target instead of eating an immediate 403."""
+    is_chrome = "Chrome/" in user_agent
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "application/javascript,text/javascript,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+    }
+    if is_chrome:
+        headers.update({
+            "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not;A=Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        })
+    return headers
+
+
+def build_client(user_agent: str | None = None) -> httpx.AsyncClient:
+    ua = _UA_OVERRIDE or user_agent or _USER_AGENTS[0]
+    # HTTP/2 makes the client behave like a real browser to CDNs; fall back to
+    # HTTP/1.1 transparently if the optional `h2` package isn't installed.
+    try:
+        import h2  # noqa: F401
+        http2 = True
+    except Exception:  # pragma: no cover - env without h2
+        http2 = False
     return httpx.AsyncClient(
         timeout=httpx.Timeout(FETCH_TIMEOUT, connect=10.0),
         follow_redirects=True,
+        http2=http2,
         limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (compatible; SecretNode/2.0; "
-                "+https://github.com/internal/secretnode)"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/javascript,*/*;q=0.9",
-            "Accept-Language": "en-US,en;q=0.5",
-        },
+        headers=_browser_headers(ua),
         verify=True,
     )
 
@@ -528,6 +659,22 @@ def build_client() -> httpx.AsyncClient:
 # ─────────────────────────────────────────────────────────────────────────────
 # Resilient Fetch
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _looks_scannable(content_type: str) -> bool:
+    """True for text-ish content worth scanning. Binary assets (images, fonts,
+    archives) are skipped early to save bandwidth/CPU on the Pi."""
+    if not content_type:
+        return True  # unknown → let it through; body-size cap still applies
+    ct = content_type.split(";", 1)[0].strip().lower()
+    if ct.startswith("text/"):
+        return True
+    return ct in {
+        "application/javascript", "application/x-javascript", "text/javascript",
+        "application/json", "application/manifest+json", "application/ld+json",
+        "application/xml", "application/xhtml+xml", "image/svg+xml",
+        "application/octet-stream", "",
+    }
+
 
 async def fetch_url(
     client: httpx.AsyncClient,
@@ -537,9 +684,14 @@ async def fetch_url(
 ) -> tuple[str, str | None]:
     """
     Fetch a URL with retry + exponential backoff.
-    Respects 429 Retry-After headers. Returns (url, body) or (url, None).
+
+    Resilience for authorized testing (v2.4.0): on a WAF/CDN challenge
+    (401/403/406/429/503) we retry with a different browser fingerprint before
+    giving up, and emit a diagnostic that names the likely cause instead of a
+    bare "failed". Respects 429 Retry-After. Returns (url, body) or (url, None).
     """
     async with semaphore:
+        waf_block_status: int | None = None
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
                 if broadcast:
@@ -548,7 +700,12 @@ async def fetch_url(
                         "level": "INFO",
                         "message": f"Fetching [{attempt}/{RETRY_ATTEMPTS}]: {url}",
                     })
-                response = await client.get(url)
+                # Rotate the browser fingerprint on retries after a WAF block —
+                # some edges let a different UA through.
+                extra_headers = None
+                if attempt > 1 and waf_block_status and not _UA_OVERRIDE:
+                    extra_headers = _browser_headers(_USER_AGENTS[(attempt - 1) % len(_USER_AGENTS)])
+                response = await client.get(url, headers=extra_headers)
 
                 if response.status_code == 429:
                     retry_after = float(
@@ -560,10 +717,37 @@ async def fetch_url(
                             "level": "WARN",
                             "message": f"429 rate-limited on {url} — backing off {retry_after:.0f}s",
                         })
-                    await asyncio.sleep(retry_after)
+                    await asyncio.sleep(min(retry_after, 30.0))
                     continue
 
-                if response.status_code == 404:
+                if response.status_code in (404, 410):
+                    return url, None
+
+                if response.status_code in _WAF_BLOCK_CODES:
+                    waf_block_status = response.status_code
+                    server = response.headers.get("server", "")
+                    hint = f" (server: {server})" if server else ""
+                    if attempt < RETRY_ATTEMPTS:
+                        if broadcast:
+                            await broadcast({
+                                "type": "log", "level": "WARN",
+                                "message": (
+                                    f"HTTP {response.status_code} on {url}{hint} — likely a "
+                                    f"WAF/CDN challenge; retrying with a different browser fingerprint."
+                                ),
+                            })
+                        await asyncio.sleep(RETRY_BACKOFF_BASE ** attempt)
+                        continue
+                    if broadcast:
+                        await broadcast({
+                            "type": "log", "level": "ERROR",
+                            "message": (
+                                f"HTTP {response.status_code} for {url}{hint} — blocked by a "
+                                f"WAF/CDN after {RETRY_ATTEMPTS} attempts. The resource exists but "
+                                f"denies automated access. For a target you own, allowlist the "
+                                f"scanner's source IP or set SECRETNODE_USER_AGENT to an approved value."
+                            ),
+                        })
                     return url, None
 
                 response.raise_for_status()
@@ -578,7 +762,14 @@ async def fetch_url(
                         })
                     return url, None
 
-                return url, response.text
+                if not _looks_scannable(response.headers.get("content-type", "")):
+                    return url, None
+
+                # Guard against a chunked/undeclared body that exceeds the cap.
+                text = response.text
+                if len(text) > MAX_ASSET_BYTES:
+                    return url, text[:MAX_ASSET_BYTES]
+                return url, text
 
             except httpx.TimeoutException:
                 msg = f"Timeout (attempt {attempt}/{RETRY_ATTEMPTS}): {url}"
@@ -618,9 +809,27 @@ async def fetch_url(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SCRIPT_SRC_RE  = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
-_LINK_HREF_JS_RE = re.compile(r'<link[^>]+href=["\']([^"\']+\.js)["\']', re.IGNORECASE)
+# <link href=…> that is script-ish: modulepreload / preload as=script, or a .js file.
+_LINK_JS_RE = re.compile(
+    r'<link\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>',
+    re.IGNORECASE,
+)
+_LINK_IS_SCRIPT_RE = re.compile(
+    r'\brel=["\']?(?:modulepreload|preload)\b|\bas=["\']?script\b|href=["\'][^"\']+\.js["\']',
+    re.IGNORECASE,
+)
+# //# sourceMappingURL=app.js.map  (or the legacy //@ form, or a /*# … */ block)
+_SOURCE_MAP_RE = re.compile(
+    r'(?://[#@]|/\*[#@])\s*sourceMappingURL\s*=\s*([^\s"\'*]+)',
+    re.IGNORECASE,
+)
 
 SCOPE_SAME_DOMAIN = os.environ.get("SCOPE_SAME_DOMAIN", "true").lower() == "true"
+# Whether to follow declared source maps (.js.map) and scan their un-minified
+# original source. Source maps routinely leak API keys, endpoints and comments
+# that are stripped from the shipped bundle — a well-established ASM technique.
+FOLLOW_SOURCE_MAPS = os.environ.get("FOLLOW_SOURCE_MAPS", "true").lower() == "true"
+MAX_SOURCE_MAPS = _env_int("MAX_SOURCE_MAPS", 40)
 
 
 def _same_scope(base_host: str, candidate_host: str) -> bool:
@@ -632,25 +841,60 @@ def _same_scope(base_host: str, candidate_host: str) -> bool:
     return candidate_host == base_host or candidate_host.endswith("." + base_host)
 
 
+def _accept_asset(raw: str, base_url: str, base_host: str, seen: set[str]) -> str | None:
+    """Absolutise + scope-check a discovered asset URL. Returns the absolute URL
+    to keep, or None to skip (already seen, out of scope, or non-http)."""
+    raw = raw.strip()
+    if not raw or raw.startswith(("data:", "blob:")):
+        return None
+    absolute = urljoin(base_url, raw)
+    p = urlparse(absolute)
+    if p.scheme not in ("http", "https") or absolute in seen:
+        return None
+    if SCOPE_SAME_DOMAIN and not _same_scope(base_host, p.hostname or ""):
+        return None
+    seen.add(absolute)
+    return absolute
+
+
 def extract_js_urls(html: str, base_url: str) -> list[str]:
-    """Absolutise all JS asset URLs discovered in the HTML. By default only
-    keeps assets on the same domain as base_url (SCOPE_SAME_DOMAIN=true) so
-    the scanner doesn't fan out to unrelated third-party hosts."""
+    """Absolutise all JS asset URLs discovered in the HTML: <script src>,
+    <script type=module src>, and script-ish <link> tags (modulepreload,
+    preload as=script, or an explicit .js href). By default only keeps assets
+    on the same domain as base_url (SCOPE_SAME_DOMAIN=true) so the scanner
+    doesn't fan out to unrelated third-party hosts."""
     seen: set[str] = set()
     result: list[str] = []
     base_host = urlparse(base_url).hostname or ""
-    for pattern in (_SCRIPT_SRC_RE, _LINK_HREF_JS_RE):
-        for m in pattern.finditer(html):
-            raw = m.group(1).strip()
-            if not raw or raw.startswith("data:"):
-                continue
-            absolute = urljoin(base_url, raw)
-            p = urlparse(absolute)
-            if p.scheme not in ("http", "https") or absolute in seen:
-                continue
-            if SCOPE_SAME_DOMAIN and not _same_scope(base_host, p.hostname or ""):
-                continue
-            seen.add(absolute)
+    for m in _SCRIPT_SRC_RE.finditer(html):
+        absolute = _accept_asset(m.group(1), base_url, base_host, seen)
+        if absolute:
+            result.append(absolute)
+    for m in _LINK_JS_RE.finditer(html):
+        if not _LINK_IS_SCRIPT_RE.search(m.group(0)):
+            continue
+        absolute = _accept_asset(m.group(1), base_url, base_host, seen)
+        if absolute:
+            result.append(absolute)
+    return result
+
+
+def extract_source_map_urls(js_body: str, js_url: str) -> list[str]:
+    """Find declared source-map URLs (//# sourceMappingURL=…) in a JS asset and
+    absolutise them, keeping only same-scope, non-inline maps. Source maps
+    routinely contain the un-minified original source — comments, endpoints and
+    hard-coded secrets stripped from the shipped bundle."""
+    if not FOLLOW_SOURCE_MAPS:
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    base_host = urlparse(js_url).hostname or ""
+    for m in _SOURCE_MAP_RE.finditer(js_body):
+        raw = m.group(1).strip()
+        if raw.startswith("data:"):   # inline base64 map — already inside js_body
+            continue
+        absolute = _accept_asset(raw, js_url, base_host, seen)
+        if absolute:
             result.append(absolute)
     return result
 
@@ -750,7 +994,11 @@ async def spider_target(
             await broadcast({
                 "type": "log",
                 "level": "ERROR",
-                "message": f"Failed to fetch root: {target_url}",
+                "message": (
+                    f"Could not fetch the target root ({target_url}). See the reason above — "
+                    f"commonly a WAF/CDN block (HTTP 403/503), an unresolved host, or a timeout. "
+                    f"The scan cannot proceed without the root document."
+                ),
             })
         return []
 
@@ -788,20 +1036,48 @@ async def spider_target(
             "level": "INFO",
             "message": f"Discovered {len(js_urls)} JS asset(s) across {len(html_pages)} page(s)",
         })
-        await broadcast({
-            "type": "assets_found",
-            "count": len(js_urls),
-            "urls": js_urls[:50],  # cap for WS payload size
-        })
 
+    js_bodies: list[tuple[str, str]] = []
     if js_urls:
         tasks = [fetch_url(client, u, semaphore, broadcast) for u in js_urls]
         fetched = await asyncio.gather(*tasks, return_exceptions=False)
         for js_url, js_body in fetched:
             if js_body:
                 assets.append((js_url, js_body))
+                js_bodies.append((js_url, js_body))
 
+    # ── Follow declared source maps (.js.map) for un-minified original source ──
+    map_urls: list[str] = []
+    if FOLLOW_SOURCE_MAPS and js_bodies:
+        seen_maps: set[str] = set()
+        for js_url, js_body in js_bodies:
+            for mu in extract_source_map_urls(js_body, js_url):
+                if mu not in seen_maps:
+                    seen_maps.add(mu)
+                    map_urls.append(mu)
+        map_urls = map_urls[:MAX_SOURCE_MAPS]
+        if map_urls:
+            if broadcast:
+                await broadcast({
+                    "type": "log", "level": "INFO",
+                    "message": f"Following {len(map_urls)} source map(s) for original source",
+                })
+            map_tasks = [fetch_url(client, u, semaphore, broadcast) for u in map_urls]
+            fetched_maps = await asyncio.gather(*map_tasks, return_exceptions=False)
+            for map_url, map_body in fetched_maps:
+                if map_body:
+                    assets.append((map_url, map_body))
+
+    # Broadcast every non-HTML asset we actually collected (JS + source maps),
+    # so the dashboard's "Discovered Assets" panel reflects real coverage even
+    # when a target ships a single bundle.
     if broadcast:
+        collected = [u for (u, _b) in assets if u not in visited_pages]
+        await broadcast({
+            "type": "assets_found",
+            "count": len(collected),
+            "urls": collected[:50],  # cap for WS payload size
+        })
         await broadcast({
             "type": "log",
             "level": "INFO",
@@ -1089,13 +1365,13 @@ async def dispatch_discord(
     redacted = redact_secret(raw.raw_match)
 
     payload = {
-        "username": "SecretNode v2.0",
+        "username": "SecretNode v2.4.0",
         "avatar_url": "https://cdn-icons-png.flaticon.com/512/2092/2092757.png",
         "embeds": [{
             "title": f"🚨 Secret Exposed: {raw.secret_type}",
             "color": color,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "footer": {"text": "SecretNode v2.0 — ASM Scanner"},
+            "footer": {"text": "SecretNode v2.4.0 — ASM Scanner"},
             "fields": [
                 {"name": "🎯 Target",        "value": f"`{raw.target_url}`",      "inline": False},
                 {"name": "📄 Source Asset",  "value": f"`{raw.source_url}`",      "inline": False},

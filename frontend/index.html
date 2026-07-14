@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SecretNode v2.0 — ASM Scanner</title>
+  <title>SecretNode v2.4.0 — ASM Scanner</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -468,7 +468,7 @@
       </div>
       <div>
         <div class="header-title">SecretNode</div>
-        <div style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.0 — ATTACK SURFACE MONITOR</div>
+        <div style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.4.0 — ATTACK SURFACE MONITOR</div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:24px;">
@@ -522,6 +522,10 @@
             style="width:44px;background:transparent;border:none;color:#68d391;font-family:'Share Tech Mono';font-size:12px;text-align:center;"
           />
         </div>
+        <label id="verify-toggle" style="border:1px solid #1a2e1f;border-radius:3px;padding:10px 12px;display:flex;align-items:center;gap:6px;background:#080c0a;cursor:pointer;user-select:none;" title="Live-verify confirmed findings against each provider's own API (read-only). Authorized use only — uses a discovered credential to check whether it is still active.">
+          <input type="checkbox" id="verify-input" style="accent-color:#68d391;width:13px;height:13px;cursor:pointer;" />
+          <span style="color:#4a7c59;font-family:'Share Tech Mono';font-size:9px;letter-spacing:0.05em;">VERIFY</span>
+        </label>
         <button id="btn-scan" class="btn-scan" onclick="startScan()">
           ▶ START SCAN
         </button>
@@ -583,7 +587,7 @@
           </div>
         </div>
         <div id="console-output" style="padding:12px 14px;flex:1;">
-          <div class="log-SYS">SecretNode v2.0 initialised. Awaiting target...<span class="cursor"></span></div>
+          <div class="log-SYS">SecretNode v2.4.0 initialised. Awaiting target...<span class="cursor"></span></div>
         </div>
       </div>
 
@@ -663,7 +667,7 @@
     <!-- ── FOOTER ── -->
     <div style="margin-top:16px;padding:10px 0;border-top:1px solid #1a2e1f;display:flex;justify-content:space-between;align-items:center;">
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;letter-spacing:0.1em;">
-        SECRETNODE v2.0 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
+        SECRETNODE v2.4.0 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
       </span>
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;">
         ⚠ FOR AUTHORIZED SECURITY TESTING ONLY
@@ -1090,10 +1094,20 @@
       state.ws.onclose = () => {
         state.wsConnected = false;
         clearInterval(state.pingInterval);
-        $('ws-dot').className = 'status-dot idle';
-        $('ws-status').innerHTML = '<span class="status-dot idle" id="ws-dot"></span>WS: DISCONNECTED';
+        // A clean close after a finished scan is normal — don't alarm the operator.
+        // Only an unexpected mid-scan drop is worth a warning.
         if (state.scanning) {
-          appendLog('WebSocket disconnected — scan may still be running server-side', 'WARN');
+          $('ws-dot').className = 'status-dot idle';
+          $('ws-status').innerHTML = '<span class="status-dot idle" id="ws-dot"></span>WS: DROPPED';
+          appendLog('WebSocket dropped mid-scan — reconnecting…', 'WARN');
+          // Auto-reconnect once if the scan is still in progress server-side.
+          if (state.scanId && !state.wsReconnected) {
+            state.wsReconnected = true;
+            setTimeout(() => { if (state.scanning) connectWS(state.scanId); }, 1500);
+          }
+        } else {
+          $('ws-dot').className = 'status-dot idle';
+          $('ws-status').innerHTML = '<span class="status-dot idle" id="ws-dot"></span>WS: IDLE';
         }
       };
     }
@@ -1194,6 +1208,7 @@
       $('stage-text').textContent = '';
 
       appendLog(`Starting scan for: ${url}`, 'INFO');
+      state.wsReconnected = false;   // allow one auto-reconnect for this scan
       setScanningUI(true);
 
       try {
@@ -1203,6 +1218,7 @@
           body: JSON.stringify({
             target_url: url,
             crawl_pages: parseInt($('crawl-pages-input').value, 10) || 1,
+            verify: $('verify-input')?.checked || false,
           }),
         });
 

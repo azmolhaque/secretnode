@@ -3,6 +3,44 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.4.0] — Field-hardening: WAF-resilient fetching, deeper coverage, current-gen detectors
+
+Driven by real dashboard runs on a Raspberry Pi 5 against live targets, where three
+gaps surfaced: WAF-fronted sites returned an instant **HTTP 403** so the scan could not
+even fetch the root; coverage was **thin** (only linked `.js` files were mined); and the
+UI's post-scan WebSocket close looked like an error.
+
+### Added
+- **Source-map mining** — declared `//# sourceMappingURL=` maps (`.js.map`) are now fetched
+  and scanned. Source maps carry the **un-minified original source** — comments, endpoints
+  and hard-coded secrets stripped from the shipped bundle — a well-established ASM technique
+  that meaningfully deepens coverage. (`FOLLOW_SOURCE_MAPS`, `MAX_SOURCE_MAPS`.)
+- **Broader asset discovery** — `<script type="module">`, `<link rel="modulepreload">` and
+  `<link rel="preload" as="script">` are now discovered in addition to classic `<script src>`.
+- **10 current-generation detectors** — Supabase (access token + `sb_secret_`), Sentry DSN,
+  Linear, Notion (`ntn_`/`secret_`), Doppler, PostHog, Figma, Cloudflare (2026 `cfat_`/`cfut_`/`cfk_`),
+  and Google Cloud **service-account JSON** keys (`private_key_id`). Registry now **54 patterns**.
+- **Live-verification toggle in the dashboard** — the existing opt-in `verify` path now has a
+  `VERIFY` checkbox in the UI (previously only reachable via the API/CLI).
+- **Content-type gate** — binary assets (images, fonts, video) are skipped early, saving
+  bandwidth and CPU on the Pi.
+
+### Changed
+- **Browser-like HTTP client (the headline fix)** — replaced the `SecretNode-bot` User-Agent
+  with a current Chrome fingerprint (UA + Client-Hints + `Sec-Fetch-*` + HTTP/2). On a WAF/CDN
+  challenge (401/403/406/429/503) the fetcher now **retries with a rotated fingerprint** and
+  emits a diagnostic that names the likely cause, instead of giving up on the first 403. This
+  is resilience for **authorized** testing — scope, SSRF guard, passive-only behaviour and the
+  authorization gate are unchanged. Override with `SECRETNODE_USER_AGENT`.
+- **Dashboard WebSocket UX** — a clean post-scan close now shows `WS: IDLE` (not a red
+  `DISCONNECTED`); only an unexpected mid-scan drop warns and auto-reconnects once.
+- **Discovered-assets panel** now reflects every collected asset (JS + source maps), not just
+  the linked `.js` list — so the panel is no longer empty for single-bundle targets.
+- Test suite grown **82 → 111** (WAF-retry, source-maps, module/preload discovery, content-type
+  gate, browser client, 10 new detectors). Ruff clean.
+- New optional dependencies: `h2` (HTTP/2) and `brotli` (br decompression); both degrade
+  gracefully if absent.
+
 ## [2.3.0] — ASM-industry alignment: verification-first & CI-native
 
 Informed by 2025–2026 ASM / secret-scanning practice, where **verification-first**

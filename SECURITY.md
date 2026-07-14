@@ -46,5 +46,5 @@ acknowledge reports within a few days and will credit reporters who wish to be n
 
 | Version | Supported |
 |---------|-----------|
-| 2.3.x   | ✅ |
-| < 2.3   | ❌ |
+| 2.4.x   | ✅ |
+| < 2.4   | ❌ |
