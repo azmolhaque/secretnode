@@ -23,12 +23,15 @@ from urllib.parse import urljoin, urlparse
 import httpx
 import google.generativeai as genai
 
+import verifier
+
 logger = logging.getLogger("secretnode.scanner")
 
 # ── Environment ────────────────────────────────────────────────────────────────
 GEMINI_API_KEY: str        = os.environ.get("GEMINI_API_KEY", "")
 DISCORD_WEBHOOK_URL: str   = os.environ.get("DISCORD_WEBHOOK_URL", "")
 GEMINI_MODEL: str          = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+VERIFY_SECRETS: bool       = os.environ.get("VERIFY_SECRETS", "false").lower() == "true"
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -120,6 +123,7 @@ class ValidatedFinding:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     is_new: bool = True   # set False by run_scan if this fingerprint was seen in a prior scan
+    verified: str = "disabled"  # live-verification status: verified/unverified/unsupported/disabled
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +141,7 @@ class ValidatedFinding:
             "found_at":       self.raw.found_at,
             "validated_at":   self.validated_at,
             "is_new":         self.is_new,
+            "verified":       self.verified,
             "severity":       self._meta().severity,
             "cwe":            self._meta().cwe,
             "remediation":    self._meta().remediation,
@@ -414,6 +419,43 @@ SECRET_PATTERNS: list[SecretPattern] = [
             "Revoke this PGP key, generate a new keypair, and never commit "
             "private key material to a public asset or repository."
         ),
+    ),
+    # ── v2.3.0: additional modern detectors ────────────────────────────────
+    SecretPattern(
+        name="Slack App-Level Token",
+        regex=re.compile(r"\b(xapp-[0-9]-[A-Z0-9]+-[0-9]+-[a-f0-9]{32,})\b"),
+        description="Slack app-level token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="GitHub Server/Refresh Token",
+        regex=re.compile(r"\b((?:ghs|ghr|ghu)_[A-Za-z0-9]{36})\b"),
+        description="GitHub server-to-server / refresh / user-to-server token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="OpenAI Service Account Key",
+        regex=re.compile(r"\b(sk-svcacct-[A-Za-z0-9_\-]{20,})\b"),
+        description="OpenAI service-account API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="New Relic API Key",
+        regex=re.compile(r"\b(NRAK-[A-Z0-9]{27}|NRAA-[a-f0-9]{27})\b"),
+        description="New Relic user / admin API key",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Grafana Service Account Token",
+        regex=re.compile(r"\b(glsa_[A-Za-z0-9]{32}_[a-f0-9]{8})\b"),
+        description="Grafana service-account token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Terraform Cloud Token",
+        regex=re.compile(r"\b([a-z0-9]{14}\.atlasv1\.[A-Za-z0-9_\-]{60,})\b"),
+        description="HCP Terraform (Terraform Cloud) API token",
+        severity="CRITICAL",
     ),
 ]
 
@@ -773,14 +815,49 @@ async def spider_target(
 # Regex Secret Extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_secrets(
-    scan_id: str,
-    target_url: str,
-    source_url: str,
-    text: str,
+# ── Accuracy filters (v2.3.0): example/placeholder allowlist + base64 decoding ──
+_KNOWN_EXAMPLE_SECRETS = frozenset({
+    "AKIAIOSFODNN7EXAMPLE",   # AWS's official documentation example key
+})
+_PLACEHOLDER_RE = re.compile(
+    r"(?i)(your[_-]?(?:api|key|token|secret|id)|placeholder|changeme|"
+    r"redacted|x{8,}|0{8,}|<[^>]{2,}>)"
+)
+_B64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
+_MAX_B64_BLOBS = 200
+
+
+def is_benign_placeholder(value: str) -> bool:
+    """True if a matched value is a known documentation example or an obvious
+    placeholder. Filtering these out is a standard false-positive-reduction step."""
+    return value in _KNOWN_EXAMPLE_SECRETS or bool(_PLACEHOLDER_RE.search(value))
+
+
+def _decode_base64_blobs(text: str) -> list[str]:
+    """Decode base64-looking blobs so the regex pass can also inspect secrets
+    hidden inside encoded strings (a technique used by modern scanners)."""
+    import base64
+    out: list[str] = []
+    for m in _B64_BLOB_RE.finditer(text):
+        if len(out) >= _MAX_B64_BLOBS:
+            break
+        blob = m.group(0)
+        if len(blob) % 4:
+            continue
+        try:
+            decoded = base64.b64decode(blob, validate=True)
+            s = decoded.decode("utf-8")
+        except Exception:
+            continue
+        if len(s) >= 8 and s.isprintable():
+            out.append(s)
+    return out
+
+
+def _scan_text(
+    scan_id: str, target_url: str, source_url: str, text: str, decoded: bool = False,
 ) -> list[RawFinding]:
     findings: list[RawFinding] = []
-
     for pattern in SECRET_PATTERNS:
         for match in pattern.regex.finditer(text):
             raw_value = (
@@ -788,15 +865,16 @@ def extract_secrets(
                 if match.lastindex and match.lastindex >= 1
                 else match.group(0)
             )
-
+            if is_benign_placeholder(raw_value):
+                continue
             entropy = shannon_entropy(raw_value)
             if not passes_entropy_check(raw_value):
                 continue
-
             start = max(0, match.start() - CONTEXT_WINDOW_CHARS)
             end   = min(len(text), match.end() + CONTEXT_WINDOW_CHARS)
             snippet = text[start:end].replace("\n", " ").strip()
-
+            if decoded:
+                snippet = "[base64-decoded] " + snippet
             findings.append(RawFinding(
                 scan_id=scan_id,
                 target_url=target_url,
@@ -806,8 +884,29 @@ def extract_secrets(
                 context_snippet=snippet,
                 entropy=entropy,
             ))
-
     return findings
+
+
+def extract_secrets(
+    scan_id: str,
+    target_url: str,
+    source_url: str,
+    text: str,
+) -> list[RawFinding]:
+    findings = _scan_text(scan_id, target_url, source_url, text)
+    # Also inspect base64-decoded blobs for secrets hidden inside encoded strings.
+    for decoded in _decode_base64_blobs(text):
+        findings.extend(_scan_text(scan_id, target_url, source_url, decoded, decoded=True))
+    # De-duplicate by fingerprint (same secret found raw and base64-encoded = one finding).
+    seen: set[str] = set()
+    unique: list[RawFinding] = []
+    for f in findings:
+        fp = f.fingerprint
+        if fp in seen:
+            continue
+        seen.add(fp)
+        unique.append(f)
+    return unique
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1070,6 +1169,8 @@ async def run_scan(
     known_fingerprints: frozenset[str] = frozenset(),
     suppressed_fingerprints: frozenset[str] = frozenset(),
     max_crawl_pages: int = 1,
+    verify: bool | None = None,
+    only_verified: bool = False,
 ) -> dict[str, Any]:
     """
     Full pipeline:
@@ -1109,6 +1210,9 @@ async def run_scan(
         "suppressed_count":   0,
         "new_findings_count": 0,
         "recurring_findings_count": 0,
+        "verified_count": 0,
+        "unverified_count": 0,
+        "filtered_unverified_count": 0,
         "errors":             [],
         "duration_seconds":   0.0,
     }
@@ -1255,6 +1359,44 @@ async def run_scan(
                 + (f", {len(needs_review)} flagged for manual review" if needs_review else "")
             ),
         })
+
+        # ── 3b. Optional live verification (off by default) ─────────────────
+        # Read-only "is this credential still active?" checks against each
+        # secret's own provider (never the target). Eliminates dead-key noise.
+        do_verify = VERIFY_SECRETS if verify is None else verify
+        if do_verify and confirmed:
+            await emit({"type": "status", "stage": "verifying", "total": len(confirmed)})
+            await emit({
+                "type": "log", "level": "WARN",
+                "message": (
+                    f"[VERIFY] Live-verifying {len(confirmed)} confirmed finding(s) against "
+                    f"provider APIs (read-only). Authorized use only."
+                ),
+            })
+            for vf in confirmed:
+                state.check()
+                vf.verified = await verifier.verify_finding(
+                    vf.raw.secret_type, vf.raw.raw_match, client
+                )
+            result["verified_count"]   = sum(1 for v in confirmed if v.verified == "verified")
+            result["unverified_count"] = sum(1 for v in confirmed if v.verified == "unverified")
+            await emit({
+                "type": "log",
+                "level": "ERROR" if result["verified_count"] else "INFO",
+                "message": (
+                    f"[VERIFY] {result['verified_count']} ACTIVE, "
+                    f"{result['unverified_count']} inactive/unconfirmed, "
+                    f"{sum(1 for v in confirmed if v.verified == 'unsupported')} unsupported"
+                ),
+            })
+            if only_verified:
+                # Keep verified + unsupported (can't auto-check); drop confirmed-inactive.
+                before = len(confirmed)
+                confirmed = [v for v in confirmed if v.verified != "unverified"]
+                result["filtered_unverified_count"] = before - len(confirmed)
+                # keep new/recurring counts consistent with the filtered set
+                result["new_findings_count"] = sum(1 for v in confirmed if v.is_new)
+                result["recurring_findings_count"] = len(confirmed) - result["new_findings_count"]
 
         # ── 4. Broadcast Confirmed + Needs-Review Findings ────────────────
         for vf in confirmed:

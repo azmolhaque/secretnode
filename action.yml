@@ -1,0 +1,45 @@
+name: "SecretNode Scan"
+description: "Passive credential-leak scan of a public target; emits SARIF for GitHub code scanning."
+author: "Md. Azmol Haque Rony"
+branding:
+  icon: "shield"
+  color: "green"
+inputs:
+  target:
+    description: "Target URL to scan (http/https)"
+    required: true
+  format:
+    description: "Report format: sarif | json | csv | html"
+    required: false
+    default: "sarif"
+  crawl:
+    description: "Number of same-domain pages to crawl"
+    required: false
+    default: "1"
+  output:
+    description: "Output file path"
+    required: false
+    default: "secretnode.sarif"
+  fail-on-findings:
+    description: "Fail the job if confirmed findings are present"
+    required: false
+    default: "false"
+  gemini-api-key:
+    description: "Optional Gemini API key for AI validation (findings are unvalidated without it)"
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    - shell: bash
+      run: pip install -r "${{ github.action_path }}/requirements.txt"
+    - shell: bash
+      env:
+        GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+      run: |
+        ARGS=("${{ inputs.target }}" -f "${{ inputs.format }}" --crawl "${{ inputs.crawl }}" -o "${{ inputs.output }}")
+        if [ "${{ inputs.fail-on-findings }}" = "true" ]; then ARGS+=(--fail-on-findings); fi
+        python "${{ github.action_path }}/backend/cli.py" "${ARGS[@]}"

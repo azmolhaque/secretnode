@@ -103,3 +103,42 @@ def test_placeholder_still_filtered_by_entropy():
     # Expanded registry must not start matching obvious placeholders.
     assert _hits('const KEY = "YOUR_API_KEY_HERE";') == set() or \
         "Generic High-Entropy Secret" not in _hits('const KEY = "YOUR_API_KEY_HERE";')
+
+
+# ── v2.3.0: accuracy layer (base64 decoding + allowlist) + new detectors ──────
+
+def test_base64_encoded_secret_is_decoded_and_detected():
+    import base64
+    token = "glpat-" + _rnd(20)
+    blob = base64.b64encode(f"authToken={token}".encode()).decode()
+    body = f'const cfg = "{blob}";'
+    assert "GitLab Personal Access Token" in _hits(body)
+
+
+def test_placeholder_values_are_allowlisted():
+    assert scanner.is_benign_placeholder("AKIAIOSFODNN7EXAMPLE")      # AWS doc example
+    assert scanner.is_benign_placeholder("your_api_key_here")
+    assert scanner.is_benign_placeholder("REPLACE_WITH_YOUR_TOKEN".lower())
+    assert not scanner.is_benign_placeholder("aK7xQ2mN9pL4vR8sT1wY6zB3")  # real-looking
+
+
+@pytest.mark.parametrize(
+    "expected,body",
+    [
+        ("GitHub Server/Refresh Token", f'x="ghs_{_rnd(36)}"'),
+        ("OpenAI Service Account Key",  f'x="sk-svcacct-{_rnd(40)}"'),
+        ("Grafana Service Account Token", 'x="glsa_' + _rnd(32) + "_" + "".join(secrets.choice("abcdef0123456789") for _ in range(8)) + '"'),
+        ("New Relic API Key",           'x="NRAK-' + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(27)) + '"'),
+    ],
+)
+def test_v230_new_detectors(expected, body):
+    assert expected in _hits(body)
+
+
+def test_extract_secrets_deduplicates_by_fingerprint():
+    token = "glpat-" + _rnd(20)
+    # same token appears twice in the same source -> one finding
+    body = f'a="{token}"; b="{token}";'
+    fs = [f for f in scanner.extract_secrets("s", "https://t", "https://t/a.js", body)
+          if f.secret_type == "GitLab Personal Access Token"]
+    assert len(fs) == 1

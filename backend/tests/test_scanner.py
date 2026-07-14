@@ -147,12 +147,22 @@ class TestExtractPageLinks:
 
 class TestExtractSecrets:
     def test_finds_aws_key(self):
+        import secrets as _s, string as _st
+        # Runtime-generated (no literal secret in source) synthetic AWS key.
+        synthetic = "AKIA" + "".join(_s.choice(_st.ascii_uppercase + "0123456789") for _ in range(16))
+        body = f'const cfg = {{ key: "{synthetic}" }};'
+        findings = scanner.extract_secrets(
+            "scan1", "https://example.com", "https://example.com/app.js", body
+        )
+        assert "AWS Access Key" in [f.secret_type for f in findings]
+
+    def test_documentation_example_key_allowlisted(self):
+        # AWS's official example key must be treated as a benign placeholder (v2.3.0).
         body = 'const cfg = { key: "AKIAIOSFODNN7EXAMPLE" };'
         findings = scanner.extract_secrets(
             "scan1", "https://example.com", "https://example.com/app.js", body
         )
-        types = [f.secret_type for f in findings]
-        assert "AWS Access Key" in types
+        assert "AWS Access Key" not in [f.secret_type for f in findings]
 
     def test_no_false_positive_on_placeholder(self):
         body = 'const key = "YOUR_API_KEY_HERE";'

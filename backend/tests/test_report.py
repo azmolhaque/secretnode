@@ -36,7 +36,7 @@ def _scan() -> dict:
                 "source_url": "https://example.com/config.js", "confidence": 97,
                 "raw_match": "AKIA***", "reason": "live key", "is_new": False,
                 "severity": "CRITICAL", "cwe": "CWE-798", "remediation": "revoke now",
-                "found_at": "now",
+                "verified": "verified", "found_at": "now",
             },
         ],
         "needs_review_findings": [
@@ -108,3 +108,23 @@ def test_confirmed_findings_sorted_critical_first():
     out = report.generate_html_report(scan)
     # CRITICAL row must appear before the MEDIUM row in the rendered table
     assert out.index("AWS Access Key") < out.index("Bearer Token")
+
+
+def test_html_shows_verified_active_badge():
+    out = report.generate_html_report(_scan())
+    assert "VERIFIED ACTIVE" in out
+
+
+def test_csv_has_verified_column():
+    out = report.generate_csv_report(_scan())
+    assert "verified" in out.splitlines()[0]
+    assert "verified" in out  # the value for the verified finding
+
+
+def test_sarif_carries_verified_property_and_prefix():
+    import json as _j
+    doc = _j.loads(report.generate_sarif_report(_scan()))
+    results = doc["runs"][0]["results"]
+    verified = [r for r in results if r["properties"].get("verified") == "verified"]
+    assert verified
+    assert verified[0]["message"]["text"].startswith("[VERIFIED ACTIVE]")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "secretnode"
-version = "2.2.0"
+version = "2.3.0"
 description = "Real-time passive attack-surface scanner for credential-leak detection, with AI validation, SARIF export, and a live dashboard."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -3,6 +3,34 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.3.0] — ASM-industry alignment: verification-first & CI-native
+
+Informed by 2025–2026 ASM / secret-scanning practice, where **verification-first**
+detection (confirming a credential is actually *live*) and **CI-native gating** are the
+dominant themes.
+
+### Added
+- **Optional live verification** (`verifier.py`, `VERIFY_SECRETS` / `?verify=true`) — the
+  "is this credential still active?" step (à la TruffleHog `--only-verified`). Read-only
+  identity checks against each secret's own provider (GitHub, GitLab, Stripe, SendGrid,
+  OpenAI, Slack, npm, Mailgun, Telegram). **Off by default**, fails closed, never touches
+  the scan target. Findings gain a `verified` status (verified / unverified / unsupported).
+- **`only_verified` mode** — drop confirmed-inactive (dead) findings to kill false-positive
+  fatigue, while keeping types that can't be auto-verified.
+- **Base64 decoding pass** — secrets hidden inside base64-encoded blobs are now decoded and
+  detected.
+- **Example / placeholder allowlist** — documentation example keys (e.g. AWS's
+  `AKIAIOSFODNN7EXAMPLE`) and obvious placeholders are filtered out to reduce noise.
+- **CLI (`backend/cli.py`) + composite GitHub Action (`action.yml`)** — run a scan and emit
+  SARIF/JSON/CSV/HTML from CI, with `--fail-on-findings` as a build gate.
+- **7 more detectors** (Slack app-level, GitHub server/refresh, OpenAI service-account, New
+  Relic, Grafana, HCP Terraform) — registry now **44 patterns**.
+- **Verification surfaced everywhere** — HTML badge, CSV column, and SARIF `verified`
+  property (verified findings get a `[VERIFIED ACTIVE]` message prefix).
+
+### Changed
+- Test suite grown **58 → 82** (verification, decoding, allowlist, CLI, SARIF). Ruff clean.
+
 ## [2.2.0] — Capability & industrial-grade release
 
 ### Added

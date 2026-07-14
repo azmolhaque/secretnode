@@ -173,7 +173,7 @@ _registry: dict[str, dict[str, Any]] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("SecretNode v2.2.0 starting…")
+    logger.info("SecretNode v2.3.0 starting…")
     await init_db()
     yield
     # Cancel any running scans on shutdown
@@ -181,7 +181,7 @@ async def lifespan(app: FastAPI):
         task: asyncio.Task = entry.get("task")
         if task and not task.done():
             task.cancel()
-    logger.info("SecretNode v2.2.0 shut down cleanly")
+    logger.info("SecretNode v2.3.0 shut down cleanly")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,9 +189,9 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="SecretNode v2.2.0",
+    title="SecretNode v2.3.0",
     description="Real-time passive ASM scanner for credential leak detection",
-    version="2.2.0",
+    version="2.3.0",
     lifespan=lifespan,
 )
 
@@ -234,6 +234,8 @@ MAX_CRAWL_PAGES_CAP  = int(os.environ.get("MAX_CRAWL_PAGES_CAP", "15"))
 class ScanRequest(BaseModel):
     target_url: str
     crawl_pages: int = DEFAULT_CRAWL_PAGES
+    verify: bool = False          # live-verify confirmed findings against provider APIs (opt-in)
+    only_verified: bool = False   # drop confirmed-inactive findings (TruffleHog-style)
 
     @field_validator("target_url")
     @classmethod
@@ -263,10 +265,11 @@ class ScanRequest(BaseModel):
 async def health() -> dict[str, Any]:
     return {
         "status": "ok",
-        "service": "SecretNode v2.2.0",
+        "service": "SecretNode v2.3.0",
         "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
         "discord_configured": bool(os.environ.get("DISCORD_WEBHOOK_URL")),
         "max_concurrent_scans": MAX_CONCURRENT_SCANS,
+        "verification_default": os.environ.get("VERIFY_SECRETS", "false").lower() == "true",
         "active_scans": sum(1 for e in _registry.values() if not e["task"].done()),
     }
 
@@ -320,6 +323,8 @@ async def start_scan(request: ScanRequest, http_request: Request) -> dict[str, A
                 known_fingerprints=known_fps,
                 suppressed_fingerprints=suppressed_fps,
                 max_crawl_pages=request.crawl_pages,
+                verify=request.verify,
+                only_verified=request.only_verified,
             )
             _registry[scan_id]["meta"] = result
             await save_scan(scan_id, result)

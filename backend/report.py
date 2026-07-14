@@ -30,7 +30,7 @@ _SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 _SARIF_LEVEL = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning", "LOW": "note"}
 _SARIF_SECURITY_SEVERITY = {"CRITICAL": "9.5", "HIGH": "8.0", "MEDIUM": "5.0", "LOW": "3.0"}
 
-_TOOL_VERSION = "2.2.0"
+_TOOL_VERSION = "2.3.0"
 _TOOL_URI = "https://github.com/azmolhaque/secretnode"
 
 
@@ -72,6 +72,17 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
         sev = sev.upper()
         return f'<span class="sev sev-{sev.lower()}">{html.escape(sev)}</span>'
 
+    def ver_badge(f: dict[str, Any]) -> str:
+        v = str(f.get("verified", "disabled"))
+        labels = {
+            "verified": ("VERIFIED ACTIVE", "ver-verified"),
+            "unverified": ("inactive", "ver-unverified"),
+            "unsupported": ("unverified", "ver-unsupported"),
+            "disabled": ("", ""),
+        }
+        text, cls = labels.get(v, ("", ""))
+        return f'<span class="ver {cls}">{text}</span>' if text else ""
+
     def finding_row(f: dict[str, Any]) -> str:
         badge = '<span class="badge new">NEW</span>' if f.get("is_new", True) else '<span class="badge recurring">RECURRING</span>'
         cwe = html.escape(str(f.get("cwe", "")))
@@ -81,7 +92,7 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
           <td>{html.escape(f.get('secret_type',''))}<div class="small">{cwe}</div></td>
           <td class="mono">{html.escape(f.get('source_url', f.get('target_url','')))}</td>
           <td>{f.get('confidence',0)}%</td>
-          <td>{badge}</td>
+          <td>{badge}{ver_badge(f)}</td>
           <td class="mono small">{html.escape(f.get('raw_match',''))}</td>
           <td class="small">{html.escape(f.get('reason',''))}</td>
         </tr>"""
@@ -143,6 +154,10 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
   .sev-high {{ background: #dd6b20; }}
   .sev-medium {{ background: #d69e2e; }}
   .sev-low {{ background: #3182ce; }}
+  .ver {{ padding: 2px 7px; border-radius: 4px; font-size: 9px; font-weight: bold; margin-left: 4px; }}
+  .ver-verified {{ background: #c53030; color: #fff; }}
+  .ver-unverified {{ background: #e2e8f0; color: #4a5568; }}
+  .ver-unsupported {{ background: #edf2f7; color: #718096; }}
   .summary-grid {{ display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }}
   .stat {{ flex: 1; min-width: 110px; background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; text-align: center; }}
   .stat .num {{ font-size: 24px; font-weight: bold; color: #276749; }}
@@ -207,20 +222,20 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
     writer = csv.writer(buf)
     writer.writerow([
         "status", "severity", "cwe", "secret_type", "source_url", "confidence",
-        "is_new", "matched_value_partial", "reason", "found_at",
+        "is_new", "verified", "matched_value_partial", "reason", "found_at",
     ])
     for f in sorted(scan.get("confirmed_findings", []), key=_sort_key):
         writer.writerow([
             "CONFIRMED", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
             f.get("source_url", f.get("target_url", "")),
             f.get("confidence", 0), "NEW" if f.get("is_new", True) else "RECURRING",
-            f.get("raw_match", ""), f.get("reason", ""), f.get("found_at", ""),
+            f.get("verified", "disabled"), f.get("raw_match", ""), f.get("reason", ""), f.get("found_at", ""),
         ])
     for f in scan.get("needs_review_findings", []):
         writer.writerow([
             "NEEDS_REVIEW", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
             f.get("source_url", f.get("target_url", "")),
-            "", "", f.get("raw_match", ""), f.get("reason", ""), f.get("found_at", ""),
+            "", "", f.get("raw_match", ""), f.get("reason", ""), f.get("found_at", ""),  # needs-review: no confidence/is_new/verified
         ])
     return buf.getvalue()
 
@@ -267,8 +282,10 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
 
         level = "note" if is_review else _SARIF_LEVEL.get(severity, "warning")
         location_uri = f.get("source_url") or f.get("target_url") or "unknown"
+        verified = str(f.get("verified", "disabled"))
+        vprefix = "[VERIFIED ACTIVE] " if verified == "verified" else ""
         msg = (
-            f"{secret_type} ({severity}) detected. "
+            vprefix + f"{secret_type} ({severity}) detected. "
             f"{'AI validation unavailable — manual review required. ' if is_review else ''}"
             f"{f.get('reason','')}"
         )
@@ -286,6 +303,7 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
                 "severity": severity,
                 "cwe": cwe,
                 "confidence": f.get("confidence", 0),
+                "verified": verified,
                 "status": "needs_review" if is_review else "confirmed",
             },
         })

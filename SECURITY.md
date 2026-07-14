@@ -26,6 +26,11 @@ solely responsible for how you use this tool.
   `SECRETNODE_API_KEY`, and every request is gated by it.
 - **Redaction.** Matched secrets are partially redacted before being written to
   reports, logs, or Discord alerts.
+- **Live verification is opt-in.** The v2.3.0 verification feature is **off by default**
+  (`VERIFY_SECRETS=false`). When enabled, it makes read-only identity calls to a secret's
+  **own provider** (never to the scan target) to check whether the credential is active.
+  Using a discovered credential — even read-only — is only appropriate on assets you own or
+  are explicitly authorized to test. Verifiers fail closed and never perform writes.
 
 ## Reporting a vulnerability
 
@@ -41,5 +46,5 @@ acknowledge reports within a few days and will credit reporters who wish to be n
 
 | Version | Supported |
 |---------|-----------|
-| 2.2.x   | ✅ |
-| < 2.2   | ❌ |
+| 2.3.x   | ✅ |
+| < 2.3   | ❌ |

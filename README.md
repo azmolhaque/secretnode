@@ -3,13 +3,12 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-58%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-82%20passing-brightgreen)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
+![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
 Passive Attack Surface Management scanner for detecting credential leaks in public-facing infrastructure.
-Pipeline: **spider → regex (37 patterns) → entropy filter → AI validation (Gemini) → Discord alerts**, with a
-live dashboard, SQLite history, scan diffing, false-positive suppression, and **SARIF / HTML / CSV** report
-export. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
+Pipeline: **spider → regex (44 patterns) + base64 decode → entropy filter → AI validation (Gemini) → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV** report export. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
@@ -52,6 +51,14 @@ export. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 
 > - **Environment-tunable engine** — the tuning constants the docs referenced are now actually read from env vars.
 > - **Industrial-grade scaffolding** — MIT `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `pyproject.toml` (ruff + pytest), **GitHub Actions CI** (lint + tests on 3.11/3.12 + Docker build), `Dockerfile` + `docker-compose.yml`.
 > - **Suite grew 33 → 58 tests.** Run with `pytest`.
+
+> **v2.3.0 — ASM-industry alignment: verification-first & CI-native**
+> Grounded in 2025–2026 ASM / secret-scanning practice (verification-first detection + CI-native gating).
+> - **Optional live verification** (`VERIFY_SECRETS` / `?verify=true`) — read-only "is this key still active?" checks against each secret's own provider (GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram), à la TruffleHog `--only-verified`. **Off by default**, fails closed, never touches the scan target. Each finding gains a `verified` status, and `only_verified` mode drops dead-key noise.
+> - **Base64 decoding** of encoded blobs + **example/placeholder allowlisting** (e.g. AWS's `AKIAIOSFODNN7EXAMPLE`) — fewer false positives, more real catches.
+> - **CLI (`backend/cli.py`) + GitHub Action (`action.yml`)** — scan and emit SARIF from CI with `--fail-on-findings` as a build gate.
+> - **Registry now 44 patterns** (added Slack app-level, GitHub server/refresh, OpenAI service-account, New Relic, Grafana, HCP Terraform).
+> - **Suite grew 58 → 82 tests.**
 
 ---
 
@@ -114,16 +121,19 @@ export. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 
 secretnode/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + WebSocket + static server + auth/SSRF guards
-│   ├── scanner.py           # Async scan engine (37 patterns, entropy, Gemini, Discord)
+│   ├── scanner.py           # Async scan engine (44 patterns, entropy, base64, Gemini, Discord)
+│   ├── verifier.py          # Optional live credential verification (off by default)
+│   ├── cli.py               # CLI entrypoint (scan → SARIF/JSON/CSV/HTML; CI gate)
 │   ├── storage.py           # SQLite persistence: scan history + false-positive suppression
-│   ├── report.py            # HTML / CSV / SARIF report generation
-│   └── tests/               # 58-test pytest suite
+│   ├── report.py            # HTML / CSV / SARIF report generation (+ verified status)
+│   └── tests/               # 82-test pytest suite
 ├── frontend/
 │   └── index.html           # Live dashboard SPA (vanilla JS + Tailwind)
 ├── .github/
 │   ├── workflows/ci.yml     # CI: ruff + pytest (3.11/3.12) + Docker build
 │   ├── ISSUE_TEMPLATE/      # Bug / feature templates
 │   └── pull_request_template.md
+├── action.yml               # Composite GitHub Action (SARIF in CI)
 ├── Dockerfile               # Non-root, healthchecked container image
 ├── docker-compose.yml
 ├── pyproject.toml           # Packaging + ruff + pytest config
@@ -210,21 +220,21 @@ http://<raspberry-pi-ip>:8000
 
 ---
 
-## Secret Patterns Detected (37)
+## Secret Patterns Detected (44)
 
 Every pattern carries a **severity** and a **CWE** id, and only fires after passing a Shannon-entropy
 filter (so obvious placeholders like `YOUR_API_KEY_HERE` are dropped before the AI stage).
 
 **CRITICAL** — AWS Access/Secret Key · GitHub PAT (classic + fine-grained) · GitLab PAT · Stripe Secret Key ·
 OpenAI Key · Anthropic Key · Slack Token · npm Token · PyPI Token · DigitalOcean PAT · HashiCorp Vault Token ·
-Azure Storage Key · PEM/PGP Private Key · **Database URI with credentials**
+Azure Storage Key · HCP Terraform · OpenAI Service-Account · PEM/PGP Private Key · **Database URI with credentials**
 
 **HIGH** — Google Cloud/OAuth · GitHub OAuth · Slack Webhook · SendGrid · Twilio · Heroku · Shopify · Mailgun ·
-Square · Postman · Databricks · Telegram Bot · Discord Bot · Datadog · Firebase FCM · JWT · **Basic-auth URL**
+Square · Postman · Databricks · Telegram Bot · Discord Bot · Datadog · Firebase FCM · Slack App-Level · GitHub Server/Refresh · New Relic · Grafana · JWT · **Basic-auth URL**
 
 **MEDIUM** — Stripe Publishable Key · Bearer Token · Generic High-Entropy Secret
 
-New patterns land with a `severity`, `cwe`, and `remediation` — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Matches are also checked against **base64-decoded** content and filtered through an **example/placeholder allowlist**. Many types (GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram) can be **live-verified** (see below). New patterns land with a `severity`, `cwe`, and `remediation` — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ---
 
@@ -279,6 +289,49 @@ curl -s localhost:8000/api/scans/history -H "X-API-Key: $KEY" | jq '.scans[] | {
 
 **CI integration:** run a scan, export SARIF, and upload it to GitHub code scanning with
 `github/codeql-action/upload-sarif`, or feed it to any SARIF-aware pipeline.
+
+---
+
+## Verification (opt-in) — is the secret actually live?
+
+Following the industry shift to **verification-first** detection, SecretNode can confirm whether a
+confirmed finding is a **currently active** credential — the single biggest lever against
+false-positive fatigue.
+
+- **Off by default.** Enable per scan (`{"verify": true}` / `--verify`) or globally (`VERIFY_SECRETS=true`).
+- **Read-only.** One "whoami"-style call to the secret's **own provider** (never the scan target):
+  GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram. Fails closed on any error.
+- Each finding gets a `verified` status: `verified` (active), `unverified` (dead / unconfirmed),
+  `unsupported` (no safe auto-check — verify manually).
+- **`only_verified`** drops confirmed-inactive findings so a pipeline only fails on live secrets.
+
+> ⚠️ Verifying a credential means using it (read-only) against its issuer. Only do this on assets
+> you own or are authorized to test. See [`SECURITY.md`](SECURITY.md).
+
+---
+
+## Run in CI (CLI + GitHub Action)
+
+**CLI** — emits SARIF/JSON/CSV/HTML; `--fail-on-findings` makes it a build gate:
+
+```bash
+python backend/cli.py https://example.com -f sarif -o secretnode.sarif
+python backend/cli.py https://example.com --crawl 5 --fail-on-findings
+GEMINI_API_KEY=... python backend/cli.py https://example.com --verify
+```
+
+**GitHub Action** — scan and upload results to code scanning:
+
+```yaml
+- uses: azmolhaque/secretnode@main
+  with:
+    target: https://example.com
+    fail-on-findings: "true"
+    gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: secretnode.sarif
+```
 
 ---
 

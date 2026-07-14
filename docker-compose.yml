@@ -1,7 +1,7 @@
 services:
   secretnode:
     build: .
-    image: secretnode:2.2.0
+    image: secretnode:2.3.0
     container_name: secretnode
     ports:
       - "8000:8000"
