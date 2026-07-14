@@ -3,92 +3,74 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SecretNode v2.4.0 — ASM Scanner</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Exo+2:wght@300;400;600&display=swap" rel="stylesheet" />
-
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          fontFamily: {
-            mono:    ['"Share Tech Mono"', 'monospace'],
-            display: ['Orbitron', 'monospace'],
-            body:    ['"Exo 2"', 'sans-serif'],
-          },
-          colors: {
-            phosphor: {
-              50:  '#f0fff4',
-              100: '#c6f6d5',
-              200: '#9ae6b4',
-              300: '#68d391',
-              400: '#48bb78',
-              500: '#38a169',
-              600: '#2f855a',
-              700: '#276749',
-              800: '#22543d',
-              900: '#1c4532',
-            },
-            terminal: {
-              bg:      '#080c0a',
-              panel:   '#0d1410',
-              border:  '#1a2e1f',
-              muted:   '#2d4a35',
-              glow:    '#00ff88',
-              dim:     '#4a7c59',
-            },
-            threat: {
-              critical: '#ff3b3b',
-              high:     '#ff7b00',
-              medium:   '#ffd700',
-              low:      '#48bb78',
-              info:     '#63b3ed',
-            },
-          },
-          animation: {
-            'scan-line':  'scanLine 3s linear infinite',
-            'pulse-glow': 'pulseGlow 2s ease-in-out infinite',
-            'blink':      'blink 1s step-end infinite',
-            'slide-in':   'slideIn 0.3s ease-out',
-            'fade-in':    'fadeIn 0.5s ease-out',
-            'matrix-bg':  'matrixBg 20s linear infinite',
-          },
-          keyframes: {
-            scanLine: {
-              '0%':   { transform: 'translateY(-100%)' },
-              '100%': { transform: 'translateY(100vh)' },
-            },
-            pulseGlow: {
-              '0%, 100%': { boxShadow: '0 0 5px #00ff88, 0 0 10px #00ff88' },
-              '50%':      { boxShadow: '0 0 20px #00ff88, 0 0 40px #00ff88, 0 0 60px #00ff88' },
-            },
-            blink: {
-              '0%, 100%': { opacity: '1' },
-              '50%':      { opacity: '0' },
-            },
-            slideIn: {
-              from: { opacity: '0', transform: 'translateY(-8px)' },
-              to:   { opacity: '1', transform: 'translateY(0)' },
-            },
-            fadeIn: {
-              from: { opacity: '0' },
-              to:   { opacity: '1' },
-            },
-          },
-          boxShadow: {
-            'glow-green':    '0 0 15px rgba(0, 255, 136, 0.3)',
-            'glow-green-lg': '0 0 30px rgba(0, 255, 136, 0.5)',
-            'glow-red':      '0 0 15px rgba(255, 59, 59, 0.5)',
-            'glow-orange':   '0 0 15px rgba(255, 123, 0, 0.5)',
-          },
-        },
-      },
-    };
-  </script>
+  <title>SecretNode v2.5.0 — ASM Scanner</title>
+  <meta name="color-scheme" content="dark" />
+  <meta name="description" content="SecretNode — passive attack-surface &amp; exposed-secret scanner with a live dashboard. Self-hosted, offline-capable, multi-device." />
+  <!-- No external CDNs: Tailwind and Google Fonts were removed. Fonts are
+       self-hosted (@font-face below) so the dashboard renders fully offline. -->
+  <link rel="preload" href="/static/fonts/share-tech-mono-400.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/static/fonts/orbitron-700.woff2" as="font" type="font/woff2" crossorigin />
 
   <style>
+    /* ── Self-hosted fonts (offline; no external CDN) ── */
+    @font-face { font-family:'Share Tech Mono'; font-style:normal; font-weight:400; font-display:swap;
+      src:url('/static/fonts/share-tech-mono-400.woff2') format('woff2'); }
+    @font-face { font-family:'Orbitron'; font-style:normal; font-weight:700 900; font-display:swap;
+      src:url('/static/fonts/orbitron-700.woff2') format('woff2'); }
+    @font-face { font-family:'Exo 2'; font-style:normal; font-weight:400; font-display:swap;
+      src:url('/static/fonts/exo-2-400.woff2') format('woff2'); }
+    @font-face { font-family:'Exo 2'; font-style:normal; font-weight:600; font-display:swap;
+      src:url('/static/fonts/exo-2-600.woff2') format('woff2'); }
+
+    /* ── Keyframes (previously injected by the Tailwind runtime; now local) ── */
+    @keyframes pulseGlow { 0%,100%{ box-shadow:0 0 5px #00ff88,0 0 10px #00ff88; }
+                           50%{ box-shadow:0 0 20px #00ff88,0 0 40px #00ff88,0 0 60px #00ff88; } }
+    @keyframes blink   { 0%,100%{ opacity:1; } 50%{ opacity:0; } }
+    @keyframes slideIn { from{ opacity:0; transform:translateY(-8px); } to{ opacity:1; transform:translateY(0); } }
+    @keyframes fadeIn  { from{ opacity:0; } to{ opacity:1; } }
+    @keyframes scanLine{ 0%{ transform:translateY(-100%); } 100%{ transform:translateY(100vh); } }
+
+    /* ── Utilities replacing the few Tailwind classes previously used ── */
+    html { height:100%; }
+    body { min-height:100vh; }
+    .font-display     { font-family:'Orbitron', monospace; }
+    .text-phosphor-300{ color:#68d391; }
+
+    /* ── Responsive layout — intrinsic (adapts phone → tablet → desktop) ── */
+    .app-main    { padding:20px 24px; max-width:1600px; margin:0 auto; }
+    .app-header  { display:flex; align-items:center; justify-content:space-between; gap:12px 16px;
+                   flex-wrap:wrap; padding:14px 24px; border-bottom:1px solid #1a2e1f; background:#0d1410; }
+    .app-footer  { display:flex; justify-content:space-between; align-items:center; gap:6px 20px;
+                   flex-wrap:wrap; margin-top:16px; padding:10px 0; border-top:1px solid #1a2e1f; }
+    .control-row { display:flex; gap:12px; align-items:stretch; flex-wrap:wrap; }
+    .control-row .ctl-input { flex:1 1 260px; }
+    .stats-grid  { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; margin-bottom:16px; }
+    .split-grid  { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px; margin-bottom:16px; }
+    .findings-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px;
+                        flex-wrap:wrap; padding:10px 14px; border-bottom:1px solid #1a2e1f; }
+
+    @media (max-width: 680px) {
+      .app-main   { padding:14px 13px; }
+      .app-header { padding:12px 14px; }
+      .control-row .ctl-input { flex-basis:100%; }
+      .control-row .btn-scan,
+      .control-row .btn-stop  { flex:1 1 auto; text-align:center; }
+      #console-output { height:280px; }
+      #asset-list     { height:240px !important; }
+      .stat-value     { font-size:22px; }
+      .stat-card      { padding:14px 12px; }
+      .header-arch, .header-sep { display:none; }
+      .hex-decoration { display:none; }
+    }
+    @media (max-width: 380px) {
+      .stats-grid { grid-template-columns:1fr 1fr; }
+    }
+
+    /* Respect users who prefer reduced motion. */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration:0.001ms !important; animation-iteration-count:1 !important; }
+    }
+
     /* ── Global ── */
     * { box-sizing: border-box; }
 
@@ -434,7 +416,7 @@
   </style>
 </head>
 
-<body class="h-full min-h-screen">
+<body>
 
   <!-- Decorative ASCII corner art -->
   <div class="hex-decoration" style="top:60px;left:20px;font-size:8px;">
@@ -461,14 +443,14 @@
   <!-- ══════════════════════════════════════════════════════════════ -->
   <!-- HEADER -->
   <!-- ══════════════════════════════════════════════════════════════ -->
-  <header style="border-bottom:1px solid #1a2e1f;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;background:#0d1410;">
+  <header class="app-header">
     <div style="display:flex;align-items:center;gap:16px;">
       <div style="width:36px;height:36px;border:1px solid #38a169;border-radius:3px;display:flex;align-items:center;justify-content:center;box-shadow:0 0 10px rgba(0,255,136,0.3);">
         <span style="font-family:monospace;color:#00ff88;font-size:16px;">⬡</span>
       </div>
       <div>
         <div class="header-title">SecretNode</div>
-        <div style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.4.0 — ATTACK SURFACE MONITOR</div>
+        <div style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.5.0 — ATTACK SURFACE MONITOR</div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:24px;">
@@ -478,8 +460,8 @@
         </div>
         <div id="clock" style="font-family:'Orbitron';font-size:11px;color:#2d4a35;margin-top:2px;"></div>
       </div>
-      <div style="width:1px;height:36px;background:#1a2e1f;"></div>
-      <div style="font-family:'Share Tech Mono';font-size:10px;color:#2d4a35;">
+      <div class="header-sep" style="width:1px;height:36px;background:#1a2e1f;"></div>
+      <div class="header-arch" style="font-family:'Share Tech Mono';font-size:10px;color:#2d4a35;">
         ARM64 / RPI5
       </div>
     </div>
@@ -488,7 +470,7 @@
   <!-- ══════════════════════════════════════════════════════════════ -->
   <!-- MAIN LAYOUT -->
   <!-- ══════════════════════════════════════════════════════════════ -->
-  <main style="padding:20px 24px;max-width:1600px;margin:0 auto;">
+  <main class="app-main">
 
     <!-- ── SCAN CONTROL ROW ── -->
     <div class="panel" style="padding:16px 20px;margin-bottom:16px;" id="control-panel">
@@ -499,8 +481,8 @@
           <span class="status-dot idle" id="scan-dot"></span><span id="scan-status-text">IDLE</span>
         </div>
       </div>
-      <div style="display:flex;gap:12px;align-items:stretch;">
-        <div style="flex:1;border:1px solid #1a2e1f;border-radius:3px;padding:10px 14px;display:flex;align-items:center;gap:10px;background:#080c0a;">
+      <div class="control-row">
+        <div class="ctl-input" style="border:1px solid #1a2e1f;border-radius:3px;padding:10px 14px;display:flex;align-items:center;gap:10px;background:#080c0a;">
           <span style="color:#2d4a35;font-family:monospace;font-size:14px;">$</span>
           <input
             type="text"
@@ -548,7 +530,7 @@
     </div>
 
     <!-- ── STATS ROW ── -->
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px;">
+    <div class="stats-grid">
       <div class="stat-card">
         <div class="stat-value" id="stat-assets">0</div>
         <div class="stat-label">Assets Fetched</div>
@@ -572,7 +554,7 @@
     </div>
 
     <!-- ── LOWER TWO-COLUMN GRID ── -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+    <div class="split-grid">
 
       <!-- LEFT: Live Terminal -->
       <div class="panel" style="display:flex;flex-direction:column;">
@@ -587,7 +569,7 @@
           </div>
         </div>
         <div id="console-output" style="padding:12px 14px;flex:1;">
-          <div class="log-SYS">SecretNode v2.4.0 initialised. Awaiting target...<span class="cursor"></span></div>
+          <div class="log-SYS">SecretNode v2.5.0 initialised. Awaiting target...<span class="cursor"></span></div>
         </div>
       </div>
 
@@ -605,12 +587,12 @@
 
     <!-- ── VERIFIED FINDINGS TABLE ── -->
     <div class="panel">
-      <div style="padding:10px 14px;border-bottom:1px solid #1a2e1f;display:flex;align-items:center;justify-content:space-between;">
+      <div class="findings-toolbar">
         <div style="display:flex;align-items:center;gap:12px;">
           <span style="font-family:'Orbitron';font-size:9px;letter-spacing:0.2em;color:#4a7c59;">VERIFIED FINDINGS</span>
           <span id="findings-count-badge" style="font-family:'Orbitron';font-size:8px;color:#ff3b3b;padding:2px 8px;border:1px solid rgba(255,59,59,0.3);border-radius:10px;background:rgba(255,59,59,0.08);">0 CONFIRMED</span>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
           <button onclick="downloadReport('html')" title="Download client-ready HTML report (printable to PDF)"
             style="font-family:'Orbitron';font-size:8px;letter-spacing:0.06em;color:#4a7c59;padding:4px 9px;border:1px solid #2d4a35;border-radius:2px;background:transparent;cursor:pointer;"
             onmouseover="this.style.color='#00ff88';this.style.borderColor='#38a169'"
@@ -665,9 +647,9 @@
     </div>
 
     <!-- ── FOOTER ── -->
-    <div style="margin-top:16px;padding:10px 0;border-top:1px solid #1a2e1f;display:flex;justify-content:space-between;align-items:center;">
+    <div class="app-footer">
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;letter-spacing:0.1em;">
-        SECRETNODE v2.4.0 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
+        SECRETNODE v2.5.0 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
       </span>
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;">
         ⚠ FOR AUTHORIZED SECURITY TESTING ONLY

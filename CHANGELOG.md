@@ -45,6 +45,23 @@ strict structured output and cost-aware model routing — without weakening the
   2.10.3→2.12.5). `websockets==14.1` already satisfied its range. No httpx-0.28
   breaking APIs are used by the backend.
 
+### Frontend / UI-UX (multi-device, offline, fewer moving parts)
+- **Fully responsive dashboard** — the fixed desktop-only layout (a 5-column stat grid,
+  a single-row 6-control scan bar, a 2-column panel grid) is now intrinsically responsive
+  via `auto-fit`/`minmax` grids and `flex-wrap`, with small-screen refinements. Verified at
+  375 / 768 / 1440 px with **zero horizontal overflow** — fixing the clipped buttons and
+  cut-off table seen on the Pi's phone view. Desktop layout is unchanged.
+- **Removed all external CDNs** — the **Tailwind Play CDN** (a production anti-pattern that
+  compiled in-browser and needed internet) and **Google Fonts** are gone. The handful of
+  Tailwind utilities actually used were replaced with plain CSS, and the animation keyframes
+  the runtime used to inject are now local. The dashboard renders **fully offline** — no
+  more flash-of-unstyled-content or blocked requests on a flaky/air-gapped Pi.
+- **Self-hosted fonts** — Share Tech Mono, Orbitron and Exo 2 (latin subset, ~100 KB total,
+  woff2) are served from `/static/fonts` with `preload` + `font-display:swap`.
+- **A11y/polish** — `prefers-reduced-motion` support, `color-scheme`/description meta, a
+  softer initial WS state, and touch-friendly wrapping controls. Version strings bumped to
+  v2.5.0 throughout the UI.
+
 ### Tests
 - New `backend/tests/test_v250.py` — 13 tests covering the `GeminiVerdict` schema,
   Tier-1→Tier-2 escalation (noise rejection, positive escalation, critical-always-escalates),
