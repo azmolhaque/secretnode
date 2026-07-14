@@ -19,7 +19,6 @@ import secrets
 import socket
 from urllib.parse import urlparse
 
-import uvloop
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,8 +28,19 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, field_validator
 import uvicorn
 
+# uvloop is a performance optimisation (2–4× faster loop), not a requirement.
+# On some platforms (ARM64 wheels, partial installs) it may be missing or broken —
+# fall back to the stdlib asyncio loop rather than crashing the whole server on import.
+try:
+    import uvloop
+    _HAS_UVLOOP = True
+except Exception:  # noqa: BLE001 — any import/runtime failure must degrade gracefully
+    uvloop = None
+    _HAS_UVLOOP = False
+
 load_dotenv()
-uvloop.install()
+if _HAS_UVLOOP:
+    uvloop.install()
 
 from scanner import run_scan, ScanState
 from storage import (
@@ -627,7 +637,7 @@ if __name__ == "__main__":
         "main:app",
         host=host,
         port=port,
-        loop="uvloop",
+        loop="uvloop" if _HAS_UVLOOP else "auto",
         log_level=LOG_LEVEL.lower(),
         access_log=True,
         workers=1,

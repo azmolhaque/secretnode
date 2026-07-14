@@ -40,4 +40,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # SECRETNODE_API_KEY must be provided at runtime (the app refuses to boot without it):
 #   docker run -e SECRETNODE_API_KEY=$(openssl rand -hex 24) -e GEMINI_API_KEY=... -p 8000:8000 secretnode
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "uvloop"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "auto"]

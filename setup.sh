@@ -93,12 +93,26 @@ if ! "$PIP" install --upgrade -r "$SCRIPT_DIR/requirements.txt" "${PIP_NET_OPTS[
          (the WARNINGs above). Nothing is broken; just re-run ./setup.sh once connectivity is
          stable. To retry against PyPI directly: $PIP install -r requirements.txt --index-url https://pypi.org/simple"
 fi
-# Fail loudly and early if a core import is broken, rather than at first request.
-if ! "$VENV/bin/python" -c "import fastapi, httpx, pydantic, aiosqlite; from google import genai" 2>/dev/null; then
-    die "Dependencies installed but a core import failed. Re-run ./setup.sh, or inspect with:
-         $VENV/bin/python -c 'from google import genai'"
-fi
-ok "Requirements installed & import-verified"
+# Fail loudly and early if the app cannot actually start, rather than at first
+# request (a flaky piwheels install can leave a single dep — e.g. the uvloop
+# C-extension — missing, which crashes the service silently). Importing the real
+# app module exercises the whole dependency graph the server needs.
+IMPORT_CHECK=$(cd "$SCRIPT_DIR/backend" && SECRETNODE_API_KEY=setup-probe "$VENV/bin/python" -c "
+import importlib, sys
+missing = [m for m in ('fastapi','uvicorn','httpx','websockets','bs4','lxml','aiosqlite','pydantic')
+           if importlib.util.find_spec(m) is None]
+if importlib.util.find_spec('google.genai') is None: missing.append('google-genai')
+if missing:
+    print('MISSING:' + ','.join(missing)); sys.exit(1)
+import main  # noqa: F401 — importing the app surfaces any startup/import error
+print('OK')
+" 2>&1) || {
+    die "The app failed to import after install — the server would not start. Detail:
+         ${IMPORT_CHECK}
+         This is usually one dependency left half-installed by a flaky network. Fix with:
+         $PIP install -r requirements.txt ${PIP_NET_OPTS[*]}   (then re-run ./setup.sh)"
+}
+ok "Requirements installed & app import-verified"
 
 # ── 6. .env file ────────────────────────────────────────────────────────────
 ENV_FILE="$SCRIPT_DIR/.env"
@@ -175,7 +189,7 @@ Type=simple
 User=$USER
 WorkingDirectory=$SCRIPT_DIR/backend
 EnvironmentFile=$ENV_FILE
-ExecStart=$VENV/bin/uvicorn main:app --host $HOST --port $PORT --loop uvloop --log-level info
+ExecStart=$VENV/bin/uvicorn main:app --host $HOST --port $PORT --loop auto --log-level info
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -201,7 +215,7 @@ if [[ "$SERVICE_INSTALLED" == "1" ]]; then
     echo -e "  ${CYAN}Service:${NC}     sudo systemctl {start|stop|restart|status} secretnode"
     echo -e "  ${CYAN}Logs:${NC}        journalctl -u secretnode -f"
 else
-    echo -e "  ${CYAN}Start:${NC}       cd backend && $VENV/bin/uvicorn main:app --host $HOST --port $PORT --loop uvloop"
+    echo -e "  ${CYAN}Start:${NC}       cd backend && $VENV/bin/uvicorn main:app --host $HOST --port $PORT --loop auto"
 fi
 echo -e "  ${CYAN}Dashboard:${NC}   http://${LAN_IP}:${PORT}"
 echo ""
@@ -215,11 +229,25 @@ if [[ "$SERVICE_INSTALLED" == "1" ]]; then
     log "Starting SecretNode via systemd (systemctl restart secretnode)..."
     sudo systemctl restart secretnode
     sleep 2
-    if systemctl is-active --quiet secretnode; then
-        ok "SecretNode is running as a service → http://${LAN_IP}:${PORT}"
+    if ! systemctl is-active --quiet secretnode; then
+        warn "Service failed to become active. Inspect: journalctl -u secretnode -n 50 --no-pager"
+        exit 1
+    fi
+    # 'active' only means the process launched — probe the HTTP endpoint so a server
+    # that started then crashed (or never bound the port) is caught here, not by a
+    # blank page in the browser.
+    HEALTH_OK=0
+    for _ in 1 2 3 4 5 6; do
+        if curl -fsS -o /dev/null "http://127.0.0.1:${PORT}/api/health" 2>/dev/null; then HEALTH_OK=1; break; fi
+        sleep 1
+    done
+    if [[ "$HEALTH_OK" == "1" ]]; then
+        ok "SecretNode is running and serving → http://${LAN_IP}:${PORT}"
         echo -e "  ${CYAN}Follow logs:${NC} journalctl -u secretnode -f"
     else
-        warn "Service failed to become active. Inspect: journalctl -u secretnode -n 50 --no-pager"
+        warn "Service is 'active' but not answering on http://127.0.0.1:${PORT} — it likely"
+        warn "crashed after start (a missing/broken dependency is the usual cause)."
+        warn "See the reason with:  journalctl -u secretnode -n 60 --no-pager"
         exit 1
     fi
     exit 0
@@ -242,5 +270,5 @@ cd "$SCRIPT_DIR/backend"
 exec "$VENV/bin/uvicorn" main:app \
     --host "$HOST" \
     --port "$PORT" \
-    --loop uvloop \
+    --loop auto \
     --log-level info

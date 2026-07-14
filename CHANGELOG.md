@@ -3,6 +3,34 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.5.1] — Deploy resilience: optional uvloop, self-diagnosing setup, no flaky tests
+
+Hardening driven by a real Raspberry Pi 5 deploy (Python 3.13) where a flaky
+piwheels install and a hard `import uvloop` combined to produce a **blank dashboard**.
+
+### Fixed
+- **`uvloop` is now optional, not fatal.** `backend/main.py` imported `uvloop`
+  unconditionally at module load; if the C-extension was missing or broken (common on
+  ARM64 / partial installs), the whole server crashed on startup and the dashboard
+  rendered blank. It now falls back to the stdlib asyncio loop with a warning. The
+  `uvicorn` launch flags (`setup.sh`, `Dockerfile`) use `--loop auto`, which prefers
+  uvloop when present and degrades gracefully otherwise.
+- **Flaky test removed.** `test_finds_aws_key` generated a *random* key each run and
+  failed ~4% of the time when the draw fell below the entropy gate — it now regenerates
+  until it clears the threshold, so it is deterministic (still no literal secret in source).
+
+### Changed
+- **Setup is self-diagnosing.** `setup.sh` now (a) verifies the app by importing the real
+  `main` module (catches a single half-installed dependency, not just five hand-picked
+  ones), and (b) after starting the service, **probes `/api/health`** — so an
+  "active but not serving" server is reported immediately with a `journalctl` hint,
+  instead of surfacing as a blank browser tab.
+
+### Tests
+- New `backend/tests/test_v251.py` — proves the app imports and serves with `uvloop`
+  absent, and that `/` and `/api/health` return content with no external CDN references.
+  Suite **124 → 127**.
+
 ## [2.5.0] — AI engine upgrade: `google-genai` SDK + two-tier Gemini 3.x validation
 
 The `google-generativeai` SDK was **deprecated by Google (Nov 2025)** and the

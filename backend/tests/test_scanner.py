@@ -149,7 +149,14 @@ class TestExtractSecrets:
     def test_finds_aws_key(self):
         import secrets as _s, string as _st
         # Runtime-generated (no literal secret in source) synthetic AWS key.
-        synthetic = "AKIA" + "".join(_s.choice(_st.ascii_uppercase + "0123456789") for _ in range(16))
+        # Regenerate until it clears the entropy gate so the test is deterministic —
+        # a low-entropy random draw would otherwise be filtered out ~4% of runs and
+        # flake the suite.
+        alphabet = _st.ascii_uppercase + "0123456789"
+        while True:
+            synthetic = "AKIA" + "".join(_s.choice(alphabet) for _ in range(16))
+            if scanner.shannon_entropy(synthetic) >= scanner.MIN_ENTROPY_THRESHOLD:
+                break
         body = f'const cfg = {{ key: "{synthetic}" }};'
         findings = scanner.extract_secrets(
             "scan1", "https://example.com", "https://example.com/app.js", body
