@@ -101,9 +101,11 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (54 patterns) + 
 │    └─ 16 SECRET_PATTERNS  (AWS, GCP, Slack, JWT, GitHub…)       │
 │    └─ shannon_entropy()   (filter < 3.5 bits)                   │
 │                                                                  │
-│  validate_with_gemini()                                          │
-│    └─ google-generativeai SDK  (gemini-1.5-flash)               │
-│    └─ JSON verdict: {is_valid, confidence, reason}              │
+│  validate_with_gemini()  — two-tier engine (google-genai SDK)   │
+│    └─ Tier 1 pre-filter:  gemini-3.1-flash-lite (thinking:min)  │
+│    └─ Tier 2 deep-valid.: gemini-3.5-flash      (thinking:high) │
+│    └─ Structured output → Pydantic GeminiVerdict               │
+│       {is_valid, confidence, reason}                            │
 │                                                                  │
 │  dispatch_discord()                                              │
 │    └─ Rich embed via httpx.post                                  │
@@ -118,7 +120,7 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (54 patterns) + 
 | Event loop | `uvloop` | 2–4× faster than default asyncio on ARM64 |
 | HTTP | `httpx.AsyncClient` | Native async, connection pooling, retries |
 | Concurrency | `asyncio.Semaphore(20)` | Bounds RAM on Pi 5 during deep JS analysis |
-| AI | Gemini 1.5 Flash | Fast, cheap, handles code context well |
+| AI | Two-tier Gemini (`google-genai`): 3.1-flash-lite → 3.5-flash | Cheap pre-filter kills noise; strong tier deep-validates real/critical findings with structured output |
 | Transport | WebSocket fan-out | Browser gets live logs without polling |
 | Frontend | Vanilla JS + Tailwind CDN | Zero build step, deployable immediately |
 

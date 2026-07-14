@@ -7,6 +7,7 @@ Optimised for Raspberry Pi 5 / Linux ARM64 with uvloop
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -21,7 +22,9 @@ from typing import Any, Callable, Coroutine
 from urllib.parse import urljoin, urlparse
 
 import httpx
-import google.generativeai as genai
+from google import genai
+from google.genai import errors as genai_errors, types
+from pydantic import BaseModel, Field, ValidationError
 
 import verifier
 
@@ -30,11 +33,40 @@ logger = logging.getLogger("secretnode.scanner")
 # ── Environment ────────────────────────────────────────────────────────────────
 GEMINI_API_KEY: str        = os.environ.get("GEMINI_API_KEY", "")
 DISCORD_WEBHOOK_URL: str   = os.environ.get("DISCORD_WEBHOOK_URL", "")
-GEMINI_MODEL: str          = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 VERIFY_SECRETS: bool       = os.environ.get("VERIFY_SECRETS", "false").lower() == "true"
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+# ── Gemini two-tier validation engine (google-genai SDK) ────────────────────────
+# Tier 1 (pre-filter): a fast, cheap model with minimal reasoning strips obvious
+# structural noise, mocks and placeholders. Tier 2 (deep validation): a stronger
+# model with high reasoning confirms genuine, high-severity exposures. Model IDs
+# and thinking levels are env-overridable so the engine tracks Google's lineup
+# without a code change. A legacy single-model GEMINI_MODEL override, if present,
+# is honoured as the Tier-1 model so existing deployments keep working.
+_LEGACY_MODEL              = os.environ.get("GEMINI_MODEL", "").strip()
+GEMINI_TIER1_MODEL: str    = os.environ.get("GEMINI_TIER1_MODEL", _LEGACY_MODEL or "gemini-3.1-flash-lite")
+GEMINI_TIER2_MODEL: str    = os.environ.get("GEMINI_TIER2_MODEL", "gemini-3.5-flash")
+GEMINI_TIER1_THINKING: str = os.environ.get("GEMINI_TIER1_THINKING", "minimal")
+GEMINI_TIER2_THINKING: str = os.environ.get("GEMINI_TIER2_THINKING", "high")
+# Severities that ALWAYS escalate to the deep tier, even if the cheap pre-filter
+# would reject them — we never let a low-cost model be the last word on a critical
+# secret (cloud keys, DB URIs, private keys). Comma-separated, case-insensitive.
+GEMINI_ESCALATE_SEVERITIES: frozenset[str] = frozenset(
+    s.strip().upper()
+    for s in os.environ.get("GEMINI_ESCALATE_SEVERITIES", "CRITICAL").split(",")
+    if s.strip()
+)
+
+# Lazily-constructed singleton client — built on first use, not at import, so the
+# module imports cleanly with no key present (tests, CLI, CI) and a missing/invalid
+# key degrades to needs-review instead of crashing the process at startup.
+_genai_client: "genai.Client | None" = None
+
+
+def _get_client() -> "genai.Client":
+    global _genai_client
+    if _genai_client is None:
+        _genai_client = genai.Client(api_key=GEMINI_API_KEY)
+    return _genai_client
 
 # ── Tuning Constants (all overridable via environment variables) ────────────────
 def _env_int(name: str, default: int) -> int:
@@ -1190,28 +1222,184 @@ def extract_secrets(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = (
-    "You are an AppSec validator. Review this extracted string and its surrounding code. "
-    "Determine if this is a genuinely exposed, sensitive API key/secret, or a benign mock "
-    "variable, placeholder, or minified code artifact. "
-    'Respond strictly with a JSON object: '
-    '{"is_valid": true/false, "confidence": 0-100, "reason": "brief explanation"}. '
-    "Output ONLY the JSON object. No markdown, no extra text."
+    "You are an AppSec validator. Review an extracted string and its surrounding "
+    "code and decide whether it is a genuinely exposed, sensitive, live credential "
+    "(API key, token, secret, database URI, private key) — as opposed to a benign "
+    "mock, placeholder, example, test fixture, or minified-code artifact. Be strict: "
+    "publicly-known example keys and obvious dummies are NOT valid. Return is_valid "
+    "(true only for a real, sensitive secret), confidence (0-100) and a brief reason."
 )
 
-_JSON_RE = re.compile(r'\{[^{}]+\}', re.DOTALL)
+
+class GeminiVerdict(BaseModel):
+    """Strict structured-output contract for a single validation verdict.
+
+    Bound directly to the SDK's ``response_schema`` so the model is constrained to
+    emit exactly these fields with these types — replacing the old regex-scrape +
+    ``json.loads`` path and its data-type ambiguity. Field names/types mirror the
+    ``ValidatedFinding`` columns so values flow into SQLite without coercion."""
+
+    is_valid: bool = Field(description="True only if this is a genuine, sensitive, exposed secret.")
+    confidence: int = Field(ge=0, le=100, description="Confidence in is_valid, 0-100.")
+    reason: str = Field(description="Brief (one sentence) justification.")
+
+
+def _severity_for(secret_type: str) -> str:
+    meta = PATTERN_BY_NAME.get(secret_type)
+    return meta.severity if meta is not None else "MEDIUM"
+
+
+def _tier_config(thinking_level: str) -> types.GenerateContentConfig:
+    """Build the GenerateContentConfig for one validation tier.
+
+    The system instruction is a stable, identical prefix on every call, which lets
+    Gemini's *implicit* context caching (automatic, free, no minimum-token floor)
+    discount the shared tokens on repeat calls — the honest, workload-appropriate
+    form of the "cache to cut input tokens" optimisation (explicit caches.create
+    needs a large shared prefix this per-finding workload does not have).
+    ``response_schema`` pins the output to GeminiVerdict; ``thinking_level`` is the
+    Gemini-3.x reasoning control (minimal→high) that replaces the retired numeric
+    thinking_budget."""
+    return types.GenerateContentConfig(
+        system_instruction=_SYSTEM_PROMPT,
+        temperature=0.1,
+        response_mime_type="application/json",
+        response_schema=GeminiVerdict,
+        thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
+    )
+
+
+async def _call_tier(
+    finding: RawFinding,
+    model: str,
+    thinking_level: str,
+    tier_label: str,
+    broadcast: Broadcaster | None,
+) -> tuple[GeminiVerdict | None, str]:
+    """Run one validation tier with retry/backoff.
+
+    Returns ``(verdict, "")`` on success, or ``(None, last_error)`` if every attempt
+    failed — rate limit (429), token exhaustion, transport error, or unparseable
+    output. The caller decides how a None degrades; a finding is never dropped."""
+    user_prompt = (
+        f"Secret type: {finding.secret_type}\n"
+        f"Severity: {_severity_for(finding.secret_type)}\n"
+        f"Extracted value: {finding.raw_match}\n"
+        f"Surrounding code:\n```\n{finding.context_snippet}\n```"
+    )
+    cfg = _tier_config(thinking_level)
+    last_error = "unknown error"
+
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            response = await asyncio.to_thread(
+                functools.partial(
+                    _get_client().models.generate_content,
+                    model=model,
+                    contents=user_prompt,
+                    config=cfg,
+                )
+            )
+            verdict = response.parsed
+            if not isinstance(verdict, GeminiVerdict):
+                # Structured parse unavailable — validate the raw JSON text against
+                # the same schema instead of ad-hoc dict cleanups.
+                text = (getattr(response, "text", "") or "").strip()
+                if not text:
+                    raise ValueError("empty model response")
+                # Validate against the same strict schema (0-100, correct types) —
+                # an out-of-range / malformed verdict raises here and degrades to
+                # needs-review rather than being silently coerced.
+                verdict = GeminiVerdict.model_validate_json(text)
+            return verdict, ""
+
+        except genai_errors.APIError as exc:
+            code = getattr(exc, "code", "?")
+            last_error = f"API error {code}: {exc}"
+            logger.warning("Gemini %s API error (attempt %d): %s", tier_label, attempt, exc)
+            if broadcast:
+                await broadcast({
+                    "type": "log", "level": "WARN",
+                    "message": f"[AI:{tier_label}] API error attempt {attempt} (code {code})",
+                })
+        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+            last_error = f"parse error: {exc}"
+            logger.warning("Gemini %s parse error (attempt %d): %s", tier_label, attempt, exc)
+        except Exception as exc:  # noqa: BLE001 — a validation call must never crash a scan
+            last_error = str(exc)
+            logger.warning("Gemini %s error (attempt %d): %s", tier_label, attempt, exc)
+
+        if attempt < RETRY_ATTEMPTS:
+            await asyncio.sleep(RETRY_BACKOFF_BASE ** attempt)
+
+    return None, last_error
+
+
+async def _emit_verdict(
+    finding: RawFinding,
+    verdict: GeminiVerdict,
+    tier_label: str,
+    broadcast: Broadcaster | None,
+) -> ValidatedFinding:
+    result = ValidatedFinding(
+        raw=finding,
+        is_valid=verdict.is_valid,
+        confidence=verdict.confidence,
+        reason=verdict.reason,
+    )
+    if broadcast:
+        level = "ERROR" if result.is_valid and result.confidence >= GEMINI_CONFIDENCE_MIN else "INFO"
+        await broadcast({
+            "type": "log", "level": level,
+            "message": (
+                f"[AI:{tier_label}] {finding.secret_type} — "
+                f"valid={result.is_valid} confidence={result.confidence}% — {result.reason}"
+            ),
+        })
+    return result
+
+
+async def _emit_needs_review(
+    finding: RawFinding,
+    last_error: str,
+    broadcast: Broadcaster | None,
+) -> ValidatedFinding:
+    # All tiers exhausted — do NOT drop the finding. Surface it for a human.
+    logger.error(
+        "AI validation permanently failed for %s in %s after %d attempts: %s — "
+        "flagging as NEEDS REVIEW instead of dropping.",
+        finding.secret_type, finding.source_url, RETRY_ATTEMPTS, last_error,
+    )
+    if broadcast:
+        await broadcast({
+            "type": "log", "level": "ERROR",
+            "message": (
+                f"[AI] Validation FAILED for {finding.secret_type} "
+                f"({last_error}) — flagged for manual review."
+            ),
+        })
+    return ValidatedFinding(
+        raw=finding,
+        is_valid=False,
+        confidence=NEEDS_REVIEW_SENTINEL,
+        reason=f"AI validation unavailable after {RETRY_ATTEMPTS} attempts ({last_error}). Manual review required.",
+    )
 
 
 async def validate_with_gemini(
     finding: RawFinding,
     broadcast: Broadcaster | None = None,
 ) -> ValidatedFinding:
-    """
-    Always returns a ValidatedFinding — never None. If Gemini is unreachable,
-    misconfigured, or returns unparseable output after all retries, the
-    finding is returned with confidence=NEEDS_REVIEW_SENTINEL rather than
-    being silently dropped. A security scanner must never lose findings
-    quietly; when in doubt, surface it to a human.
-    """
+    """Two-tier contextual validation. Always returns a ValidatedFinding — never
+    None.
+
+    Tier 1 (fast, minimal reasoning) pre-filters obvious noise. Tier 2 (stronger,
+    high reasoning) deep-validates anything the pre-filter flags as real, or that
+    carries an escalate-severity (e.g. cloud keys, DB URIs, private keys) — we never
+    let the cheap model be the last word on a critical secret. If the API is
+    unreachable / rate-limited / exhausted after retries, the finding is surfaced as
+    needs-review (confidence = NEEDS_REVIEW_SENTINEL) rather than silently dropped —
+    a scanner must never lose a finding quietly."""
     if not GEMINI_API_KEY:
         return ValidatedFinding(
             raw=finding,
@@ -1222,99 +1410,36 @@ async def validate_with_gemini(
 
     if broadcast:
         await broadcast({
-            "type": "log",
-            "level": "WARN",
+            "type": "log", "level": "WARN",
             "message": f"[AI] Validating {finding.secret_type} from {finding.source_url} …",
         })
 
-    user_prompt = (
-        f"Secret type: {finding.secret_type}\n"
-        f"Extracted value: {finding.raw_match}\n"
-        f"Surrounding code:\n```\n{finding.context_snippet}\n```"
+    severity = _severity_for(finding.secret_type)
+
+    # ── Tier 1: cheap pre-filter ────────────────────────────────────────────────
+    v1, err1 = await _call_tier(
+        finding, GEMINI_TIER1_MODEL, GEMINI_TIER1_THINKING, "pre-filter", broadcast,
     )
 
-    last_error = "unknown error"
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
-        try:
-            model = genai.GenerativeModel(
-                model_name=GEMINI_MODEL,
-                system_instruction=_SYSTEM_PROMPT,
-            )
-            response = await asyncio.to_thread(
-                model.generate_content,
-                user_prompt,
-                generation_config=genai.GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=256,
-                ),
-            )
+    # Escalate to the deep tier when the finding is an escalate-severity, or the
+    # pre-filter believes it is a real secret and we want a rigorous confirmation.
+    escalate = severity in GEMINI_ESCALATE_SEVERITIES or (v1 is not None and v1.is_valid)
 
-            raw_text = response.text.strip()
-            json_match = _JSON_RE.search(raw_text)
-            if not json_match:
-                raise ValueError(f"No JSON in Gemini response: {raw_text[:200]}")
+    if escalate:
+        v2, err2 = await _call_tier(
+            finding, GEMINI_TIER2_MODEL, GEMINI_TIER2_THINKING, "deep", broadcast,
+        )
+        if v2 is not None:
+            return await _emit_verdict(finding, v2, "deep", broadcast)
+        # Deep tier failed — fall back to the pre-filter verdict if we have one.
+        if v1 is not None:
+            return await _emit_verdict(finding, v1, "pre-filter (deep tier unavailable)", broadcast)
+        return await _emit_needs_review(finding, err2 or err1, broadcast)
 
-            payload: dict[str, Any] = json.loads(json_match.group(0))
-            is_valid   = bool(payload.get("is_valid", False))
-            confidence = int(payload.get("confidence", 0))
-            reason     = str(payload.get("reason", "No reason provided."))
+    if v1 is not None:
+        return await _emit_verdict(finding, v1, "pre-filter", broadcast)
 
-            if broadcast:
-                level = "ERROR" if is_valid and confidence >= GEMINI_CONFIDENCE_MIN else "INFO"
-                await broadcast({
-                    "type": "log",
-                    "level": level,
-                    "message": (
-                        f"[AI] {finding.secret_type} — "
-                        f"valid={is_valid} confidence={confidence}% — {reason}"
-                    ),
-                })
-
-            return ValidatedFinding(
-                raw=finding,
-                is_valid=is_valid,
-                confidence=confidence,
-                reason=reason,
-            )
-
-        except json.JSONDecodeError as exc:
-            last_error = f"JSON parse error: {exc}"
-            logger.warning("Gemini JSON parse error (attempt %d): %s", attempt, exc)
-        except Exception as exc:  # noqa: BLE001
-            last_error = str(exc)
-            logger.warning("Gemini error (attempt %d): %s", attempt, exc)
-            if broadcast:
-                await broadcast({
-                    "type": "log",
-                    "level": "WARN",
-                    "message": f"[AI] Gemini error attempt {attempt}: {exc}",
-                })
-
-        if attempt < RETRY_ATTEMPTS:
-            await asyncio.sleep(RETRY_BACKOFF_BASE ** attempt)
-
-    # All retries exhausted — do NOT drop the finding. Surface it as
-    # needs-review so a human decides instead of the tool losing it.
-    logger.error(
-        "AI validation permanently failed for %s in %s after %d attempts: %s — "
-        "flagging as NEEDS REVIEW instead of dropping.",
-        finding.secret_type, finding.source_url, RETRY_ATTEMPTS, last_error,
-    )
-    if broadcast:
-        await broadcast({
-            "type": "log",
-            "level": "ERROR",
-            "message": (
-                f"[AI] Validation FAILED for {finding.secret_type} after "
-                f"{RETRY_ATTEMPTS} attempts ({last_error}) — flagged for manual review."
-            ),
-        })
-    return ValidatedFinding(
-        raw=finding,
-        is_valid=False,
-        confidence=NEEDS_REVIEW_SENTINEL,
-        reason=f"AI validation unavailable after {RETRY_ATTEMPTS} attempts ({last_error}). Manual review required.",
-    )
+    return await _emit_needs_review(finding, err1, broadcast)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

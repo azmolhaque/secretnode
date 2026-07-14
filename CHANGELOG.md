@@ -3,6 +3,55 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.5.0] — AI engine upgrade: `google-genai` SDK + two-tier Gemini 3.x validation
+
+The `google-generativeai` SDK was **deprecated by Google (Nov 2025)** and the
+hard-coded `gemini-1.5-flash` model is legacy. This release migrates the contextual
+validator to the official **`google-genai`** SDK and a modern two-tier engine, with
+strict structured output and cost-aware model routing — without weakening the
+"never silently drop a finding" guarantee that has anchored SecretNode since v2.0.
+
+### Changed
+- **New SDK — `google-genai` 2.11.0** replaces the deprecated `google-generativeai`.
+  Client is a lazily-built singleton (`genai.Client()` reading `GEMINI_API_KEY`), so
+  the module still imports with no key present and a bad key degrades to needs-review
+  instead of crashing at startup.
+- **Two-tier validation engine** (`validate_with_gemini`):
+  - **Tier 1 — pre-filter:** `gemini-3.1-flash-lite` with `thinking_level='minimal'`
+    cheaply strips structural noise, mocks and placeholder keys.
+  - **Tier 2 — deep validation:** `gemini-3.5-flash` with `thinking_level='high'`
+    confirms anything the pre-filter flags as real, or that carries an escalate-severity
+    (default `CRITICAL`) — the cheap model is never the last word on a critical secret.
+  - Models, thinking levels and the escalate-severity set are all env-overridable
+    (`GEMINI_TIER1_MODEL`, `GEMINI_TIER2_MODEL`, `GEMINI_TIER1_THINKING`,
+    `GEMINI_TIER2_THINKING`, `GEMINI_ESCALATE_SEVERITIES`). A legacy single
+    `GEMINI_MODEL` is honoured as the Tier-1 model for back-compat.
+- **Strict structured output** — a Pydantic v2 `GeminiVerdict` (`{is_valid: bool,
+  confidence: int(0-100), reason: str}`) is bound to the SDK's native `response_schema`
+  with `response_mime_type='application/json'`. This **removes the old regex JSON-scrape
+  + `json.loads` fallback**; fields map straight into the SQLite layer with no coercion.
+- **Implicit context caching** — the identical system-instruction prefix on every call
+  lets Gemini's automatic (free) implicit caching discount shared tokens on repeat
+  scans. Explicit `caches.create` was intentionally **not** used: this per-finding
+  workload has no large shared prefix and would not clear the minimum-token floor.
+
+### Fixed
+- **Graceful degradation preserved and broadened** — a 429 / token-exhaustion / transport
+  error on either tier retries with backoff and then falls back (deep→pre-filter verdict,
+  or → `needs_review` with the `NEEDS_REVIEW_SENTINEL`), so findings are surfaced to a
+  human, never dropped.
+- **Dependency conflicts resolved** — `google-genai` requires `httpx>=0.28.1` and
+  `pydantic>=2.12.5`; both pins were bumped (`httpx` 0.27.2→0.28.1, `pydantic`
+  2.10.3→2.12.5). `websockets==14.1` already satisfied its range. No httpx-0.28
+  breaking APIs are used by the backend.
+
+### Tests
+- New `backend/tests/test_v250.py` — 13 tests covering the `GeminiVerdict` schema,
+  Tier-1→Tier-2 escalation (noise rejection, positive escalation, critical-always-escalates),
+  structured-output parsing + text-JSON fallback, and graceful degradation (429 →
+  needs_review, deep-tier failure → pre-filter fallback, never-None). Suite **111 → 124**,
+  fully offline via a fake client. Ruff clean.
+
 ## [2.4.0] — Field-hardening: WAF-resilient fetching, deeper coverage, current-gen detectors
 
 Driven by real dashboard runs on a Raspberry Pi 5 against live targets, where three
