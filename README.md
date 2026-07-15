@@ -98,7 +98,7 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (54 patterns) + 
 │    └─ extract_js_urls()  (regex HTML parse)                      │
 │                                                                  │
 │  extract_secrets()                                               │
-│    └─ 16 SECRET_PATTERNS  (AWS, GCP, Slack, JWT, GitHub…)       │
+│    └─ 54 SECRET_PATTERNS  (AWS, GCP, Slack, JWT, GitHub…)       │
 │    └─ shannon_entropy()   (filter < 3.5 bits)                   │
 │                                                                  │
 │  validate_with_gemini()  — two-tier engine (google-genai SDK)   │

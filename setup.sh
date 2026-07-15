@@ -87,11 +87,21 @@ log "Upgrading pip..."
 "$PIP" install --upgrade pip "${PIP_NET_OPTS[@]}" --quiet \
     || warn "pip self-upgrade failed (network?) — continuing with the existing pip"
 
+_install_reqs() {  # extra args (e.g. an alternate index) are appended
+    "$PIP" install --upgrade -r "$SCRIPT_DIR/requirements.txt" "${PIP_NET_OPTS[@]}" --quiet "$@"
+}
+
 log "Installing Python requirements (this may take a few minutes on ARM64)..."
-if ! "$PIP" install --upgrade -r "$SCRIPT_DIR/requirements.txt" "${PIP_NET_OPTS[@]}" --quiet; then
-    die "Requirements install failed — this is almost always a flaky network to PyPI/piwheels
-         (the WARNINGs above). Nothing is broken; just re-run ./setup.sh once connectivity is
-         stable. To retry against PyPI directly: $PIP install -r requirements.txt --index-url https://pypi.org/simple"
+if ! _install_reqs; then
+    # The Pi's default index is piwheels, which is frequently slow/flaky. Fall back
+    # to PyPI directly before giving up — often the difference between a failed and a
+    # clean install on a shaky connection.
+    warn "First attempt failed (piwheels flaky?). Retrying against PyPI directly…"
+    if ! _install_reqs --index-url https://pypi.org/simple; then
+        die "Requirements install failed on both piwheels and PyPI — almost always a flaky
+             network (see the WARNINGs above). Nothing is broken; just re-run ./setup.sh once
+             connectivity is stable."
+    fi
 fi
 # Fail loudly and early if the app cannot actually start, rather than at first
 # request (a flaky piwheels install can leave a single dep — e.g. the uvloop
