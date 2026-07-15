@@ -469,8 +469,15 @@ async def get_scan_report(
     - format=sarif: SARIF 2.1.0 for GitHub code scanning / CI ingestion
     """
     scan = await _resolve_scan(scan_id)
-    if scan.get("status") != "complete":
-        raise HTTPException(status_code=409, detail=f"Scan is not complete yet (status: {scan.get('status')})")
+    # A finished scan is either "complete" (had findings) or "clean" (zero findings).
+    # Both are reportable — a clean scan still produces a valuable assurance report
+    # (coverage + confidence). Only reject scans that haven't finished.
+    if scan.get("status") not in ("complete", "clean"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scan has not finished yet (status: {scan.get('status')}). "
+                   "Reports are available once the scan completes.",
+        )
 
     if format == "html":
         body = report_gen.generate_html_report(scan, agency_name=agency_name)

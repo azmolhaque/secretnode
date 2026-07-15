@@ -21,6 +21,7 @@ import html
 import io
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 _SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
@@ -30,8 +31,24 @@ _SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 _SARIF_LEVEL = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning", "LOW": "note"}
 _SARIF_SECURITY_SEVERITY = {"CRITICAL": "9.5", "HIGH": "8.0", "MEDIUM": "5.0", "LOW": "3.0"}
 
-_TOOL_VERSION = "2.3.0"
 _TOOL_URI = "https://github.com/azmolhaque/secretnode"
+
+
+def _tool_version() -> str:
+    """Single-source the version from pyproject.toml so client reports never stamp
+    a stale version (they used to be pinned at 2.3.0). Falls back if unreadable."""
+    try:
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        for line in pyproject.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("version") and "=" in s:
+                return s.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return "2.5.2"
+
+
+_TOOL_VERSION = _tool_version()
 
 
 def _severity_of(finding: dict[str, Any]) -> str:
@@ -67,6 +84,43 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     for f in confirmed:
         sev = _severity_of(f)
         sev_counts[sev] = sev_counts.get(sev, 0) + 1
+
+    confirmed_count = len(confirmed)
+    verified_active = sum(1 for f in confirmed if str(f.get("verified", "")).lower() == "verified")
+    raw_screened = scan.get("raw_findings", 0)
+    scanned_at = html.escape(str(scan.get("created_at", "")) or generated_at)
+
+    # Overall risk posture — drives the executive-summary banner.
+    if sev_counts["CRITICAL"]:
+        risk_label, risk_color = "CRITICAL", "#c53030"
+    elif sev_counts["HIGH"]:
+        risk_label, risk_color = "HIGH", "#dd6b20"
+    elif sev_counts["MEDIUM"]:
+        risk_label, risk_color = "MEDIUM", "#d69e2e"
+    elif confirmed_count:
+        risk_label, risk_color = "LOW", "#3182ce"
+    elif needs_review:
+        risk_label, risk_color = "REVIEW REQUIRED", "#805ad5"
+    else:
+        risk_label, risk_color = "CLEAN", "#276749"
+
+    if confirmed_count:
+        verdict_title = (f"{confirmed_count} confirmed credential exposure"
+                         f"{'s' if confirmed_count != 1 else ''} detected")
+        if verified_active:
+            verdict_title += f" — {verified_active} verified currently ACTIVE"
+        verdict_sub = ("Treat exposed credentials as compromised: rotate/revoke them at the provider "
+                       "immediately, then purge them from the shipped assets. See the findings and "
+                       "remediation guidance below.")
+    elif needs_review:
+        verdict_title = f"No confirmed exposures — {len(needs_review)} item(s) need manual review"
+        verdict_sub = ("AI validation was unavailable for some candidates during this scan; a human "
+                       "should confirm they are benign before this target is considered clean.")
+    else:
+        verdict_title = "No exposed credentials detected"
+        verdict_sub = (f"{assets} asset(s) were analysed and {raw_screened} high-entropy candidate(s) "
+                       "screened; none were confirmed as live secrets. This is a point-in-time assurance "
+                       "snapshot of the external attack surface, not a guarantee of absolute security.")
 
     def sev_badge(sev: str) -> str:
         sev = sev.upper()
@@ -165,19 +219,36 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
   .remediation {{ background: #f7fafc; border-left: 3px solid #276749; padding: 10px 12px; margin: 8px 0; font-size: 12px; border-radius: 0 4px 4px 0; }}
   footer {{ margin-top: 40px; font-size: 11px; color: #a0aec0; border-top: 1px solid #e2e8f0; padding-top: 12px; }}
   .no-print {{ background: #fffaf0; border: 1px solid #f6ad55; padding: 10px; border-radius: 6px; margin-bottom: 20px; font-size: 13px; }}
+  .verdict {{ background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 16px 18px; margin: 18px 0; }}
+  .verdict-row {{ display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }}
+  .risk-pill {{ color: #fff; font-weight: bold; font-size: 12px; letter-spacing: 0.06em; padding: 4px 12px; border-radius: 4px; }}
+  .verdict-title {{ font-size: 16px; font-weight: 600; }}
+  .verdict-sub {{ font-size: 13px; color: #4a5568; margin-top: 8px; }}
+  .scope p {{ font-size: 13px; color: #2d3748; }}
 </style>
 </head>
 <body>
   <div class="no-print">📄 Tip: use your browser's Print function (Ctrl/Cmd+P) and choose "Save as PDF" to export this report as a PDF deliverable.</div>
 
   <h1>External Attack Surface &amp; Credential Exposure Report</h1>
+
+  <div class="verdict" style="border-left:6px solid {risk_color};">
+    <div class="verdict-row">
+      <span class="risk-pill" style="background:{risk_color};">{html.escape(risk_label)}</span>
+      <span class="verdict-title">{html.escape(verdict_title)}</span>
+    </div>
+    <div class="verdict-sub">{html.escape(verdict_sub)}</div>
+  </div>
+
   <div class="meta">
     <div><b>Target</b> {target}</div>
     <div><b>Prepared by</b> {html.escape(agency_name)}</div>
     <div><b>Scan ID</b> {scan_id}</div>
-    <div><b>Generated</b> {generated_at}</div>
+    <div><b>Scan started</b> {scanned_at}</div>
+    <div><b>Report generated</b> {generated_at}</div>
     <div><b>Scan duration</b> {duration}s</div>
     <div><b>Assets analysed</b> {assets}</div>
+    <div><b>Candidates screened</b> {raw_screened}</div>
   </div>
 
   <div class="summary-grid">
@@ -187,6 +258,16 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     <div class="stat"><div class="num">{new_count}</div><div class="label">New</div></div>
     <div class="stat"><div class="num">{recurring_count}</div><div class="label">Recurring</div></div>
     <div class="stat"><div class="num">{len(needs_review)}</div><div class="label">Needs Review</div></div>
+  </div>
+
+  <h2>Scope &amp; Methodology</h2>
+  <div class="scope">
+    <p>SecretNode performed a <b>passive</b> external attack-surface assessment of <span class="mono">{target}</span>:
+    it crawled same-domain pages, collected linked JavaScript and declared source-map assets, and screened their
+    contents for exposed credentials using its full pattern registry (50+ provider-specific detectors) together with
+    Shannon-entropy analysis. High-entropy candidates were then contextually validated to distinguish live secrets
+    from mocks, placeholders and minified-code artefacts. <b>No exploitation, authentication, data exfiltration, or
+    write operations</b> were performed against the target — testing is passive and authorized-scope only.</p>
   </div>
 
   <h2>Confirmed Findings</h2>

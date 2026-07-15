@@ -3,6 +3,34 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.5.2] — Reports: fix clean-scan export + higher-quality client deliverable
+
+Driven by a dashboard error on a real clean scan — `Report export failed: Scan is
+not complete yet (status: clean)`.
+
+### Fixed
+- **A clean (zero-finding) scan can now be exported.** A no-findings scan finishes
+  with status `clean`, but the report endpoint only accepted `complete`, so it
+  returned HTTP 409 and no report could be produced. It now accepts both terminal
+  states (`complete` and `clean`) and only rejects genuinely unfinished scans.
+- **Client reports no longer stamp a stale version.** `report.py` hard-coded
+  `v2.3.0`; the version is now read from `pyproject.toml`, so reports always carry
+  the running version.
+
+### Added
+- **Executive-summary verdict banner** on the HTML report — a colour-coded risk pill
+  (CRITICAL/HIGH/MEDIUM/LOW/REVIEW REQUIRED/CLEAN) with a plain-language verdict. A
+  clean scan now reads *"No exposed credentials detected — N assets analysed, M
+  candidates screened"* (the zero-finding assurance statement), instead of empty tables.
+- **Scope & Methodology section** — states the passive, authorized-only method and the
+  coverage (assets analysed, candidates screened, duration), so the deliverable stands
+  on its own for a client. Metadata now includes scan-start time and candidates screened.
+
+### Tests
+- New `backend/tests/test_v252.py` (6 tests): clean-scan assurance report, findings
+  verdict/risk, non-stale version, clean-scan CSV/SARIF, and the report endpoint gate
+  (clean → 200, unfinished → 409). Suite **127 → 133**.
+
 ## [2.5.1] — Deploy resilience: optional uvloop, self-diagnosing setup, no flaky tests
 
 Hardening driven by a real Raspberry Pi 5 deploy (Python 3.13) where a flaky
