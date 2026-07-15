@@ -1269,6 +1269,35 @@ def _tier_config(thinking_level: str) -> types.GenerateContentConfig:
     )
 
 
+# API status codes that indicate a permanent configuration problem — an invalid /
+# blocked key or a model the key can't call — rather than a transient hiccup.
+# Retrying them is futile, so we fail fast and disable AI for the rest of the scan
+# instead of hammering the API (and flooding needs-review) once per finding.
+_NON_RETRYABLE_AI_CODES = frozenset({400, 401, 403, 404})
+_ai_disabled_reason: "str | None" = None
+
+
+def _describe_ai_config_error(code: object, exc: Exception) -> str:
+    s = str(exc).lower()
+    if code == 404 or "not found" in s or "does not exist" in s:
+        return ("Gemini model not available to this key (404) — set GEMINI_TIER1_MODEL / "
+                "GEMINI_TIER2_MODEL to models your API key can call.")
+    if code == 403:
+        return ("Gemini API access denied (403) — the key lacks permission or the Generative "
+                "Language API is not enabled for its project.")
+    if code in (400, 401) or "api key not valid" in s or "invalid" in s:
+        return ("GEMINI_API_KEY was rejected by Google (invalid key) — set a valid key from "
+                "https://aistudio.google.com/apikey in your .env.")
+    return f"Gemini API error {code} — AI validation disabled for this scan."
+
+
+def _ai_skipped(finding: RawFinding, reason: str) -> ValidatedFinding:
+    """AI unavailable for a configuration reason (no key / rejected key / missing
+    model). The finding is returned unvalidated (confidence 50) rather than flooding
+    needs-review with one scary item per finding — the root cause is surfaced once."""
+    return ValidatedFinding(raw=finding, is_valid=True, confidence=50, reason=reason)
+
+
 async def _call_tier(
     finding: RawFinding,
     model: str,
@@ -1317,6 +1346,19 @@ async def _call_tier(
             code = getattr(exc, "code", "?")
             last_error = f"API error {code}: {exc}"
             logger.warning("Gemini %s API error (attempt %d): %s", tier_label, attempt, exc)
+            if code in _NON_RETRYABLE_AI_CODES:
+                # Permanent config error — do not retry, and latch AI off for this scan
+                # so the remaining findings don't repeat the same futile call.
+                global _ai_disabled_reason
+                if _ai_disabled_reason is None:
+                    _ai_disabled_reason = _describe_ai_config_error(code, exc)
+                    logger.error("AI validation disabled for this scan: %s", _ai_disabled_reason)
+                    if broadcast:
+                        await broadcast({
+                            "type": "log", "level": "ERROR",
+                            "message": f"[AI] Validation disabled for this scan — {_ai_disabled_reason}",
+                        })
+                return None, last_error
             if broadcast:
                 await broadcast({
                     "type": "log", "level": "WARN",
@@ -1408,6 +1450,11 @@ async def validate_with_gemini(
             reason="AI validation skipped — GEMINI_API_KEY not configured.",
         )
 
+    # A prior finding already hit a permanent config error this scan — skip the API
+    # entirely (don't repeat the futile call) and return the finding unvalidated.
+    if _ai_disabled_reason:
+        return _ai_skipped(finding, f"AI validation unavailable — {_ai_disabled_reason}")
+
     if broadcast:
         await broadcast({
             "type": "log", "level": "WARN",
@@ -1434,11 +1481,17 @@ async def validate_with_gemini(
         # Deep tier failed — fall back to the pre-filter verdict if we have one.
         if v1 is not None:
             return await _emit_verdict(finding, v1, "pre-filter (deep tier unavailable)", broadcast)
+        # A config error (invalid key / missing model) degrades to skipped, not the
+        # needs-review flood; a transient failure still surfaces for manual review.
+        if _ai_disabled_reason:
+            return _ai_skipped(finding, f"AI validation unavailable — {_ai_disabled_reason}")
         return await _emit_needs_review(finding, err2 or err1, broadcast)
 
     if v1 is not None:
         return await _emit_verdict(finding, v1, "pre-filter", broadcast)
 
+    if _ai_disabled_reason:
+        return _ai_skipped(finding, f"AI validation unavailable — {_ai_disabled_reason}")
     return await _emit_needs_review(finding, err1, broadcast)
 
 
@@ -1590,6 +1643,11 @@ async def run_scan(
     scan_id = scan_id or str(uuid.uuid4())
     state   = state or ScanState()
     t0      = time.monotonic()
+
+    # Reset the per-scan AI-disable latch (set if this scan hits a permanent AI
+    # config error such as an invalid key or an unavailable model).
+    global _ai_disabled_reason
+    _ai_disabled_reason = None
 
     async def emit(event: dict[str, Any]) -> None:
         if broadcast:

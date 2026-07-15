@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SecretNode v2.5.2 — ASM Scanner</title>
+  <title>SecretNode v2.5.3 — ASM Scanner</title>
   <meta name="color-scheme" content="dark" />
   <meta name="description" content="SecretNode — passive attack-surface &amp; exposed-secret scanner with a live dashboard. Self-hosted, offline-capable, multi-device." />
   <!-- No external CDNs: Tailwind and Google Fonts were removed. Fonts are
@@ -450,7 +450,7 @@
       </div>
       <div>
         <div class="header-title">SecretNode</div>
-        <div style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.5.2 — ATTACK SURFACE MONITOR</div>
+        <div style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.5.3 — ATTACK SURFACE MONITOR</div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:24px;">
@@ -569,7 +569,7 @@
           </div>
         </div>
         <div id="console-output" style="padding:12px 14px;flex:1;">
-          <div class="log-SYS">SecretNode v2.5.2 initialised. Awaiting target...<span class="cursor"></span></div>
+          <div class="log-SYS">SecretNode v2.5.3 initialised. Awaiting target...<span class="cursor"></span></div>
         </div>
       </div>
 
@@ -649,7 +649,7 @@
     <!-- ── FOOTER ── -->
     <div class="app-footer">
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;letter-spacing:0.1em;">
-        SECRETNODE v2.5.2 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
+        SECRETNODE v2.5.3 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
       </span>
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;">
         ⚠ FOR AUTHORIZED SECURITY TESTING ONLY
@@ -726,13 +726,36 @@
     setInterval(updateClock, 1000);
     updateClock();
 
-    // ── Toast ────────────────────────────────────────────────────────────────
+    // ── Toast (deduped + capped so a flood can't cover the screen) ─────────────
+    const MAX_TOASTS = 5;
+    const _activeToasts = new Map();  // msg -> {el, countEl, count, timer}
     function toast(msg, type = 'info', duration = 4000) {
+      const c = $('toast-container');
+      // Dedupe: identical message already visible → bump its counter, reset its timer.
+      const existing = _activeToasts.get(msg);
+      if (existing) {
+        existing.count += 1;
+        existing.countEl.textContent = ` ×${existing.count}`;
+        clearTimeout(existing.timer);
+        existing.timer = setTimeout(() => { existing.el.remove(); _activeToasts.delete(msg); }, duration);
+        return;
+      }
       const el = document.createElement('div');
       el.className = `toast toast-${type}`;
       el.textContent = msg;
-      $('toast-container').appendChild(el);
-      setTimeout(() => el.remove(), duration);
+      const countEl = document.createElement('span');
+      countEl.style.opacity = '0.7';
+      el.appendChild(countEl);
+      c.appendChild(el);
+      const entry = { el, countEl, count: 1,
+        timer: setTimeout(() => { el.remove(); _activeToasts.delete(msg); }, duration) };
+      _activeToasts.set(msg, entry);
+      // Cap: drop the oldest toast(s) beyond the visible limit.
+      while (c.children.length > MAX_TOASTS && c.firstElementChild) {
+        const oldest = c.firstElementChild;
+        oldest.remove();
+        for (const [k, v] of _activeToasts) { if (v.el === oldest) { clearTimeout(v.timer); _activeToasts.delete(k); break; } }
+      }
     }
 
     // ── Console ──────────────────────────────────────────────────────────────

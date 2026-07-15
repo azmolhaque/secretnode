@@ -3,6 +3,32 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.5.3] — AI config-error handling + toast-flood fix
+
+From a real scan run with an **invalid `GEMINI_API_KEY`**: every finding returned
+`400 INVALID_ARGUMENT: API key not valid`, the engine retried each one 3×/tier, and
+all 13 findings were dumped into needs-review — producing a screen-covering flood of
+identical alerts.
+
+### Fixed
+- **Permanent AI config errors now fail fast and are surfaced once.** A `400/401/403/404`
+  (invalid or blocked key, or a model the key can't call) is no longer retried; the first
+  occurrence latches AI off for the rest of the scan, so later findings make **zero**
+  further API calls (was ~6× the necessary calls). Affected findings are returned
+  *skipped/unvalidated* (confidence 50) with a single actionable reason — e.g. *"GEMINI_API_KEY
+  was rejected by Google (invalid key) — set a valid key from https://aistudio.google.com/apikey"*
+  or a model-availability hint for a 404 — instead of a needs-review flood. Transient
+  errors (429/5xx) are unchanged: they still retry and degrade to needs-review, preserving
+  the never-drop-a-finding guarantee.
+- **Toast notifications no longer cover the screen.** Identical messages are de-duplicated
+  into a single toast with a `×N` counter, and at most 5 are shown at once (oldest evicted).
+
+### Tests
+- New `backend/tests/test_v253.py` (5 tests): invalid-key fail-fast (1 call, not 3),
+  skipped-not-needs-review with actionable guidance, the scan-wide short-circuit (0 further
+  calls), the 404 model-guidance path, and that a transient 429 still degrades to
+  needs-review. Toast cap/dedupe verified in-browser + by logic test. Suite **133 → 138**.
+
 ## [2.5.2] — Reports: fix clean-scan export + higher-quality client deliverable
 
 Driven by a dashboard error on a real clean scan — `Report export failed: Scan is
