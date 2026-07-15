@@ -84,7 +84,9 @@ def _client():
     return TestClient(main.app)
 
 
-HEADERS = {"X-API-Key": "test-key-for-pytest"}
+# Use whatever key the app actually loaded — CI sets SECRETNODE_API_KEY in the
+# environment (ci-test-key), so a hard-coded value here would 401.
+HEADERS = {"X-API-Key": os.environ["SECRETNODE_API_KEY"]}
 
 
 async def _persist(scan):
