@@ -3,6 +3,36 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.5.4] — Impact-aware validation: sell impact, not known-public information
+
+From a real scan: a Firebase Web `apiKey` shipped in client JS was reported as a
+HIGH "compromised Google Cloud API Key — rotate immediately". But Firebase web keys
+are **public by design** (identifiers, not secrets) — a finding a client would dismiss
+as known information. The same key, matched by a different detector, was even correctly
+called *"not a sensitive secret"*. Clients pay for **impact**, so validation is now
+impact-aware.
+
+### Added
+- **Public-by-design classification.** The validator's Gemini schema now returns
+  `public_by_design` and `impact`. The system prompt teaches the model to separate
+  identifiers meant to ship in client code (Firebase web `apiKey`, browser/Maps keys,
+  Stripe/PayPal **publishable** `pk_` keys, Sentry DSNs, PostHog/Segment write keys,
+  Algolia search-only keys, Mapbox `pk.` tokens) from genuinely exploitable secrets
+  (private keys, service-account JSON, `sk_`/AWS secret keys, DB URIs, session tokens).
+  A public-by-design value is **not** reported as an exposure and is downgraded to
+  **INFO** severity regardless of the pattern's registry severity — killing the
+  embarrassing Firebase-key false positive.
+- **Impact / blast-radius on every finding.** Each confirmed finding now carries a one-line
+  *what an attacker could actually do* statement, surfaced as a dedicated **Impact / Blast
+  Radius** column in the HTML report, an `impact` column in CSV, an `impact` property + inline
+  `Impact:` text in SARIF, and an **IMPACT / BLAST RADIUS** block in the dashboard's finding
+  detail. The deliverable now leads with impact instead of "CWE-798, rotate it".
+
+### Tests
+- New `backend/tests/test_v254.py` (7 tests): schema carries the new fields (and old-style
+  construction still works), public-by-design → INFO, a real secret keeps its severity and
+  carries impact, and impact appears in HTML/CSV/SARIF. Suite **138 → 145**.
+
 ## [2.5.3] — AI config-error handling + toast-flood fix
 
 From a real scan run with an **invalid `GEMINI_API_KEY`**: every finding returned

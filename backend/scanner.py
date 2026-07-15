@@ -156,6 +156,17 @@ class ValidatedFinding:
     )
     is_new: bool = True   # set False by run_scan if this fingerprint was seen in a prior scan
     verified: str = "disabled"  # live-verification status: verified/unverified/unsupported/disabled
+    impact: str = ""            # AI blast-radius statement: what an attacker could actually do
+    public_by_design: bool = False  # True for identifiers meant to be public (Firebase web key, pk_ …)
+
+    def effective_severity(self) -> str:
+        """Impact-aware severity. A value the AI judged public-by-design (a Firebase web
+        apiKey, a publishable pk_ key, a Sentry DSN, …) is an identifier, not a secret —
+        it is downgraded to INFO regardless of the pattern's registry severity, so the
+        report leads with real impact instead of inflating known-public information."""
+        if self.public_by_design:
+            return "INFO"
+        return self._meta().severity
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -170,11 +181,13 @@ class ValidatedFinding:
             "is_valid":       self.is_valid,
             "confidence":     self.confidence,
             "reason":         self.reason,
+            "impact":         self.impact,
+            "public_by_design": self.public_by_design,
             "found_at":       self.raw.found_at,
             "validated_at":   self.validated_at,
             "is_new":         self.is_new,
             "verified":       self.verified,
-            "severity":       self._meta().severity,
+            "severity":       self.effective_severity(),
             "cwe":            self._meta().cwe,
             "remediation":    self._meta().remediation,
         }
@@ -1222,12 +1235,26 @@ def extract_secrets(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = (
-    "You are an AppSec validator. Review an extracted string and its surrounding "
-    "code and decide whether it is a genuinely exposed, sensitive, live credential "
-    "(API key, token, secret, database URI, private key) — as opposed to a benign "
-    "mock, placeholder, example, test fixture, or minified-code artifact. Be strict: "
-    "publicly-known example keys and obvious dummies are NOT valid. Return is_valid "
-    "(true only for a real, sensitive secret), confidence (0-100) and a brief reason."
+    "You are a senior application-security analyst triaging a string extracted from a "
+    "website's client-side code. Decide whether it is a GENUINELY SENSITIVE, EXPLOITABLE "
+    "secret — not merely something shaped like a key. Clients pay for impact, not for "
+    "known-public information, so be rigorous about what actually creates risk.\n\n"
+    "PUBLIC-BY-DESIGN identifiers are NOT secrets. Many credential-shaped strings are "
+    "meant to ship in client code and are safe on their own — mark these is_valid=false "
+    "and public_by_design=true:\n"
+    "  • Firebase Web config apiKey (an AIza… value next to authDomain / projectId / appId / "
+    "storageBucket) — a project identifier, not a secret; real risk comes only from insecure "
+    "Firebase Security Rules or an unrestricted API key, which cannot be judged from the key alone.\n"
+    "  • Google Maps / other browser API keys, reCAPTCHA site keys.\n"
+    "  • PUBLISHABLE payment keys (Stripe/PayPal pk_live / pk_test), Sentry DSNs, PostHog / "
+    "Segment write keys, Algolia search-only keys, Mapbox pk. tokens.\n\n"
+    "GENUINELY SENSITIVE (is_valid=true) — private keys, service-account JSON, provider SECRET "
+    "keys (sk_live, AWS secret access key, GitHub/GitLab/Slack tokens), database connection URIs "
+    "with embedded credentials, session/refresh tokens. Also reject obvious mocks, placeholders, "
+    "example keys and minified-code artefacts (is_valid=false).\n\n"
+    "Return: is_valid, confidence (0-100), public_by_design, impact (ONE concrete sentence on what "
+    "an attacker could actually do with this if exploitable — the blast radius; empty string if "
+    "benign/public), and a brief reason."
 )
 
 
@@ -1239,8 +1266,19 @@ class GeminiVerdict(BaseModel):
     ``json.loads`` path and its data-type ambiguity. Field names/types mirror the
     ``ValidatedFinding`` columns so values flow into SQLite without coercion."""
 
-    is_valid: bool = Field(description="True only if this is a genuine, sensitive, exposed secret.")
+    is_valid: bool = Field(
+        description="True only if this is a genuine, sensitive, exploitable secret — "
+                    "NOT a public-by-design client identifier, mock, or placeholder.")
     confidence: int = Field(ge=0, le=100, description="Confidence in is_valid, 0-100.")
+    public_by_design: bool = Field(
+        default=False,
+        description="True if this value is intended to be public in client code (Firebase web "
+                    "apiKey, browser/Maps key, Stripe pk_ publishable key, Sentry DSN, etc.). "
+                    "These are identifiers, not secrets, and must not be reported as exposures.")
+    impact: str = Field(
+        default="",
+        description="One concrete sentence: what an attacker could actually do with this if "
+                    "exploitable (blast radius). Empty string when benign or public-by-design.")
     reason: str = Field(description="Brief (one sentence) justification.")
 
 
@@ -1388,6 +1426,8 @@ async def _emit_verdict(
         is_valid=verdict.is_valid,
         confidence=verdict.confidence,
         reason=verdict.reason,
+        impact=getattr(verdict, "impact", "") or "",
+        public_by_design=bool(getattr(verdict, "public_by_design", False)),
     )
     if broadcast:
         level = "ERROR" if result.is_valid and result.confidence >= GEMINI_CONFIDENCE_MIN else "INFO"
