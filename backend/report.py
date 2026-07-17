@@ -329,6 +329,49 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
 # SARIF 2.1.0
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _rule_id(secret_type: str) -> str:
+    """Deterministic SARIF ruleId for a secret type. Shared by the rule catalog
+    and each result so results always resolve to a described rule."""
+    return "secretnode/" + secret_type.lower().replace(" ", "-").replace("/", "-")
+
+
+def _catalog_rules() -> dict[str, dict[str, Any]]:
+    """Full catalog of every detector as a SARIF reportingDescriptor.
+
+    A SARIF driver should advertise every rule it *can* apply — not only the ones
+    that happened to fire on this scan — so consumers (GitHub code scanning, CI
+    dashboards) always have the rule's help text, CWE, and default severity. Built
+    from the live pattern registry so it never drifts from what the scanner detects.
+    """
+    try:
+        from scanner import SECRET_PATTERNS
+    except Exception:  # pragma: no cover - packaged/alternate import path
+        try:
+            from backend.scanner import SECRET_PATTERNS  # type: ignore
+        except Exception:
+            return {}
+    catalog: dict[str, dict[str, Any]] = {}
+    for p in SECRET_PATTERNS:
+        rid = _rule_id(p.name)
+        sev = str(getattr(p, "severity", "MEDIUM")).upper()
+        cwe = str(getattr(p, "cwe", "CWE-798"))
+        catalog[rid] = {
+            "id": rid,
+            "name": p.name.replace(" ", ""),
+            "shortDescription": {"text": f"Exposed {p.name}"},
+            "fullDescription": {"text": str(getattr(p, "description", "") or f"Exposed {p.name}")},
+            "help": {"text": str(getattr(p, "remediation", "") or "Rotate the exposed credential and remove it from client-side code.")},
+            "helpUri": _TOOL_URI,
+            "defaultConfiguration": {"level": _SARIF_LEVEL.get(sev, "warning")},
+            "properties": {
+                "tags": ["security", "secret", cwe],
+                "cwe": cwe,
+                "security-severity": _SARIF_SECURITY_SEVERITY.get(sev, "5.0"),
+            },
+        }
+    return catalog
+
+
 def generate_sarif_report(scan: dict[str, Any]) -> str:
     """Emit findings as SARIF 2.1.0 — uploadable to GitHub code scanning or any
     SARIF-aware pipeline. Confirmed and needs-review findings are both included;
@@ -340,13 +383,14 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
         (f, True) for f in scan.get("needs_review_findings", [])
     ]
 
-    # Build a rule per distinct secret type actually present.
-    rules: dict[str, dict[str, Any]] = {}
+    # Advertise the full detector catalog; add finding-specific rules for any
+    # unknown type below so every result still resolves to a described rule.
+    rules: dict[str, dict[str, Any]] = _catalog_rules()
     results: list[dict[str, Any]] = []
 
     for f, is_review in all_findings:
         secret_type = f.get("secret_type", "Unknown")
-        rule_id = "secretnode/" + secret_type.lower().replace(" ", "-").replace("/", "-")
+        rule_id = _rule_id(secret_type)
         severity = _severity_of(f)
         cwe = str(f.get("cwe", "CWE-798"))
 

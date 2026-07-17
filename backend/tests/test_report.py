@@ -128,3 +128,33 @@ def test_sarif_carries_verified_property_and_prefix():
     verified = [r for r in results if r["properties"].get("verified") == "verified"]
     assert verified
     assert verified[0]["message"]["text"].startswith("[VERIFIED ACTIVE]")
+
+
+def test_sarif_advertises_full_detector_catalog():
+    """The SARIF driver must describe every detector it can apply (industrial
+    best practice), not only rules that fired. Catalog is built from the live
+    registry, so it stays in sync with the scanner."""
+    import scanner
+    doc = json.loads(report.generate_sarif_report(_scan()))
+    rules = doc["runs"][0]["tool"]["driver"]["rules"]
+    rule_ids = {r["id"] for r in rules}
+    # Every registry pattern is advertised as a rule, regardless of findings.
+    assert len(rules) >= len(scanner.SECRET_PATTERNS)
+    for p in scanner.SECRET_PATTERNS:
+        assert report._rule_id(p.name) in rule_ids
+    # Rules carry the metadata CI consumers rely on.
+    sample = next(r for r in rules if r["id"] == report._rule_id("AWS Access Key"))
+    assert sample["properties"]["cwe"].startswith("CWE-")
+    assert "security-severity" in sample["properties"]
+    assert sample["defaultConfiguration"]["level"] in ("error", "warning", "note")
+
+
+def test_sarif_clean_scan_still_lists_rules():
+    """A clean scan (zero findings) must still advertise the rule catalog so the
+    report is a complete, self-describing artifact."""
+    clean = {"scan_id": "s0", "target_url": "https://example.com",
+             "confirmed_findings": [], "needs_review_findings": [], "assets_fetched": 2}
+    doc = json.loads(report.generate_sarif_report(clean))
+    run = doc["runs"][0]
+    assert run["results"] == []
+    assert len(run["tool"]["driver"]["rules"]) > 0
