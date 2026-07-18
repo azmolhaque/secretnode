@@ -7,11 +7,13 @@ All notable changes to SecretNode are documented here. This project adheres to
 
 ### Added
 - **Passive subdomain enumeration (deep-ASM slice 1).** New `backend/recon.py` expands a domain
-  into its known subdomain surface from **Certificate Transparency (crt.sh)** — fully passive, it
-  never contacts the target, so it runs before a client engagement is signed. `extract_registrable_
-  domain()` normalises URL/host/IP inputs (with a two-label public-suffix table incl. `.bd`), and
-  enumeration fails closed (empty result + error string) on any network/parse error. Exposed via the
-  CLI: `python cli.py <domain> --subdomains`. First layer of the passive attack-surface pipeline
+  into its known subdomain surface from **Certificate Transparency** — fully passive, it never
+  contacts the target, so it runs before a client engagement is signed. Queries **two independent CT
+  sources (crt.sh + Certspotter)** with backoff retries and merges them, so a single flaky/rate-
+  limited source (crt.sh 502s often) no longer zeroes out a good result; the result lists which
+  sources succeeded and only reports an error if *all* fail. `extract_registrable_domain()`
+  normalises URL/host/IP inputs (two-label public-suffix table incl. `.bd`). Exposed via the CLI:
+  `python cli.py <domain> --subdomains`. First layer of the passive attack-surface pipeline
   (subdomains → historical paths → associated assets → existing secret/posture scan).
 
 ### Fixed
