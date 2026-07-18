@@ -880,6 +880,12 @@ SCOPE_SAME_DOMAIN = os.environ.get("SCOPE_SAME_DOMAIN", "true").lower() == "true
 # that are stripped from the shipped bundle — a well-established ASM technique.
 FOLLOW_SOURCE_MAPS = os.environ.get("FOLLOW_SOURCE_MAPS", "true").lower() == "true"
 MAX_SOURCE_MAPS = _env_int("MAX_SOURCE_MAPS", 40)
+# R5 surface expansion: a source map embeds the ORIGINAL, un-minified source in
+# its `sourcesContent` array (JSON-escaped). The raw .map is scanned as text, but
+# secrets in the original source are frequently escaped/split there and missed —
+# so we also decode each embedded source and scan it as real code.
+SCAN_SOURCEMAP_CONTENT = os.environ.get("SCAN_SOURCEMAP_CONTENT", "true").lower() == "true"
+MAX_SOURCEMAP_SOURCES  = _env_int("MAX_SOURCEMAP_SOURCES", 200)
 
 
 def _same_scope(base_host: str, candidate_host: str) -> bool:
@@ -947,6 +953,42 @@ def extract_source_map_urls(js_body: str, js_url: str) -> list[str]:
         if absolute:
             result.append(absolute)
     return result
+
+
+def looks_like_sourcemap(url: str, body: str) -> bool:
+    """Heuristic: is this asset a JS source map? By extension, or by the tell-tale
+    `sourcesContent` / (`version` + `mappings`) keys near the top of the body."""
+    if url.split("?", 1)[0].split("#", 1)[0].endswith(".map"):
+        return True
+    head = body[:4000]
+    return '"sourcesContent"' in head or ('"mappings"' in head and '"version"' in head)
+
+
+def extract_sourcemap_sources(map_body: str, map_url: str) -> list[tuple[str, str]]:
+    """R5 surface expansion: decode a source map's `sourcesContent` (the original,
+    un-minified source, JSON-escaped inside the .map) into scannable code, paired
+    with its `sources` name. Secrets stripped from the shipped bundle — or escaped
+    within the raw .map JSON so the regex pass misses them — surface here.
+    Bounded (MAX_SOURCEMAP_SOURCES) and fully defensive: any parse error → []."""
+    try:
+        doc = json.loads(map_body)
+    except Exception:
+        return []
+    if not isinstance(doc, dict):
+        return []
+    contents = doc.get("sourcesContent")
+    if not isinstance(contents, list):
+        return []
+    names = doc.get("sources") if isinstance(doc.get("sources"), list) else []
+    out: list[tuple[str, str]] = []
+    for i, content in enumerate(contents):
+        if len(out) >= MAX_SOURCEMAP_SOURCES:
+            break
+        if not isinstance(content, str) or not content:
+            continue
+        name = names[i] if i < len(names) and isinstance(names[i], str) else f"source[{i}]"
+        out.append((f"{map_url} → {name}", content))
+    return out
 
 
 _ANCHOR_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)
@@ -1760,6 +1802,26 @@ async def run_scan(
         all_raw: list[RawFinding] = []
         for source_url, body in assets:
             state.check()
+
+            # ── R5: for a source map, scan its DECODED original source instead of
+            # the raw .map JSON. Better per-file attribution, catches secrets that
+            # are escaped/structured in the raw JSON, and avoids the map's own
+            # high-entropy "mappings" VLQ blob (a false-positive source). Falls
+            # back to scanning the raw body if there's no usable sourcesContent.
+            if SCAN_SOURCEMAP_CONTENT and looks_like_sourcemap(source_url, body):
+                srcs = extract_sourcemap_sources(body, source_url)
+                if srcs:
+                    for vsrc_url, content in srcs:
+                        state.check()
+                        sfound = extract_secrets(scan_id, target_url, vsrc_url, content)
+                        if sfound:
+                            await emit({
+                                "type": "log", "level": "WARN",
+                                "message": f"Found {len(sfound)} match(es) in source-map original {vsrc_url}",
+                            })
+                        all_raw.extend(sfound)
+                    continue
+
             found = extract_secrets(scan_id, target_url, source_url, body)
             if found:
                 await emit({

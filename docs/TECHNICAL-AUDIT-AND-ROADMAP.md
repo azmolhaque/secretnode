@@ -67,8 +67,16 @@ repo scanning; win the *web-surface* niche.
   a SARIF rule (help text, CWE, severity), even on clean scans. +2 tests.
 
 ### Tier 2 — coverage
-- **R5 · Surface expansion.** Parse inline JSON blobs, HTML comments, source-map `sourcesContent`, wasm
-  strings; opt-in known-path probe (`.env`, `.git/config`). Authorized-only. [MED–HIGH]
+- **R5 · Surface expansion.** ✅ **DONE 18 Jul (source-map slice)** — decode a source map's embedded
+  original source (`sourcesContent`) and scan it as real code, with precise per-file attribution
+  (`app.js.map → src/config.js`). Replaces raw-`.map` scanning for maps that carry source, which also
+  removes the high-entropy `mappings` VLQ as a false-positive source. Env-tunable
+  (`SCAN_SOURCEMAP_CONTENT`, `MAX_SOURCEMAP_SOURCES`); fully defensive; +6 tests.
+  *Note:* inline JSON (`__NEXT_DATA__`, `__INITIAL_STATE__`) and HTML comments are **already** covered —
+  the scanner scans the full HTML body wholesale, so they are in scope today.
+  *Remaining R5 follow-up:* opt-in authorized known-path probe (`.env`, `.git/config`, `config.js`) —
+  the one genuinely new *network* surface; deferred as higher-risk (extra requests, needs SSRF/scope
+  review). [MED]
 - **R6 · Detector + verifier expansion.** Prioritize high-impact providers, each paired with a safe
   read-only verifier. [MED, ongoing]
 - **R7 · Composite/proximity rule engine** for generic high-FP patterns (Gitleaks-style). [MED]
