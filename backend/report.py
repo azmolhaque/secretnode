@@ -349,7 +349,7 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     <tbody>{posture_html}</tbody>
   </table>
 
-  <h2>Flagged for Manual Review (AI validation unavailable)</h2>
+  <h2>Flagged for Manual Review (AI unavailable, or a structural match it could not confidently clear)</h2>
   <table>
     <thead><tr><th>Severity</th><th>Type</th><th>Location</th><th>Note</th></tr></thead>
     <tbody>{review_html}</tbody>
@@ -491,7 +491,7 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
         impact = str(f.get("impact", "") or "")
         msg = (
             vprefix + f"{secret_type} ({severity}) detected. "
-            f"{'AI validation unavailable — manual review required. ' if is_review else ''}"
+            f"{'Manual review required — see note. ' if is_review else ''}"
             f"{('Impact: ' + impact + ' ') if impact else ''}"
             f"{f.get('reason','')}"
         )

@@ -1737,6 +1737,29 @@ class ScanState:
 # Master Scan Orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
+def classify_validated(v: "ValidatedFinding") -> str:
+    """Route a validated finding to exactly one of: 'confirmed', 'review', 'drop'.
+
+    The critical rule is the last one: a *structural/provider* match (high-precision
+    by shape — AKIA…, ghp_…, sk_live_…, PEM) that the AI did **not confidently
+    dismiss** is sent to manual review, never silently dropped. Without this, a real
+    live key the AI merely under-called on (e.g. because a page gave it no
+    surrounding context) would vanish with no trace — a false negative, the worst
+    failure mode for a scanner. The generic keyword=value catch-all keeps the old
+    aggressive behaviour (an AI 'no' there is trusted and dropped), preserving the
+    'no false positives in Confirmed' promise."""
+    if v.confidence == NEEDS_REVIEW_SENTINEL:
+        return "review"                                    # AI unavailable — human decides
+    if v.is_valid and v.confidence >= GEMINI_CONFIDENCE_MIN:
+        return "confirmed"
+    meta = PATTERN_BY_NAME.get(v.raw.secret_type)
+    structural = meta is not None and not meta.entropy_gated
+    ai_confidently_dismissed = (not v.is_valid) and v.confidence >= GEMINI_CONFIDENCE_MIN
+    if structural and not ai_confidently_dismissed:
+        return "review"        # shape-anchored + AI not sure it's fake → human confirms
+    return "drop"
+
+
 async def run_scan(
     target_url: str,
     scan_id: str | None = None,
@@ -1930,14 +1953,9 @@ async def run_scan(
                     reason=f"Unexpected validation error: {v}. Manual review required.",
                 ))
 
-        confirmed: list[ValidatedFinding] = [
-            v for v in validated
-            if v.is_valid and v.confidence >= GEMINI_CONFIDENCE_MIN
-        ]
-        needs_review: list[ValidatedFinding] = [
-            v for v in validated
-            if v.confidence == NEEDS_REVIEW_SENTINEL
-        ]
+        _routed = [(classify_validated(v), v) for v in validated]
+        confirmed: list[ValidatedFinding] = [v for b, v in _routed if b == "confirmed"]
+        needs_review: list[ValidatedFinding] = [v for b, v in _routed if b == "review"]
 
         # ── Suppress known false positives ──────────────────────────────
         if suppressed_fingerprints:

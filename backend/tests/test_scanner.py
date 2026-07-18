@@ -226,6 +226,41 @@ class TestEntropyGatingPolicy:
         assert "Generic High-Entropy Secret" not in [f.secret_type for f in findings]
 
 
+class TestClassifyValidated:
+    """A structural match the AI does not *confidently* dismiss must go to manual
+    review, never be silently dropped (false-negative guard). The generic catch-all
+    keeps aggressive filtering so 'no false positives in Confirmed' still holds."""
+
+    def _vf(self, secret_type, is_valid, confidence):
+        raw = scanner.RawFinding(
+            scan_id="s", target_url="https://e.com", source_url="https://e.com/a.js",
+            secret_type=secret_type, raw_match="AKIA6218374A3D288737",
+            context_snippet="x", entropy=3.27,
+        )
+        return scanner.ValidatedFinding(raw=raw, is_valid=is_valid, confidence=confidence, reason="r")
+
+    def test_sentinel_goes_to_review(self):
+        vf = self._vf("AWS Access Key", False, scanner.NEEDS_REVIEW_SENTINEL)
+        assert scanner.classify_validated(vf) == "review"
+
+    def test_valid_high_confidence_confirmed(self):
+        assert scanner.classify_validated(self._vf("AWS Access Key", True, 95)) == "confirmed"
+
+    def test_structural_ai_uncertain_rejection_goes_to_review(self):
+        # AI says not-valid but only 55% sure => a shape-anchored key must not vanish.
+        assert scanner.classify_validated(self._vf("AWS Access Key", False, 55)) == "review"
+
+    def test_structural_valid_but_low_confidence_goes_to_review(self):
+        assert scanner.classify_validated(self._vf("AWS Access Key", True, 60)) == "review"
+
+    def test_structural_ai_confident_rejection_dropped(self):
+        assert scanner.classify_validated(self._vf("AWS Access Key", False, 95)) == "drop"
+
+    def test_generic_ai_rejection_dropped_even_if_uncertain(self):
+        # The generic catch-all trusts an AI 'no' and drops it, regardless of confidence.
+        assert scanner.classify_validated(self._vf("Generic High-Entropy Secret", False, 55)) == "drop"
+
+
 class TestNeedsReviewSentinel:
     def test_sentinel_is_negative(self):
         # Must never collide with a real 0-100 confidence value
