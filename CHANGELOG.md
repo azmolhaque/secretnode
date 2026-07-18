@@ -6,6 +6,15 @@ All notable changes to SecretNode are documented here. This project adheres to
 ## [Unreleased]
 
 ### Added
+- **Historical path discovery (deep-ASM slice 3).** New `backend/historical.py` recovers a domain's
+  historically-exposed URLs from **public web archives (Wayback Machine + CommonCrawl)** — the
+  passive alternative to directory/content brute-forcing, so no request ever touches the target. Two
+  sources merged with backoff retries and fail-closed handling (matching the subdomain layer);
+  surfaces forgotten endpoints, stale JS bundles and old admin paths a live crawl would never link
+  to. `HistoricalResult` exposes the raw URLs, the unique-path view ("hidden directories"), and a
+  `js_urls()` helper (highest-value scan seeds). CLI: `python cli.py <domain> --historical`. Config:
+  `WAYBACK_CDX_URL`, `COMMONCRAWL_COLLINFO`, `ENABLE_COMMONCRAWL`, `HISTORICAL_TIMEOUT`,
+  `HISTORICAL_RETRIES`, `MAX_HISTORICAL_URLS`.
 - **Multi-target orchestration (deep-ASM slice 2).** New `backend/orchestrator.py` closes the loop
   from discovery to findings: a single domain → passive subdomain enumeration → liveness probe of
   each host → the existing passive secret+posture scan per live host → one aggregated

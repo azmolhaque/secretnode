@@ -27,6 +27,7 @@ import socket
 import sys
 from urllib.parse import urlparse
 
+import historical
 import orchestrator
 import recon
 import report
@@ -84,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Passive attack-surface discovery: enumerate the target's subdomains "
                          "via Certificate Transparency (crt.sh) and print them. Never contacts "
                          "the target. Authorized use only.")
+    ap.add_argument("--historical", action="store_true",
+                    help="Passive path discovery: recover historically-exposed URLs for the domain "
+                         "from public web archives (Wayback Machine + CommonCrawl) and print them. "
+                         "Never contacts the target. Authorized use only.")
     ap.add_argument("--deep-scan", dest="deep_scan", action="store_true",
                     help="Domain-wide deep scan: enumerate subdomains, probe which hosts are live, "
                          "scan each, and write a combined report. Passive; authorized use only.")
@@ -145,6 +150,28 @@ async def _run_subdomain_enum(target: str) -> int:
     return 0
 
 
+async def _run_historical(target: str) -> int:
+    """Passive path discovery: recover historically-exposed URLs from public
+    archives (Wayback + CommonCrawl) — the passive alternative to brute-forcing."""
+    domain = recon.extract_registrable_domain(target)
+    if domain is None:
+        raise SystemExit(
+            f"Cannot run historical discovery for {target!r} — need a domain "
+            "(does not apply to bare IP addresses)."
+        )
+    async with scanner.build_client() as client:
+        result = await historical.discover_historical_urls(client, domain)
+    print(json.dumps(result.to_dict(), indent=2))
+    sources = ", ".join(result.sources) if result.sources else "none"
+    print(
+        f"SecretNode: recovered {result.count} historical URL(s) "
+        f"({len(result.paths)} unique path(s), {len(result.js_urls())} JS) for {domain} "
+        f"(sources: {sources})." + (f" [error: {result.error}]" if result.error else ""),
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -152,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     # (no scheme) since it never fetches the target — only Certificate Transparency.
     if args.subdomains:
         return asyncio.run(_run_subdomain_enum(args.target))
+
+    # Passive historical path discovery from public archives; accepts a bare domain.
+    if args.historical:
+        return asyncio.run(_run_historical(args.target))
 
     # Domain-wide deep scan: enumerate → probe → scan each live host. Accepts a
     # bare domain; the orchestrator applies the SSRF guard per discovered host.
