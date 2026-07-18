@@ -13,7 +13,14 @@ All notable changes to SecretNode are documented here. This project adheres to
   class-aware: the *generic* keyword=value catch-all keeps the full 3.5 bar, while
   *structural/provider* detectors (AKIA…, ghp_…, sk_live_…, PEM, fixed-format tokens) only clear a
   low anti-degenerate floor (`MIN_STRUCTURAL_ENTROPY=2.5`) that still rejects obvious junk like
-  `AKIAAAAAAAAAAAAAAAAA`. Precision/recall stays 1.000/1.000; suite **187 → 191**.
+  `AKIAAAAAAAAAAAAAAAAA`. Precision/recall stays 1.000/1.000.
+- **False-negative: AI-dismissed structural matches silently dropped.** A finding was routed to
+  manual review only when AI validation was *unavailable*; a structural/provider match the AI
+  *actively* rejected with a real confidence matched no bucket and was discarded — so a live key the
+  AI merely under-called on (e.g. lacking page context) vanished with no trace. New
+  `classify_validated()` sends any structural match the AI does **not confidently dismiss** to
+  manual review instead of dropping it; the generic catch-all keeps aggressive filtering, so the
+  "no false positives in Confirmed" promise holds. Suite **187 → 197**.
 
 ## [2.6.0] — Detection quality, safety & attack-surface breadth
 
