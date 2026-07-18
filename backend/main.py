@@ -183,7 +183,7 @@ _registry: dict[str, dict[str, Any]] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("SecretNode v2.4.0 starting…")
+    logger.info("SecretNode v%s starting…", report_gen._TOOL_VERSION)
     await init_db()
     yield
     # Cancel any running scans on shutdown
@@ -191,7 +191,7 @@ async def lifespan(app: FastAPI):
         task: asyncio.Task = entry.get("task")
         if task and not task.done():
             task.cancel()
-    logger.info("SecretNode v2.4.0 shut down cleanly")
+    logger.info("SecretNode v%s shut down cleanly", report_gen._TOOL_VERSION)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,9 +199,9 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="SecretNode v2.4.0",
+    title=f"SecretNode v{report_gen._TOOL_VERSION}",
     description="Real-time passive ASM scanner for credential leak detection",
-    version="2.4.0",
+    version=report_gen._TOOL_VERSION,
     lifespan=lifespan,
 )
 
@@ -275,7 +275,8 @@ class ScanRequest(BaseModel):
 async def health() -> dict[str, Any]:
     return {
         "status": "ok",
-        "service": "SecretNode v2.4.0",
+        "service": f"SecretNode v{report_gen._TOOL_VERSION}",
+        "version": report_gen._TOOL_VERSION,
         "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
         "discord_configured": bool(os.environ.get("DISCORD_WEBHOOK_URL")),
         "max_concurrent_scans": MAX_CONCURRENT_SCANS,
