@@ -27,6 +27,7 @@ import socket
 import sys
 from urllib.parse import urlparse
 
+import recon
 import report
 import scanner
 
@@ -78,11 +79,41 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-o", "--output", help="Write report to this file (default: stdout)")
     ap.add_argument("--fail-on-findings", action="store_true",
                     help="Exit non-zero if any confirmed findings (use as a CI gate)")
+    ap.add_argument("--subdomains", action="store_true",
+                    help="Passive attack-surface discovery: enumerate the target's subdomains "
+                         "via Certificate Transparency (crt.sh) and print them. Never contacts "
+                         "the target. Authorized use only.")
     return ap
+
+
+async def _run_subdomain_enum(target: str) -> int:
+    """Passive subdomain discovery mode: expand a domain into its known subdomain
+    surface from Certificate Transparency and print the results as JSON."""
+    domain = recon.extract_registrable_domain(target)
+    if domain is None:
+        raise SystemExit(
+            f"Cannot enumerate subdomains for {target!r} — need a domain "
+            "(subdomain enumeration does not apply to bare IP addresses)."
+        )
+    async with scanner.build_client() as client:
+        result = await recon.enumerate_subdomains_ct(client, domain)
+    print(json.dumps(result.to_dict(), indent=2))
+    print(
+        f"SecretNode: discovered {result.count} subdomain(s) for {domain} "
+        f"(source: {result.source})." + (f" [error: {result.error}]" if result.error else ""),
+        file=sys.stderr,
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # Passive discovery mode: enumerate subdomains and exit. Accepts a bare domain
+    # (no scheme) since it never fetches the target — only Certificate Transparency.
+    if args.subdomains:
+        return asyncio.run(_run_subdomain_enum(args.target))
+
     if not args.target.startswith(("http://", "https://")):
         raise SystemExit("Target must start with http:// or https://")
     assert_public_target(args.target)

@@ -5,6 +5,15 @@ All notable changes to SecretNode are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Added
+- **Passive subdomain enumeration (deep-ASM slice 1).** New `backend/recon.py` expands a domain
+  into its known subdomain surface from **Certificate Transparency (crt.sh)** — fully passive, it
+  never contacts the target, so it runs before a client engagement is signed. `extract_registrable_
+  domain()` normalises URL/host/IP inputs (with a two-label public-suffix table incl. `.bd`), and
+  enumeration fails closed (empty result + error string) on any network/parse error. Exposed via the
+  CLI: `python cli.py <domain> --subdomains`. First layer of the passive attack-surface pipeline
+  (subdomains → historical paths → associated assets → existing secret/posture scan).
+
 ### Fixed
 - **False-negative: structural keys wrongly entropy-gated.** The Shannon-entropy floor
   (`MIN_ENTROPY_THRESHOLD=3.5`) was applied uniformly to every detector, silently dropping
