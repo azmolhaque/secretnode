@@ -36,7 +36,8 @@ def _scan() -> dict:
                 "source_url": "https://example.com/config.js", "confidence": 97,
                 "raw_match": "AKIA***", "reason": "live key", "is_new": False,
                 "severity": "CRITICAL", "cwe": "CWE-798", "remediation": "revoke now",
-                "verified": "verified", "found_at": "now",
+                "verified": "verified", "verified_detail": "account acme-bot · scopes: repo",
+                "found_at": "now",
             },
         ],
         "needs_review_findings": [
@@ -128,3 +129,96 @@ def test_sarif_carries_verified_property_and_prefix():
     verified = [r for r in results if r["properties"].get("verified") == "verified"]
     assert verified
     assert verified[0]["message"]["text"].startswith("[VERIFIED ACTIVE]")
+
+
+def test_sarif_advertises_full_detector_catalog():
+    """The SARIF driver must describe every detector it can apply (industrial
+    best practice), not only rules that fired. Catalog is built from the live
+    registry, so it stays in sync with the scanner."""
+    import scanner
+    doc = json.loads(report.generate_sarif_report(_scan()))
+    rules = doc["runs"][0]["tool"]["driver"]["rules"]
+    rule_ids = {r["id"] for r in rules}
+    # Every registry pattern is advertised as a rule, regardless of findings.
+    assert len(rules) >= len(scanner.SECRET_PATTERNS)
+    for p in scanner.SECRET_PATTERNS:
+        assert report._rule_id(p.name) in rule_ids
+    # Rules carry the metadata CI consumers rely on.
+    sample = next(r for r in rules if r["id"] == report._rule_id("AWS Access Key"))
+    assert sample["properties"]["cwe"].startswith("CWE-")
+    assert "security-severity" in sample["properties"]
+    assert sample["defaultConfiguration"]["level"] in ("error", "warning", "note")
+
+
+def test_sarif_clean_scan_still_lists_rules():
+    """A clean scan (zero findings) must still advertise the rule catalog so the
+    report is a complete, self-describing artifact."""
+    clean = {"scan_id": "s0", "target_url": "https://example.com",
+             "confirmed_findings": [], "needs_review_findings": [], "assets_fetched": 2}
+    doc = json.loads(report.generate_sarif_report(clean))
+    run = doc["runs"][0]
+    assert run["results"] == []
+    assert len(run["tool"]["driver"]["rules"]) > 0
+
+
+def test_html_surfaces_verified_identity_detail():
+    """A VERIFIED-active key must show WHO it belongs to / what it reaches (R1)."""
+    out = report.generate_html_report(_scan())
+    assert "live access" in out
+    assert "account acme-bot" in out
+
+
+def test_csv_has_verified_detail_column():
+    out = report.generate_csv_report(_scan())
+    header = out.splitlines()[0]
+    assert "verified_detail" in header
+    assert "account acme-bot" in out
+
+
+def test_sarif_message_carries_identity_and_keeps_token():
+    doc = json.loads(report.generate_sarif_report(_scan()))
+    v = [r for r in doc["runs"][0]["results"] if r["properties"].get("verified") == "verified"][0]
+    # literal token preserved for downstream matchers, identity appended
+    assert v["message"]["text"].startswith("[VERIFIED ACTIVE]")
+    assert "account acme-bot" in v["message"]["text"]
+    assert v["properties"]["verified_detail"] == "account acme-bot · scopes: repo"
+
+
+def test_html_r9_verification_evidence_callout():
+    """R9: verified-active findings get a prominent live-access evidence block."""
+    out = report.generate_html_report(_scan())
+    assert "CURRENTLY ACTIVE" in out
+    assert "confirmed live access" in out
+    assert "account acme-bot" in out  # the R1 identity detail surfaces in the callout
+
+
+def test_html_r9_precision_statement_present():
+    out = report.generate_html_report(_scan())
+    assert "Detection quality" in out
+    assert "precision/recall" in out
+    assert "verification-first" in out
+
+
+def test_html_r9_verified_active_tile():
+    out = report.generate_html_report(_scan())
+    assert "Verified Active" in out
+
+
+def test_html_r9_no_evidence_callout_on_clean_scan():
+    clean = {"scan_id": "s0", "target_url": "https://x.com",
+             "confirmed_findings": [], "needs_review_findings": [], "assets_fetched": 3}
+    out = report.generate_html_report(clean)
+    assert "CURRENTLY ACTIVE via" not in out   # no callout when nothing is verified-active
+    assert "Detection quality" in out           # methodology still present
+
+
+def test_html_r8_posture_section_and_tile():
+    scan = _scan()
+    scan["posture_findings"] = [
+        {"name": "Missing HSTS", "severity": "MEDIUM", "cwe": "CWE-319",
+         "evidence": "No Strict-Transport-Security header.", "remediation": "Add HSTS.", "category": "Security Posture"},
+    ]
+    out = report.generate_html_report(scan)
+    assert "Security Posture &amp; Misconfigurations" in out
+    assert "Missing HSTS" in out
+    assert "Posture Issues" in out

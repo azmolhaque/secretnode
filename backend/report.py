@@ -141,11 +141,15 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
         badge = '<span class="badge new">NEW</span>' if f.get("is_new", True) else '<span class="badge recurring">RECURRING</span>'
         cwe = html.escape(str(f.get("cwe", "")))
         impact = html.escape(f.get('impact', '') or '—')
+        vdetail = html.escape(f.get('verified_detail', '') or '')
+        # For a VERIFIED-active key, show WHO it belongs to / what it can reach — the
+        # concrete blast radius an attacker inherits (R1 verification enrichment).
+        vdetail_html = f'<div class="small ver-detail">🔓 live access: {vdetail}</div>' if vdetail else ''
         return f"""
         <tr>
           <td>{sev_badge(_severity_of(f))}</td>
           <td>{html.escape(f.get('secret_type',''))}<div class="small">{cwe}</div></td>
-          <td class="impact">{impact}</td>
+          <td class="impact">{impact}{vdetail_html}</td>
           <td class="mono">{html.escape(f.get('source_url', f.get('target_url','')))}</td>
           <td>{f.get('confidence',0)}%</td>
           <td>{badge}{ver_badge(f)}</td>
@@ -181,6 +185,46 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
         )
     if not remediation_blocks:
         remediation_blocks = '<div class="small">No remediation items — scan is clean.</div>'
+
+    # R9 — verification-evidence callout: the single strongest client-facing signal.
+    # For credentials confirmed CURRENTLY ACTIVE (read-only check against the provider),
+    # list exactly what an attacker reaches. Only rendered when there is live proof.
+    if verified_active:
+        ve_rows = ""
+        for f in confirmed:
+            if str(f.get("verified", "")).lower() != "verified":
+                continue
+            detail = html.escape(f.get("verified_detail", "") or "live access confirmed")
+            loc = html.escape(f.get("source_url", f.get("target_url", "")))
+            ve_rows += (
+                f'<li><b>{html.escape(f.get("secret_type",""))}</b> '
+                f'<span class="mono small">{loc}</span>'
+                f'<div class="ver-ev-detail">🔓 confirmed live access: {detail}</div></li>'
+            )
+        verified_evidence = (
+            '<div class="ver-evidence">'
+            f'<div class="ve-head">⚠ {verified_active} credential(s) confirmed CURRENTLY ACTIVE'
+            ' via a read-only check against the issuing provider</div>'
+            f'<ul class="ve-list">{ve_rows}</ul>'
+            '<div class="small">These are not look-alikes — each was live at scan time. '
+            'Rotate/revoke them at the provider immediately.</div>'
+            '</div>'
+        )
+    else:
+        verified_evidence = ""
+
+    # R8 — passive security-posture findings (missing/weak headers, misconfig).
+    posture = scan.get("posture_findings", [])
+
+    def _posture_row(p: dict[str, Any]) -> str:
+        return (
+            f'<tr><td>{sev_badge(_severity_of(p))}</td>'
+            f'<td>{html.escape(p.get("name",""))}<div class="small">{html.escape(str(p.get("cwe","")))}</div></td>'
+            f'<td class="mono small">{html.escape(p.get("evidence",""))}</td>'
+            f'<td class="small">{html.escape(p.get("remediation",""))}</td></tr>'
+        )
+    posture_html = "\n".join(_posture_row(p) for p in sorted(posture, key=_sort_key)) or \
+        '<tr><td colspan="4" class="empty">No header/misconfiguration issues detected.</td></tr>'
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -228,6 +272,14 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
   .verdict-sub {{ font-size: 13px; color: #4a5568; margin-top: 8px; }}
   .scope p {{ font-size: 13px; color: #2d3748; }}
   td.impact {{ font-size: 12px; color: #742a2a; font-weight: 600; max-width: 260px; }}
+  .ver-evidence {{ background: #fff5f5; border: 1px solid #feb2b2; border-left: 6px solid #c53030; border-radius: 6px; padding: 14px 16px; margin: 16px 0; }}
+  .ver-evidence .ve-head {{ font-weight: 700; color: #c53030; font-size: 14px; }}
+  .ve-list {{ margin: 10px 0 6px; padding-left: 18px; font-size: 13px; }}
+  .ve-list li {{ margin: 6px 0; }}
+  .ver-ev-detail {{ font-family: 'Courier New', monospace; font-size: 12px; color: #742a2a; margin-top: 2px; }}
+  .stat.alert {{ border-color: #feb2b2; background: #fff5f5; }}
+  .stat.alert .num {{ color: #c53030; }}
+  .scope-quality {{ background: #f0fff4; border-left: 3px solid #276749; padding: 10px 12px; border-radius: 0 4px 4px 0; margin-top: 10px; }}
 </style>
 </head>
 <body>
@@ -242,6 +294,8 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     </div>
     <div class="verdict-sub">{html.escape(verdict_sub)}</div>
   </div>
+
+  {verified_evidence}
 
   <div class="meta">
     <div><b>Target</b> {target}</div>
@@ -258,9 +312,11 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     <div class="stat"><div class="num">{sev_counts['CRITICAL']}</div><div class="label">Critical</div></div>
     <div class="stat"><div class="num">{sev_counts['HIGH']}</div><div class="label">High</div></div>
     <div class="stat"><div class="num">{sev_counts['MEDIUM']}</div><div class="label">Medium</div></div>
+    <div class="stat{' alert' if verified_active else ''}"><div class="num">{verified_active}</div><div class="label">Verified Active</div></div>
     <div class="stat"><div class="num">{new_count}</div><div class="label">New</div></div>
     <div class="stat"><div class="num">{recurring_count}</div><div class="label">Recurring</div></div>
     <div class="stat"><div class="num">{len(needs_review)}</div><div class="label">Needs Review</div></div>
+    <div class="stat"><div class="num">{len(posture)}</div><div class="label">Posture Issues</div></div>
   </div>
 
   <h2>Scope &amp; Methodology</h2>
@@ -271,6 +327,11 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     Shannon-entropy analysis. High-entropy candidates were then contextually validated to distinguish live secrets
     from mocks, placeholders and minified-code artefacts. <b>No exploitation, authentication, data exfiltration, or
     write operations</b> were performed against the target — testing is passive and authorized-scope only.</p>
+    <p class="scope-quality"><b>Detection quality.</b> SecretNode is verification-first: where a credential type
+    supports it, a read-only check against the issuing provider confirms whether the key is currently active before
+    it is reported — so a "verified" finding is proven, not shape-matched. The deterministic detection layer is
+    continuously measured against a labelled benchmark corpus with a precision/recall gate in CI, so this report
+    favours confirmed impact over look-alikes and keeps false positives low.</p>
   </div>
 
   <h2>Confirmed Findings</h2>
@@ -281,6 +342,12 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
 
   <h2>Remediation Guidance</h2>
   {remediation_blocks}
+
+  <h2>Security Posture &amp; Misconfigurations</h2>
+  <table>
+    <thead><tr><th>Severity</th><th>Issue / CWE</th><th>Evidence</th><th>Remediation</th></tr></thead>
+    <tbody>{posture_html}</tbody>
+  </table>
 
   <h2>Flagged for Manual Review (AI validation unavailable)</h2>
   <table>
@@ -306,21 +373,23 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
     writer = csv.writer(buf)
     writer.writerow([
         "status", "severity", "cwe", "secret_type", "source_url", "confidence",
-        "is_new", "verified", "impact", "matched_value_partial", "reason", "found_at",
+        "is_new", "verified", "verified_detail", "impact", "matched_value_partial",
+        "reason", "found_at",
     ])
     for f in sorted(scan.get("confirmed_findings", []), key=_sort_key):
         writer.writerow([
             "CONFIRMED", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
             f.get("source_url", f.get("target_url", "")),
             f.get("confidence", 0), "NEW" if f.get("is_new", True) else "RECURRING",
-            f.get("verified", "disabled"), f.get("impact", ""), f.get("raw_match", ""),
-            f.get("reason", ""), f.get("found_at", ""),
+            f.get("verified", "disabled"), f.get("verified_detail", ""), f.get("impact", ""),
+            f.get("raw_match", ""), f.get("reason", ""), f.get("found_at", ""),
         ])
     for f in scan.get("needs_review_findings", []):
         writer.writerow([
             "NEEDS_REVIEW", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
             f.get("source_url", f.get("target_url", "")),
-            "", "", "", f.get("impact", ""), f.get("raw_match", ""), f.get("reason", ""), f.get("found_at", ""),
+            "", "", "", "", f.get("impact", ""), f.get("raw_match", ""),
+            f.get("reason", ""), f.get("found_at", ""),
         ])
     return buf.getvalue()
 
@@ -328,6 +397,49 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # SARIF 2.1.0
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _rule_id(secret_type: str) -> str:
+    """Deterministic SARIF ruleId for a secret type. Shared by the rule catalog
+    and each result so results always resolve to a described rule."""
+    return "secretnode/" + secret_type.lower().replace(" ", "-").replace("/", "-")
+
+
+def _catalog_rules() -> dict[str, dict[str, Any]]:
+    """Full catalog of every detector as a SARIF reportingDescriptor.
+
+    A SARIF driver should advertise every rule it *can* apply — not only the ones
+    that happened to fire on this scan — so consumers (GitHub code scanning, CI
+    dashboards) always have the rule's help text, CWE, and default severity. Built
+    from the live pattern registry so it never drifts from what the scanner detects.
+    """
+    try:
+        from scanner import SECRET_PATTERNS
+    except Exception:  # pragma: no cover - packaged/alternate import path
+        try:
+            from backend.scanner import SECRET_PATTERNS  # type: ignore
+        except Exception:
+            return {}
+    catalog: dict[str, dict[str, Any]] = {}
+    for p in SECRET_PATTERNS:
+        rid = _rule_id(p.name)
+        sev = str(getattr(p, "severity", "MEDIUM")).upper()
+        cwe = str(getattr(p, "cwe", "CWE-798"))
+        catalog[rid] = {
+            "id": rid,
+            "name": p.name.replace(" ", ""),
+            "shortDescription": {"text": f"Exposed {p.name}"},
+            "fullDescription": {"text": str(getattr(p, "description", "") or f"Exposed {p.name}")},
+            "help": {"text": str(getattr(p, "remediation", "") or "Rotate the exposed credential and remove it from client-side code.")},
+            "helpUri": _TOOL_URI,
+            "defaultConfiguration": {"level": _SARIF_LEVEL.get(sev, "warning")},
+            "properties": {
+                "tags": ["security", "secret", cwe],
+                "cwe": cwe,
+                "security-severity": _SARIF_SECURITY_SEVERITY.get(sev, "5.0"),
+            },
+        }
+    return catalog
+
 
 def generate_sarif_report(scan: dict[str, Any]) -> str:
     """Emit findings as SARIF 2.1.0 — uploadable to GitHub code scanning or any
@@ -340,13 +452,14 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
         (f, True) for f in scan.get("needs_review_findings", [])
     ]
 
-    # Build a rule per distinct secret type actually present.
-    rules: dict[str, dict[str, Any]] = {}
+    # Advertise the full detector catalog; add finding-specific rules for any
+    # unknown type below so every result still resolves to a described rule.
+    rules: dict[str, dict[str, Any]] = _catalog_rules()
     results: list[dict[str, Any]] = []
 
     for f, is_review in all_findings:
         secret_type = f.get("secret_type", "Unknown")
-        rule_id = "secretnode/" + secret_type.lower().replace(" ", "-").replace("/", "-")
+        rule_id = _rule_id(secret_type)
         severity = _severity_of(f)
         cwe = str(f.get("cwe", "CWE-798"))
 
@@ -368,7 +481,13 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
         level = "note" if is_review else _SARIF_LEVEL.get(severity, "warning")
         location_uri = f.get("source_url") or f.get("target_url") or "unknown"
         verified = str(f.get("verified", "disabled"))
-        vprefix = "[VERIFIED ACTIVE] " if verified == "verified" else ""
+        verified_detail = str(f.get("verified_detail", "") or "")
+        # Keep the literal "[VERIFIED ACTIVE]" token intact for downstream matchers,
+        # then append the identity/scope (blast radius) when we captured one.
+        vprefix = (
+            (f"[VERIFIED ACTIVE] ({verified_detail}) " if verified_detail else "[VERIFIED ACTIVE] ")
+            if verified == "verified" else ""
+        )
         impact = str(f.get("impact", "") or "")
         msg = (
             vprefix + f"{secret_type} ({severity}) detected. "
@@ -391,6 +510,7 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
                 "cwe": cwe,
                 "confidence": f.get("confidence", 0),
                 "verified": verified,
+                "verified_detail": verified_detail,
                 "impact": impact,
                 "status": "needs_review" if is_review else "confirmed",
             },

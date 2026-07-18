@@ -54,7 +54,7 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (54 patterns) + 
 
 > **v2.3.0 — ASM-industry alignment: verification-first & CI-native**
 > Grounded in 2025–2026 ASM / secret-scanning practice (verification-first detection + CI-native gating).
-> - **Optional live verification** (`VERIFY_SECRETS` / `?verify=true`) — read-only "is this key still active?" checks against each secret's own provider (GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram), à la TruffleHog `--only-verified`. **Off by default**, fails closed, never touches the scan target. Each finding gains a `verified` status, and `only_verified` mode drops dead-key noise.
+> - **Optional live verification** (`VERIFY_SECRETS` / `?verify=true`) — read-only "is this key still active?" checks against each secret's own provider (GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram, Cloudflare, DigitalOcean, Datadog, Notion, Linear, Figma, Postman, Doppler), à la TruffleHog `--only-verified`. **Off by default**, fails closed, never touches the scan target. Each finding gains a `verified` status, and `only_verified` mode drops dead-key noise.
 > - **Base64 decoding** of encoded blobs + **example/placeholder allowlisting** (e.g. AWS's `AKIAIOSFODNN7EXAMPLE`) — fewer false positives, more real catches.
 > - **CLI (`backend/cli.py`) + GitHub Action (`action.yml`)** — scan and emit SARIF from CI with `--fail-on-findings` as a build gate.
 > - **Registry now 44 patterns** (added Slack app-level, GitHub server/refresh, OpenAI service-account, New Relic, Grafana, HCP Terraform).
@@ -245,7 +245,7 @@ Square · Postman · Databricks · Telegram Bot · Discord Bot · Datadog · Fir
 
 **MEDIUM** — Stripe Publishable Key · Bearer Token · Generic High-Entropy Secret
 
-Matches are also checked against **base64-decoded** content and filtered through an **example/placeholder allowlist**. Many types (GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram) can be **live-verified** (see below). New patterns land with a `severity`, `cwe`, and `remediation` — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Matches are also checked against **base64-decoded** content and filtered through an **example/placeholder allowlist**. Many types (GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram, Cloudflare, DigitalOcean, Datadog, Notion, Linear, Figma, Postman, Doppler) can be **live-verified** (see below). New patterns land with a `severity`, `cwe`, and `remediation` — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ---
 
@@ -311,7 +311,7 @@ false-positive fatigue.
 
 - **Off by default.** Enable per scan (`{"verify": true}` / `--verify`) or globally (`VERIFY_SECRETS=true`).
 - **Read-only.** One "whoami"-style call to the secret's **own provider** (never the scan target):
-  GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram. Fails closed on any error.
+  GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram, Cloudflare, DigitalOcean, Datadog, Notion, Linear, Figma, Postman, Doppler. Fails closed on any error.
 - Each finding gets a `verified` status: `verified` (active), `unverified` (dead / unconfirmed),
   `unsupported` (no safe auto-check — verify manually).
 - **`only_verified`** drops confirmed-inactive findings so a pipeline only fails on live secrets.

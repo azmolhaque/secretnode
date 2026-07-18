@@ -26,6 +26,7 @@ from google import genai
 from google.genai import errors as genai_errors, types
 from pydantic import BaseModel, Field, ValidationError
 
+import posture
 import verifier
 
 logger = logging.getLogger("secretnode.scanner")
@@ -95,6 +96,9 @@ NEEDS_REVIEW_SENTINEL   = -1        # confidence value marking "AI validation fa
 MAX_RAW_FINDINGS_PER_SCAN = _env_int("MAX_RAW_FINDINGS_PER_SCAN", 500)  # safety cap: stop a runaway scan
                                      # (e.g. a minified bundle full of high-entropy noise) from
                                      # generating unbounded Gemini calls / RAM use on the Pi
+MAX_MATCHES_PER_PATTERN = _env_int("MAX_MATCHES_PER_PATTERN", 100)  # R3 defence-in-depth: bound the
+                                     # matches examined for ANY single pattern on ANY single text, so a
+                                     # crafted blob cannot spawn millions of matches for one detector.
 
 # ── Type alias for the broadcaster callback ────────────────────────────────────
 Broadcaster = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
@@ -156,6 +160,7 @@ class ValidatedFinding:
     )
     is_new: bool = True   # set False by run_scan if this fingerprint was seen in a prior scan
     verified: str = "disabled"  # live-verification status: verified/unverified/unsupported/disabled
+    verified_detail: str = ""   # identity/scope of a VERIFIED credential (R1) — never the secret itself
     impact: str = ""            # AI blast-radius statement: what an attacker could actually do
     public_by_design: bool = False  # True for identifiers meant to be public (Firebase web key, pk_ …)
 
@@ -187,6 +192,7 @@ class ValidatedFinding:
             "validated_at":   self.validated_at,
             "is_new":         self.is_new,
             "verified":       self.verified,
+            "verified_detail": self.verified_detail,
             "severity":       self.effective_severity(),
             "cwe":            self._meta().cwe,
             "remediation":    self._meta().remediation,
@@ -875,6 +881,16 @@ SCOPE_SAME_DOMAIN = os.environ.get("SCOPE_SAME_DOMAIN", "true").lower() == "true
 # that are stripped from the shipped bundle — a well-established ASM technique.
 FOLLOW_SOURCE_MAPS = os.environ.get("FOLLOW_SOURCE_MAPS", "true").lower() == "true"
 MAX_SOURCE_MAPS = _env_int("MAX_SOURCE_MAPS", 40)
+# R5 surface expansion: a source map embeds the ORIGINAL, un-minified source in
+# its `sourcesContent` array (JSON-escaped). The raw .map is scanned as text, but
+# secrets in the original source are frequently escaped/split there and missed —
+# so we also decode each embedded source and scan it as real code.
+SCAN_SOURCEMAP_CONTENT = os.environ.get("SCAN_SOURCEMAP_CONTENT", "true").lower() == "true"
+MAX_SOURCEMAP_SOURCES  = _env_int("MAX_SOURCEMAP_SOURCES", 200)
+# R8: passive HTTP security-posture check (missing/weak security headers,
+# version disclosure, insecure cookies) on the target root. Pure analysis of the
+# response the target already serves — no exploitation, no third-party calls.
+SCAN_HTTP_POSTURE = os.environ.get("SCAN_HTTP_POSTURE", "true").lower() == "true"
 
 
 def _same_scope(base_host: str, candidate_host: str) -> bool:
@@ -942,6 +958,42 @@ def extract_source_map_urls(js_body: str, js_url: str) -> list[str]:
         if absolute:
             result.append(absolute)
     return result
+
+
+def looks_like_sourcemap(url: str, body: str) -> bool:
+    """Heuristic: is this asset a JS source map? By extension, or by the tell-tale
+    `sourcesContent` / (`version` + `mappings`) keys near the top of the body."""
+    if url.split("?", 1)[0].split("#", 1)[0].endswith(".map"):
+        return True
+    head = body[:4000]
+    return '"sourcesContent"' in head or ('"mappings"' in head and '"version"' in head)
+
+
+def extract_sourcemap_sources(map_body: str, map_url: str) -> list[tuple[str, str]]:
+    """R5 surface expansion: decode a source map's `sourcesContent` (the original,
+    un-minified source, JSON-escaped inside the .map) into scannable code, paired
+    with its `sources` name. Secrets stripped from the shipped bundle — or escaped
+    within the raw .map JSON so the regex pass misses them — surface here.
+    Bounded (MAX_SOURCEMAP_SOURCES) and fully defensive: any parse error → []."""
+    try:
+        doc = json.loads(map_body)
+    except Exception:
+        return []
+    if not isinstance(doc, dict):
+        return []
+    contents = doc.get("sourcesContent")
+    if not isinstance(contents, list):
+        return []
+    names = doc.get("sources") if isinstance(doc.get("sources"), list) else []
+    out: list[tuple[str, str]] = []
+    for i, content in enumerate(contents):
+        if len(out) >= MAX_SOURCEMAP_SOURCES:
+            break
+        if not isinstance(content, str) or not content:
+            continue
+        name = names[i] if i < len(names) and isinstance(names[i], str) else f"source[{i}]"
+        out.append((f"{map_url} → {name}", content))
+    return out
 
 
 _ANCHOR_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)
@@ -1180,7 +1232,17 @@ def _scan_text(
 ) -> list[RawFinding]:
     findings: list[RawFinding] = []
     for pattern in SECRET_PATTERNS:
+        examined = 0
         for match in pattern.regex.finditer(text):
+            examined += 1
+            if examined > MAX_MATCHES_PER_PATTERN:
+                # Defence-in-depth: a pathological blob shall not spawn unbounded
+                # matches for one detector. Bound the work and move on.
+                logger.debug(
+                    "Match cap (%d) reached for %s; truncating further matches.",
+                    MAX_MATCHES_PER_PATTERN, pattern.name,
+                )
+                break
             raw_value = (
                 match.group(1)
                 if match.lastindex and match.lastindex >= 1
@@ -1712,6 +1774,7 @@ async def run_scan(
         "verified_count": 0,
         "unverified_count": 0,
         "filtered_unverified_count": 0,
+        "posture_findings":   [],
         "errors":             [],
         "duration_seconds":   0.0,
     }
@@ -1740,11 +1803,44 @@ async def run_scan(
             "message": f"Asset collection complete — {len(assets)} files to scan",
         })
 
+        # ── 1b. Passive security-posture check (R8) ─────────────────────────
+        # Analyse the target root's own response headers for missing/weak
+        # security controls. Best-effort: never blocks or fails the scan.
+        if SCAN_HTTP_POSTURE:
+            state.check()
+            pfindings = await posture.fetch_posture(client, target_url)
+            result["posture_findings"] = [p.to_dict() for p in pfindings]
+            if pfindings:
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": f"Security posture: {len(pfindings)} header/misconfiguration issue(s) found",
+                })
+
         # ── 2. Regex Extraction ────────────────────────────────────────────
         state.check()
         all_raw: list[RawFinding] = []
         for source_url, body in assets:
             state.check()
+
+            # ── R5: for a source map, scan its DECODED original source instead of
+            # the raw .map JSON. Better per-file attribution, catches secrets that
+            # are escaped/structured in the raw JSON, and avoids the map's own
+            # high-entropy "mappings" VLQ blob (a false-positive source). Falls
+            # back to scanning the raw body if there's no usable sourcesContent.
+            if SCAN_SOURCEMAP_CONTENT and looks_like_sourcemap(source_url, body):
+                srcs = extract_sourcemap_sources(body, source_url)
+                if srcs:
+                    for vsrc_url, content in srcs:
+                        state.check()
+                        sfound = extract_secrets(scan_id, target_url, vsrc_url, content)
+                        if sfound:
+                            await emit({
+                                "type": "log", "level": "WARN",
+                                "message": f"Found {len(sfound)} match(es) in source-map original {vsrc_url}",
+                            })
+                        all_raw.extend(sfound)
+                    continue
+
             found = extract_secrets(scan_id, target_url, source_url, body)
             if found:
                 await emit({
@@ -1874,9 +1970,11 @@ async def run_scan(
             })
             for vf in confirmed:
                 state.check()
-                vf.verified = await verifier.verify_finding(
+                _vres = await verifier.verify_finding_detailed(
                     vf.raw.secret_type, vf.raw.raw_match, client
                 )
+                vf.verified = _vres.status
+                vf.verified_detail = _vres.detail
             result["verified_count"]   = sum(1 for v in confirmed if v.verified == "verified")
             result["unverified_count"] = sum(1 for v in confirmed if v.verified == "unverified")
             await emit({
