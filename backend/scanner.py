@@ -95,6 +95,9 @@ NEEDS_REVIEW_SENTINEL   = -1        # confidence value marking "AI validation fa
 MAX_RAW_FINDINGS_PER_SCAN = _env_int("MAX_RAW_FINDINGS_PER_SCAN", 500)  # safety cap: stop a runaway scan
                                      # (e.g. a minified bundle full of high-entropy noise) from
                                      # generating unbounded Gemini calls / RAM use on the Pi
+MAX_MATCHES_PER_PATTERN = _env_int("MAX_MATCHES_PER_PATTERN", 100)  # R3 defence-in-depth: bound the
+                                     # matches examined for ANY single pattern on ANY single text, so a
+                                     # crafted blob cannot spawn millions of matches for one detector.
 
 # ── Type alias for the broadcaster callback ────────────────────────────────────
 Broadcaster = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
@@ -1182,7 +1185,17 @@ def _scan_text(
 ) -> list[RawFinding]:
     findings: list[RawFinding] = []
     for pattern in SECRET_PATTERNS:
+        examined = 0
         for match in pattern.regex.finditer(text):
+            examined += 1
+            if examined > MAX_MATCHES_PER_PATTERN:
+                # Defence-in-depth: a pathological blob shall not spawn unbounded
+                # matches for one detector. Bound the work and move on.
+                logger.debug(
+                    "Match cap (%d) reached for %s; truncating further matches.",
+                    MAX_MATCHES_PER_PATTERN, pattern.name,
+                )
+                break
             raw_value = (
                 match.group(1)
                 if match.lastindex and match.lastindex >= 1

@@ -59,8 +59,10 @@ repo scanning; win the *web-surface* niche.
   pytest CI gate (`test_bench.py`) that fails the build on a precision/recall regression. Current:
   **precision 1.000 · recall 1.000 · F1 1.000 · 0 false positives.** The harness immediately caught a
   malformed test key, confirming the OpenAI detector correctly requires real key structure. +4 tests.
-- **R3 · Regex safety.** ReDoS/backtracking audit of all 54 patterns, per-match timeout, property-based
-  fuzz tests. [LOW–MED]
+- **R3 · Regex safety.** ✅ **DONE 18 Jul** — a per-pattern match cap (defence-in-depth against
+  match-flood blobs) plus an automated ReDoS gate: empirical wall-clock fuzz over all 54 detectors ×
+  17 adversarial 50 KB inputs, a static nested-quantifier guard, and a cap-engagement test. Proves no
+  catastrophic backtracking and gates future pattern additions. +3 tests.
 - **R4 · SARIF full detector catalog.** ✅ **DONE 18 Jul** — the driver now advertises every detector as
   a SARIF rule (help text, CWE, severity), even on clean scans. +2 tests.
 
