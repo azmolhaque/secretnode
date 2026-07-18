@@ -36,7 +36,8 @@ def _scan() -> dict:
                 "source_url": "https://example.com/config.js", "confidence": 97,
                 "raw_match": "AKIA***", "reason": "live key", "is_new": False,
                 "severity": "CRITICAL", "cwe": "CWE-798", "remediation": "revoke now",
-                "verified": "verified", "found_at": "now",
+                "verified": "verified", "verified_detail": "account acme-bot · scopes: repo",
+                "found_at": "now",
             },
         ],
         "needs_review_findings": [
@@ -158,3 +159,26 @@ def test_sarif_clean_scan_still_lists_rules():
     run = doc["runs"][0]
     assert run["results"] == []
     assert len(run["tool"]["driver"]["rules"]) > 0
+
+
+def test_html_surfaces_verified_identity_detail():
+    """A VERIFIED-active key must show WHO it belongs to / what it reaches (R1)."""
+    out = report.generate_html_report(_scan())
+    assert "live access" in out
+    assert "account acme-bot" in out
+
+
+def test_csv_has_verified_detail_column():
+    out = report.generate_csv_report(_scan())
+    header = out.splitlines()[0]
+    assert "verified_detail" in header
+    assert "account acme-bot" in out
+
+
+def test_sarif_message_carries_identity_and_keeps_token():
+    doc = json.loads(report.generate_sarif_report(_scan()))
+    v = [r for r in doc["runs"][0]["results"] if r["properties"].get("verified") == "verified"][0]
+    # literal token preserved for downstream matchers, identity appended
+    assert v["message"]["text"].startswith("[VERIFIED ACTIVE]")
+    assert "account acme-bot" in v["message"]["text"]
+    assert v["properties"]["verified_detail"] == "account acme-bot · scopes: repo"

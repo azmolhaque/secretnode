@@ -91,3 +91,40 @@ def test_every_verifier_maps_to_a_real_pattern():
     names = {p.name for p in scanner.SECRET_PATTERNS}
     for secret_type in verifier.VERIFIERS:
         assert secret_type in names, f"{secret_type} not in SECRET_PATTERNS"
+
+
+@pytest.mark.asyncio
+async def test_detailed_github_captures_identity_and_scopes():
+    class _R:
+        status_code = 200
+        headers = {"x-oauth-scopes": "repo, read:org"}
+        def json(self): return {"login": "acme-bot"}
+    class _C:
+        async def get(self, *a, **k): return _R()
+        async def post(self, *a, **k): return _R()
+    res = await verifier.verify_finding_detailed("GitHub Personal Access Token", "ghp_x", _C())
+    assert res.status == "verified"
+    assert "acme-bot" in res.detail and "repo" in res.detail
+
+
+@pytest.mark.asyncio
+async def test_detailed_backward_compatible_string_api():
+    # verify_finding() still returns a bare status string.
+    s = await verifier.verify_finding("GitHub Personal Access Token", "ghp_x", _MockClient(_Resp(200)))
+    assert s == "verified"
+
+
+@pytest.mark.asyncio
+async def test_detailed_no_detail_when_body_empty():
+    # 200 but no login/scopes (mock without headers) → verified, empty detail, no crash.
+    res = await verifier.verify_finding_detailed("GitHub Personal Access Token", "ghp_x", _MockClient(_Resp(200)))
+    assert res.status == "verified" and res.detail == ""
+
+
+@pytest.mark.asyncio
+async def test_detailed_fails_closed():
+    class _Boom:
+        async def get(self, *a, **k): raise RuntimeError("down")
+        async def post(self, *a, **k): raise RuntimeError("down")
+    res = await verifier.verify_finding_detailed("OpenAI API Key", "sk-x", _Boom())
+    assert res.status == "unverified" and res.detail == ""

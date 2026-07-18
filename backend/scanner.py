@@ -156,6 +156,7 @@ class ValidatedFinding:
     )
     is_new: bool = True   # set False by run_scan if this fingerprint was seen in a prior scan
     verified: str = "disabled"  # live-verification status: verified/unverified/unsupported/disabled
+    verified_detail: str = ""   # identity/scope of a VERIFIED credential (R1) — never the secret itself
     impact: str = ""            # AI blast-radius statement: what an attacker could actually do
     public_by_design: bool = False  # True for identifiers meant to be public (Firebase web key, pk_ …)
 
@@ -187,6 +188,7 @@ class ValidatedFinding:
             "validated_at":   self.validated_at,
             "is_new":         self.is_new,
             "verified":       self.verified,
+            "verified_detail": self.verified_detail,
             "severity":       self.effective_severity(),
             "cwe":            self._meta().cwe,
             "remediation":    self._meta().remediation,
@@ -1874,9 +1876,11 @@ async def run_scan(
             })
             for vf in confirmed:
                 state.check()
-                vf.verified = await verifier.verify_finding(
+                _vres = await verifier.verify_finding_detailed(
                     vf.raw.secret_type, vf.raw.raw_match, client
                 )
+                vf.verified = _vres.status
+                vf.verified_detail = _vres.detail
             result["verified_count"]   = sum(1 for v in confirmed if v.verified == "verified")
             result["unverified_count"] = sum(1 for v in confirmed if v.verified == "unverified")
             await emit({

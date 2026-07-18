@@ -141,11 +141,15 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
         badge = '<span class="badge new">NEW</span>' if f.get("is_new", True) else '<span class="badge recurring">RECURRING</span>'
         cwe = html.escape(str(f.get("cwe", "")))
         impact = html.escape(f.get('impact', '') or '—')
+        vdetail = html.escape(f.get('verified_detail', '') or '')
+        # For a VERIFIED-active key, show WHO it belongs to / what it can reach — the
+        # concrete blast radius an attacker inherits (R1 verification enrichment).
+        vdetail_html = f'<div class="small ver-detail">🔓 live access: {vdetail}</div>' if vdetail else ''
         return f"""
         <tr>
           <td>{sev_badge(_severity_of(f))}</td>
           <td>{html.escape(f.get('secret_type',''))}<div class="small">{cwe}</div></td>
-          <td class="impact">{impact}</td>
+          <td class="impact">{impact}{vdetail_html}</td>
           <td class="mono">{html.escape(f.get('source_url', f.get('target_url','')))}</td>
           <td>{f.get('confidence',0)}%</td>
           <td>{badge}{ver_badge(f)}</td>
@@ -306,21 +310,23 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
     writer = csv.writer(buf)
     writer.writerow([
         "status", "severity", "cwe", "secret_type", "source_url", "confidence",
-        "is_new", "verified", "impact", "matched_value_partial", "reason", "found_at",
+        "is_new", "verified", "verified_detail", "impact", "matched_value_partial",
+        "reason", "found_at",
     ])
     for f in sorted(scan.get("confirmed_findings", []), key=_sort_key):
         writer.writerow([
             "CONFIRMED", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
             f.get("source_url", f.get("target_url", "")),
             f.get("confidence", 0), "NEW" if f.get("is_new", True) else "RECURRING",
-            f.get("verified", "disabled"), f.get("impact", ""), f.get("raw_match", ""),
-            f.get("reason", ""), f.get("found_at", ""),
+            f.get("verified", "disabled"), f.get("verified_detail", ""), f.get("impact", ""),
+            f.get("raw_match", ""), f.get("reason", ""), f.get("found_at", ""),
         ])
     for f in scan.get("needs_review_findings", []):
         writer.writerow([
             "NEEDS_REVIEW", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
             f.get("source_url", f.get("target_url", "")),
-            "", "", "", f.get("impact", ""), f.get("raw_match", ""), f.get("reason", ""), f.get("found_at", ""),
+            "", "", "", "", f.get("impact", ""), f.get("raw_match", ""),
+            f.get("reason", ""), f.get("found_at", ""),
         ])
     return buf.getvalue()
 
@@ -412,7 +418,13 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
         level = "note" if is_review else _SARIF_LEVEL.get(severity, "warning")
         location_uri = f.get("source_url") or f.get("target_url") or "unknown"
         verified = str(f.get("verified", "disabled"))
-        vprefix = "[VERIFIED ACTIVE] " if verified == "verified" else ""
+        verified_detail = str(f.get("verified_detail", "") or "")
+        # Keep the literal "[VERIFIED ACTIVE]" token intact for downstream matchers,
+        # then append the identity/scope (blast radius) when we captured one.
+        vprefix = (
+            (f"[VERIFIED ACTIVE] ({verified_detail}) " if verified_detail else "[VERIFIED ACTIVE] ")
+            if verified == "verified" else ""
+        )
         impact = str(f.get("impact", "") or "")
         msg = (
             vprefix + f"{secret_type} ({severity}) detected. "
@@ -435,6 +447,7 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
                 "cwe": cwe,
                 "confidence": f.get("confidence", 0),
                 "verified": verified,
+                "verified_detail": verified_detail,
                 "impact": impact,
                 "status": "needs_review" if is_review else "confirmed",
             },
