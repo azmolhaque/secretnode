@@ -94,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "scan each, and write a combined report. Passive; authorized use only.")
     ap.add_argument("--max-targets", dest="max_targets", type=int, default=orchestrator.MAX_TARGETS,
                     help=f"Max live hosts to scan in a --deep-scan run (default: {orchestrator.MAX_TARGETS})")
+    ap.add_argument("--with-historical", dest="with_historical", action="store_true",
+                    help="In a --deep-scan, also recover historical JS bundles from public archives "
+                         "(Wayback/CommonCrawl) and scan them as seeds — catches secrets in forgotten "
+                         "bundles no live page links to. Slower; passive.")
     return ap
 
 
@@ -105,6 +109,7 @@ async def _run_deep_scan(args) -> int:
         verify=args.verify,
         only_verified=args.only_verified,
         max_targets=max(1, args.max_targets),
+        include_historical=args.with_historical,
     )
     if args.output:
         report_fmt = (args.format if args.format in ("json",) else "html")
@@ -117,9 +122,10 @@ async def _run_deep_scan(args) -> int:
         sys.stdout.write(json.dumps(result.to_dict(), indent=2) + "\n")
 
     t = result.to_dict()["totals"]
+    hist = f", {t['historical_urls']} historical URL(s)" if t.get("historical_urls") else ""
     print(
         f"SecretNode deep scan of {result.domain}: {t['subdomains']} subdomain(s), "
-        f"{t['live_hosts']} live, {t['hosts_scanned']} scanned — "
+        f"{t['live_hosts']} live, {t['hosts_scanned']} scanned{hist} — "
         f"{t['confirmed']} confirmed, {t['needs_review']} needs-review, "
         f"{t['posture_issues']} posture issue(s).",
         file=sys.stderr,

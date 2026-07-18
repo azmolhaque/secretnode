@@ -261,6 +261,52 @@ class TestClassifyValidated:
         assert scanner.classify_validated(self._vf("Generic High-Entropy Secret", False, 55)) == "drop"
 
 
+class TestSeedUrlInjection:
+    """run_scan(seed_urls=...) must fetch externally-supplied assets (e.g. archived
+    JS bundles) and add them to the scan set, deduped against the live crawl."""
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    def _patch(self, monkeypatch):
+        async def fake_spider(client, url, sem, broadcast, max_pages=1):
+            return [("https://ex.com/base.js", "const base = 1;")]
+
+        async def fake_fetch(client, url, sem, broadcast=None):
+            return (url, "// clean seed body, no secrets")
+
+        async def fake_posture(client, url):
+            return []
+
+        monkeypatch.setattr(scanner, "spider_target", fake_spider)
+        monkeypatch.setattr(scanner, "fetch_url", fake_fetch)
+        monkeypatch.setattr(scanner, "build_client", lambda *a, **k: self._FakeClient())
+        monkeypatch.setattr(scanner.posture, "fetch_posture", fake_posture)
+
+    @pytest.mark.asyncio
+    async def test_seed_url_is_fetched_and_added(self, monkeypatch):
+        self._patch(monkeypatch)
+        res = await scanner.run_scan("https://ex.com", seed_urls=["https://ex.com/old.js"])
+        assert res["assets_fetched"] == 2      # base crawl asset + 1 seed
+
+    @pytest.mark.asyncio
+    async def test_seed_url_deduped_against_crawl(self, monkeypatch):
+        self._patch(monkeypatch)
+        # Seed already collected by the crawl → not fetched twice.
+        res = await scanner.run_scan("https://ex.com", seed_urls=["https://ex.com/base.js"])
+        assert res["assets_fetched"] == 1
+
+    @pytest.mark.asyncio
+    async def test_no_seeds_is_unchanged(self, monkeypatch):
+        self._patch(monkeypatch)
+        res = await scanner.run_scan("https://ex.com")
+        assert res["assets_fetched"] == 1
+
+
 class TestNeedsReviewSentinel:
     def test_sentinel_is_negative(self):
         # Must never collide with a real 0-100 confidence value

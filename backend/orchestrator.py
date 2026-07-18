@@ -31,6 +31,7 @@ from typing import Awaitable, Callable
 
 import httpx
 
+import historical
 import recon
 import scanner
 
@@ -82,6 +83,7 @@ class DeepScanResult:
     live_hosts: list[str] = field(default_factory=list)
     hosts: list[HostScan] = field(default_factory=list)
     scans: list[dict] = field(default_factory=list)   # raw per-host scan dicts
+    historical_urls: int = 0        # historical URLs discovered (0 if not requested)
     error: str | None = None
 
     @property
@@ -103,10 +105,12 @@ class DeepScanResult:
             "enum_sources": self.enum_sources,
             "live_hosts": self.live_hosts,
             "hosts": [h.to_dict() for h in self.hosts],
+            "historical_urls": self.historical_urls,
             "totals": {
                 "subdomains": len(self.subdomains),
                 "live_hosts": len(self.live_hosts),
                 "hosts_scanned": len(self.hosts),
+                "historical_urls": self.historical_urls,
                 "confirmed": self.total_confirmed,
                 "needs_review": self.total_needs_review,
                 "posture_issues": self.total_posture,
@@ -179,9 +183,12 @@ async def run_deep_scan(
     verify: bool = False,
     only_verified: bool = False,
     max_targets: int = MAX_TARGETS,
+    include_historical: bool = False,
     enumerate_fn: EnumerateFn = recon.enumerate_subdomains,
     scan_fn: ScanFn = scanner.run_scan,
     client_factory: ClientFactory = scanner.build_client,
+    discover_historical_fn: Callable[..., Awaitable["historical.HistoricalResult"]]
+        = historical.discover_historical_urls,
 ) -> DeepScanResult:
     """Domain → enumerate → probe → scan each live host → aggregate.
 
@@ -230,12 +237,23 @@ async def run_deep_scan(
             result.error = enum.error or "no live hosts found"
             return result
 
+        # Optional: recover historical URLs (Wayback/CommonCrawl) once for the
+        # domain and hand each host its archived JS bundles as scan seeds — so a
+        # forgotten bundle no page links to still gets fetched and scanned.
+        js_by_host: dict[str, list[str]] = {}
+        if include_historical:
+            hist = await discover_historical_fn(client, domain)
+            result.historical_urls = hist.count
+            for u in hist.js_urls():
+                js_by_host.setdefault(recon._host_of(u), []).append(u)
+
         targets = result.live_hosts[:max(1, max_targets)]
         for url in targets:
             host = recon._host_of(url)
             try:
                 scan = await scan_fn(target_url=url, max_crawl_pages=max_crawl_pages,
-                                     verify=verify, only_verified=only_verified)
+                                     verify=verify, only_verified=only_verified,
+                                     seed_urls=js_by_host.get(host, []))
             except Exception as exc:  # a single host must not sink the whole run
                 logger.debug("deep scan: host %s failed: %s", url, exc)
                 result.hosts.append(HostScan(host=host, url=url,

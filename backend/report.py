@@ -619,6 +619,7 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
     <div class="stat"><div class="num">{int(totals.get('subdomains', 0))}</div><div class="label">Subdomains found</div></div>
     <div class="stat"><div class="num">{int(totals.get('live_hosts', 0))}</div><div class="label">Live hosts</div></div>
     <div class="stat"><div class="num">{int(totals.get('hosts_scanned', 0))}</div><div class="label">Hosts scanned</div></div>
+    <div class="stat"><div class="num">{int(totals.get('historical_urls', 0))}</div><div class="label">Historical URLs</div></div>
     <div class="stat"><div class="num">{confirmed_total}</div><div class="label">Confirmed exposures</div></div>
     <div class="stat"><div class="num">{int(totals.get('needs_review', 0))}</div><div class="label">Needs review</div></div>
     <div class="stat"><div class="num">{int(totals.get('posture_issues', 0))}</div><div class="label">Posture issues</div></div>

@@ -7,6 +7,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+import historical
 import orchestrator
 import recon
 
@@ -163,6 +164,56 @@ async def test_deep_scan_ip_target_falls_back_to_single_scan():
     # IP has no enumerable domain → exactly one host scanned (the target itself).
     assert result.to_dict()["totals"]["hosts_scanned"] == 1
     assert result.hosts[0].url == "http://93.184.216.34"
+
+
+@pytest.mark.asyncio
+async def test_deep_scan_historical_seeds_routed_per_host():
+    seen: dict[str, list[str]] = {}
+
+    async def _scan(*, target_url, seed_urls=None, **_kw):
+        seen[target_url] = list(seed_urls or [])
+        return {"target_url": target_url, "confirmed_findings": [],
+                "needs_review_findings": [], "posture_findings": [], "assets_fetched": 1}
+
+    async def _hist(_client, domain):
+        return historical.HistoricalResult(
+            domain=domain,
+            urls=["https://a.example.com/old.js", "https://example.com/x.js",
+                  "https://example.com/page.html"],   # non-JS ignored as a seed
+            sources=["wayback"],
+        )
+
+    result = await orchestrator.run_deep_scan(
+        "example.com",
+        include_historical=True,
+        enumerate_fn=_enum_returning(["a.example.com"]),
+        scan_fn=_scan,
+        client_factory=_client_factory(),
+        discover_historical_fn=_hist,
+    )
+    # Each host receives only its own archived JS bundles as seeds.
+    assert seen["https://example.com"] == ["https://example.com/x.js"]
+    assert seen["https://a.example.com"] == ["https://a.example.com/old.js"]
+    assert result.historical_urls == 3
+    assert result.to_dict()["totals"]["historical_urls"] == 3
+
+
+@pytest.mark.asyncio
+async def test_deep_scan_without_historical_passes_no_seeds():
+    seen: dict[str, list[str]] = {}
+
+    async def _scan(*, target_url, seed_urls=None, **_kw):
+        seen[target_url] = list(seed_urls or [])
+        return {"target_url": target_url, "confirmed_findings": [],
+                "needs_review_findings": [], "posture_findings": [], "assets_fetched": 1}
+
+    await orchestrator.run_deep_scan(
+        "example.com",
+        enumerate_fn=_enum_returning([]),
+        scan_fn=_scan,
+        client_factory=_client_factory(),
+    )
+    assert seen["https://example.com"] == []
 
 
 @pytest.mark.asyncio

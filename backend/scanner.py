@@ -104,6 +104,9 @@ MAX_RAW_FINDINGS_PER_SCAN = _env_int("MAX_RAW_FINDINGS_PER_SCAN", 500)  # safety
 MAX_MATCHES_PER_PATTERN = _env_int("MAX_MATCHES_PER_PATTERN", 100)  # R3 defence-in-depth: bound the
                                      # matches examined for ANY single pattern on ANY single text, so a
                                      # crafted blob cannot spawn millions of matches for one detector.
+MAX_SEED_URLS = _env_int("MAX_SEED_URLS", 200)  # cap externally-supplied seed assets fetched per scan
+                                     # (e.g. historical JS bundles from public archives) — bounds the
+                                     # extra fetches a deep scan does beyond the live crawl.
 
 # ── Type alias for the broadcaster callback ────────────────────────────────────
 Broadcaster = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
@@ -1770,6 +1773,7 @@ async def run_scan(
     max_crawl_pages: int = 1,
     verify: bool | None = None,
     only_verified: bool = False,
+    seed_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Full pipeline:
@@ -1839,6 +1843,32 @@ async def run_scan(
             result["errors"].append(str(exc))
             await emit({"type": "scan_error", "error": str(exc)})
             return result
+
+        # ── 1a. Inject seed assets (deep-ASM slice 3.5) ────────────────────
+        # Externally-supplied URLs — e.g. historical JS bundles recovered from
+        # public archives (Wayback/CommonCrawl) — that the live crawl would never
+        # link to. Fetch any not already collected and add them to the scan set.
+        if seed_urls:
+            state.check()
+            have = {u for u, _ in assets}
+            to_fetch = [u for u in dict.fromkeys(seed_urls) if u not in have][:MAX_SEED_URLS]
+            if to_fetch:
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": f"Fetching {len(to_fetch)} seed asset(s) from archives",
+                })
+                fetched = await asyncio.gather(
+                    *(fetch_url(client, u, semaphore, broadcast) for u in to_fetch)
+                )
+                added = 0
+                for u, body in fetched:
+                    if body:
+                        assets.append((u, body))
+                        added += 1
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": f"Added {added} seed asset(s) from archives ({len(to_fetch) - added} unreachable)",
+                })
 
         result["assets_fetched"] = len(assets)
         await emit({

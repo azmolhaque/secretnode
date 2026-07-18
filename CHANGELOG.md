@@ -6,6 +6,14 @@ All notable changes to SecretNode are documented here. This project adheres to
 ## [Unreleased]
 
 ### Added
+- **Historical bundles fed into the scan (deep-ASM slice 3.5).** `run_scan()` gains a `seed_urls`
+  parameter — externally-supplied asset URLs are fetched and scanned alongside the live crawl,
+  deduped against it (capped by `MAX_SEED_URLS`). `run_deep_scan(include_historical=True)` now
+  recovers the domain's historical JS bundles (Wayback/CommonCrawl) and routes each host its own
+  archived bundles as seeds, so a secret in a forgotten bundle **no live page links to** still gets
+  fetched and confirmed. CLI: `python cli.py <domain> --deep-scan --with-historical`; the combined
+  report gains a "Historical URLs" metric. This turns discovery into findings — the payoff of the
+  whole passive discovery chain.
 - **Historical path discovery (deep-ASM slice 3).** New `backend/historical.py` recovers a domain's
   historically-exposed URLs from **public web archives (Wayback Machine + CommonCrawl)** — the
   passive alternative to directory/content brute-forcing, so no request ever touches the target. Two
