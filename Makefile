@@ -1,5 +1,5 @@
 # SecretNode — developer & operator shortcuts
-.PHONY: help setup test lint run docker clean
+.PHONY: help setup test lint bench run docker clean
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -15,6 +15,9 @@ test: ## Run the full test suite
 
 lint: ## Run the ruff correctness lint
 	ruff check backend/
+
+bench: ## Measure detection-layer precision/recall on the labelled corpus (R2)
+	cd backend && SECRETNODE_API_KEY=bench python -m bench.run_bench
 
 run: ## Start the server (requires .env with SECRETNODE_API_KEY)
 	cd backend && uvicorn main:app --host 0.0.0.0 --port 8000 --loop uvloop

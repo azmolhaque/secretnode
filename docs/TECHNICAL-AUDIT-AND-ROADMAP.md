@@ -50,15 +50,19 @@ repo scanning; win the *web-surface* niche.
 ## Roadmap — sequenced, each a shippable, tested unit
 
 ### Tier 1 — correctness & brand value (do first)
-- **R1 · Verification enrichment.** Capture identity/scopes for verified keys (GitHub login+scopes,
-  Stripe account, OpenAI org) → feed the `impact` line. *Direct report/sales value.* [MED]
-- **R2 · FP/FN benchmark harness.** Labeled fixtures (real-shaped secrets + known FPs/placeholders) +
-  `make bench` reporting **precision/recall**, so every change is measured. *Directly answers "be
-  conscious of false positive & negative."* [MED]
+- **R1 · Verification enrichment.** ✅ **DONE 18 Jul** — a verified credential now yields a short,
+  non-sensitive identity/scope label (GitHub @acct+scopes, Stripe account+LIVE/charges, Slack
+  workspace/user, OpenAI org, npm/GitLab/Telegram handle, SendGrid send-scope, Mailgun domain count),
+  surfaced in HTML/CSV/SARIF as the concrete blast radius. Backward-compatible API; +7 tests.
+- **R2 · FP/FN benchmark harness.** ✅ **DONE 18 Jul** — `backend/bench/` labelled corpus (12 synthetic
+  positives + 15 placeholders/examples/noise), `make bench` reporting **precision/recall/F1**, and a
+  pytest CI gate (`test_bench.py`) that fails the build on a precision/recall regression. Current:
+  **precision 1.000 · recall 1.000 · F1 1.000 · 0 false positives.** The harness immediately caught a
+  malformed test key, confirming the OpenAI detector correctly requires real key structure. +4 tests.
 - **R3 · Regex safety.** ReDoS/backtracking audit of all 54 patterns, per-match timeout, property-based
   fuzz tests. [LOW–MED]
 - **R4 · SARIF full detector catalog.** ✅ **DONE 18 Jul** — the driver now advertises every detector as
-  a SARIF rule (help text, CWE, severity), even on clean scans. +2 tests, suite 145→147 green.
+  a SARIF rule (help text, CWE, severity), even on clean scans. +2 tests.
 
 ### Tier 2 — coverage
 - **R5 · Surface expansion.** Parse inline JSON blobs, HTML comments, source-map `sourcesContent`, wasm
