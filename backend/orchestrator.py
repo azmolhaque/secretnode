@@ -196,6 +196,7 @@ async def run_deep_scan(
     only_verified: bool = False,
     max_targets: int = MAX_TARGETS,
     include_historical: bool = False,
+    broadcast: Callable[[dict], Awaitable[None]] | None = None,
     enumerate_fn: EnumerateFn = recon.enumerate_subdomains,
     scan_fn: ScanFn = scanner.run_scan,
     client_factory: ClientFactory = scanner.build_client,
@@ -214,18 +215,28 @@ async def run_deep_scan(
         url = target if "://" in target else f"https://{host}"
         result = DeepScanResult(domain=host)
         scan = await scan_fn(target_url=url, max_crawl_pages=max_crawl_pages,
-                             verify=verify, only_verified=only_verified)
+                             verify=verify, only_verified=only_verified, broadcast=broadcast)
         result.live_hosts = [url]
         result.hosts = [_summarise_scan(host, url, scan)]
         result.scans = [scan]
         return result
 
+    async def emit(event: dict) -> None:
+        if broadcast:
+            await broadcast(event)
+
+    def log(msg: str, level: str = "INFO") -> dict:
+        return {"type": "log", "level": level, "message": msg}
+
     original_host = recon._host_of(target)
     result = DeepScanResult(domain=domain)
     async with client_factory() as client:
+        await emit(log(f"Deep scan of {domain} — enumerating subdomains (Certificate Transparency)…"))
         enum = await enumerate_fn(client, domain)
         result.subdomains = enum.subdomains
         result.enum_sources = enum.sources
+        await emit(log(f"Enumerated {len(enum.subdomains)} subdomain(s)"
+                       + (f" via {', '.join(enum.sources)}" if enum.sources else "")))
 
         # Optional: recover historical URLs (Wayback/CommonCrawl) once for the
         # domain. They enrich BOTH host discovery (hostnames seen in the archive)
@@ -234,11 +245,14 @@ async def run_deep_scan(
         js_by_host: dict[str, list[str]] = {}
         hist_hosts: list[str] = []
         if include_historical:
+            await emit(log("Recovering historical URLs from public archives (Wayback/CommonCrawl)…"))
             hist = await discover_historical_fn(client, domain)
             result.historical_urls = hist.count
             hist_hosts = [recon._host_of(u) for u in hist.urls]
             for u in hist.js_urls():
                 js_by_host.setdefault(recon._host_of(u), []).append(u)
+            await emit(log(f"Recovered {hist.count} historical URL(s); "
+                           f"{sum(len(v) for v in js_by_host.values())} archived JS seed(s)"))
 
         # Candidate hosts, in-scope and deduped. The host the caller actually
         # typed is ALWAYS included first — enumeration must never be able to drop
@@ -265,19 +279,24 @@ async def run_deep_scan(
                     error="skipped: resolves to a private/internal address (SSRF guard)"))
             # 'unresolved' hosts are silently dropped — nothing to scan.
 
+        await emit(log(f"Probing {len(safe_hosts)} candidate host(s) for liveness…"))
         result.live_hosts = await probe_live_hosts(client, safe_hosts)
 
         if not result.live_hosts:
             result.error = enum.error or "no live hosts found"
+            await emit(log("No live hosts to scan.", "WARN"))
+            await emit({"type": "deep_scan_complete", "totals": result.to_dict()["totals"]})
             return result
 
         targets = result.live_hosts[:max(1, max_targets)]
-        for url in targets:
+        await emit(log(f"{len(result.live_hosts)} host(s) live — scanning {len(targets)}"))
+        for i, url in enumerate(targets, 1):
             host = recon._host_of(url)
+            await emit(log(f"[host {i}/{len(targets)}] scanning {url}"))
             try:
                 scan = await scan_fn(target_url=url, max_crawl_pages=max_crawl_pages,
                                      verify=verify, only_verified=only_verified,
-                                     seed_urls=js_by_host.get(host, []))
+                                     seed_urls=js_by_host.get(host, []), broadcast=broadcast)
             except Exception as exc:  # a single host must not sink the whole run
                 logger.debug("deep scan: host %s failed: %s", url, exc)
                 result.hosts.append(HostScan(host=host, url=url,
@@ -286,4 +305,5 @@ async def run_deep_scan(
             result.scans.append(scan)
             result.hosts.append(_summarise_scan(host, url, scan))
 
+    await emit({"type": "deep_scan_complete", "totals": result.to_dict()["totals"]})
     return result

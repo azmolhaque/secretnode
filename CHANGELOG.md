@@ -6,6 +6,14 @@ All notable changes to SecretNode are documented here. This project adheres to
 ## [Unreleased]
 
 ### Added
+- **Dashboard domain-mode + deep-scan API (deep-ASM slice 6).** The whole deep-ASM pipeline is now
+  drivable from the web UI, not just the CLI. New `POST /api/deep-scans` runs a domain-wide deep scan
+  as a streaming background task — per-host progress flows over the existing `/ws/logs/{scan_id}`
+  WebSocket (`run_deep_scan` gained a `broadcast` hook and emits enumerate/probe/per-host/complete
+  events), and the report endpoint serves the combined multi-target report for deep results.
+  Frontend: a **DEEP toggle** turns the target box into a whole-domain scan (bare domain in →
+  enumerate + historical + probe + scan-all), finalising on `deep_scan_complete` rather than
+  per-host. API tests added (route, auth, input caps, start). Passive; authorized-scope only.
 - **Historical bundles fed into the scan (deep-ASM slice 3.5).** `run_scan()` gains a `seed_urls`
   parameter — externally-supplied asset URLs are fetched and scanned alongside the live crawl,
   deduped against it (capped by `MAX_SEED_URLS`). `run_deep_scan(include_historical=True)` now
