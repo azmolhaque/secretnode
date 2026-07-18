@@ -3,6 +3,18 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **False-negative: structural keys wrongly entropy-gated.** The Shannon-entropy floor
+  (`MIN_ENTROPY_THRESHOLD=3.5`) was applied uniformly to every detector, silently dropping
+  genuinely low-entropy but well-formed provider keys (e.g. an AWS key ID at ~3.27 bits) before
+  they ever reached AI validation — the worst failure mode for a scanner. Entropy is now
+  class-aware: the *generic* keyword=value catch-all keeps the full 3.5 bar, while
+  *structural/provider* detectors (AKIA…, ghp_…, sk_live_…, PEM, fixed-format tokens) only clear a
+  low anti-degenerate floor (`MIN_STRUCTURAL_ENTROPY=2.5`) that still rejects obvious junk like
+  `AKIAAAAAAAAAAAAAAAAA`. Precision/recall stays 1.000/1.000; suite **187 → 191**.
+
 ## [2.6.0] — Detection quality, safety & attack-surface breadth
 
 A measured capability pass grounded in a fresh audit vs 2026 secret-scanning SOTA

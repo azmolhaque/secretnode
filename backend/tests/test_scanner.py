@@ -180,6 +180,52 @@ class TestExtractSecrets:
         assert findings == [] or all(f.secret_type != "AWS Access Key" for f in findings)
 
 
+class TestEntropyGatingPolicy:
+    """Entropy gating is a false-positive control for the *generic* keyword=value
+    catch-all only. Structural/provider detectors are high-precision by shape and
+    must NOT be entropy-gated — otherwise a genuinely low-entropy but well-formed
+    live key (e.g. an AWS key ID whose 16 chars happen to be low-entropy) is
+    silently dropped: a false negative, the worst failure mode for a scanner."""
+
+    def test_low_entropy_structural_key_is_detected(self):
+        # A correctly-shaped AWS key ID whose entropy is *below* the threshold.
+        low = "AKIA6218374A3D288737"
+        assert scanner.shannon_entropy(low) < scanner.MIN_ENTROPY_THRESHOLD
+        body = f'const cfg = {{ key: "{low}" }};'
+        findings = scanner.extract_secrets(
+            "scan1", "https://example.com", "https://example.com/app.js", body
+        )
+        assert "AWS Access Key" in [f.secret_type for f in findings]
+
+    def test_degenerate_structural_key_is_rejected(self):
+        # All-identical chars => degenerate junk, not a real key. The low
+        # structural floor still rejects it even though it matches the AWS shape.
+        junk = "AKIA" + "A" * 16
+        assert scanner.shannon_entropy(junk) < scanner.MIN_STRUCTURAL_ENTROPY
+        body = f'k = "{junk}"'
+        findings = scanner.extract_secrets(
+            "scan1", "https://example.com", "https://example.com/app.js", body
+        )
+        assert "AWS Access Key" not in [f.secret_type for f in findings]
+
+    def test_aws_pattern_is_not_entropy_gated(self):
+        assert scanner.PATTERN_BY_NAME["AWS Access Key"].entropy_gated is False
+
+    def test_generic_pattern_stays_entropy_gated(self):
+        assert scanner.PATTERN_BY_NAME["Generic High-Entropy Secret"].entropy_gated is True
+
+    def test_generic_low_entropy_value_is_still_dropped(self):
+        # Loose keyword=value with a low-entropy (non-placeholder) value must
+        # still be filtered — the generic catch-all keeps its entropy gate.
+        low_val = "a" * 24
+        assert scanner.shannon_entropy(low_val) < scanner.MIN_ENTROPY_THRESHOLD
+        body = f'api_key = "{low_val}"'
+        findings = scanner.extract_secrets(
+            "scan1", "https://example.com", "https://example.com/app.js", body
+        )
+        assert "Generic High-Entropy Secret" not in [f.secret_type for f in findings]
+
+
 class TestNeedsReviewSentinel:
     def test_sentinel_is_negative(self):
         # Must never collide with a real 0-100 confidence value

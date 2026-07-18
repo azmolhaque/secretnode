@@ -89,6 +89,11 @@ FETCH_TIMEOUT           = _env_float("FETCH_TIMEOUT", 20.0)
 RETRY_ATTEMPTS          = _env_int("RETRY_ATTEMPTS", 3)
 RETRY_BACKOFF_BASE      = _env_float("RETRY_BACKOFF_BASE", 2.0)
 MIN_ENTROPY_THRESHOLD   = _env_float("MIN_ENTROPY_THRESHOLD", 3.5)
+MIN_STRUCTURAL_ENTROPY  = _env_float("MIN_STRUCTURAL_ENTROPY", 2.5)  # low anti-degenerate
+                                     # floor for high-precision structural detectors: rejects
+                                     # obvious junk (e.g. "AKIAAAAAAAAAAAAAAAAA", ~0.6 bits) while
+                                     # still catching genuinely modest-entropy live keys that the
+                                     # full generic bar would wrongly drop (false-negative guard).
 CONTEXT_WINDOW_CHARS    = _env_int("CONTEXT_WINDOW_CHARS", 120)
 MAX_ASSET_BYTES         = _env_int("MAX_ASSET_BYTES", 5 * 1024 * 1024)   # 5 MB
 GEMINI_CONFIDENCE_MIN   = _env_int("GEMINI_CONFIDENCE_MIN", 80)
@@ -124,6 +129,16 @@ class SecretPattern:
     severity: str = "HIGH"
     cwe: str = "CWE-798"                       # Use of Hard-coded Credentials
     remediation: str = _DEFAULT_REMEDIATION
+    # Entropy handling differs by detector class:
+    #   • Structural/provider detectors (AKIA…, ghp_…, sk_live_…, PEM blocks,
+    #     fixed-format hex/UUID tokens) are high-precision by shape. They get
+    #     only a LOW anti-degenerate floor (MIN_STRUCTURAL_ENTROPY) that rejects
+    #     obvious junk like "AKIAAAAAAAAAAAAAAAAA" while still catching genuinely
+    #     modest-entropy live keys — because gating these on the full generic bar
+    #     silently drops real credentials (a false negative, the worst failure).
+    #   • The generic keyword=value catch-all matches loosely and needs the full
+    #     MIN_ENTROPY_THRESHOLD randomness signal to stay quiet; it opts in below.
+    entropy_gated: bool = False
 
 
 @dataclass
@@ -314,6 +329,7 @@ SECRET_PATTERNS: list[SecretPattern] = [
         ),
         description="Generic credential assignment",
         severity="MEDIUM",
+        entropy_gated=True,   # loose keyword=value match — entropy keeps it quiet
     ),
     SecretPattern(
         name="Mailgun API Key",
@@ -1251,7 +1267,11 @@ def _scan_text(
             if is_benign_placeholder(raw_value):
                 continue
             entropy = shannon_entropy(raw_value)
-            if not passes_entropy_check(raw_value):
+            # Generic keyword=value catch-all must clear the full randomness bar;
+            # structural detectors only need to clear a low anti-degenerate floor
+            # so genuinely modest-entropy live keys are not silently dropped.
+            floor = MIN_ENTROPY_THRESHOLD if pattern.entropy_gated else MIN_STRUCTURAL_ENTROPY
+            if entropy < floor:
                 continue
             start = max(0, match.start() - CONTEXT_WINDOW_CHARS)
             end   = min(len(text), match.end() + CONTEXT_WINDOW_CHARS)
