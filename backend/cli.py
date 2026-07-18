@@ -96,11 +96,12 @@ async def _run_subdomain_enum(target: str) -> int:
             "(subdomain enumeration does not apply to bare IP addresses)."
         )
     async with scanner.build_client() as client:
-        result = await recon.enumerate_subdomains_ct(client, domain)
+        result = await recon.enumerate_subdomains(client, domain)
     print(json.dumps(result.to_dict(), indent=2))
+    sources = ", ".join(result.sources) if result.sources else "none"
     print(
         f"SecretNode: discovered {result.count} subdomain(s) for {domain} "
-        f"(source: {result.source})." + (f" [error: {result.error}]" if result.error else ""),
+        f"(sources: {sources})." + (f" [error: {result.error}]" if result.error else ""),
         file=sys.stderr,
     )
     return 0

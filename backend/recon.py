@@ -20,6 +20,7 @@ Design rules (mirror the scanner's posture):
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
@@ -42,8 +43,18 @@ def _env_int(name: str, default: int) -> int:
 # crt.sh is the CT-log front-end; %25 is a URL-encoded '%' wildcard so the query
 # "%.example.com" returns every logged hostname under the domain.
 CRTSH_URL          = os.environ.get("CRTSH_URL", "https://crt.sh").rstrip("/")
+# Certspotter is a second, independent CT aggregator. Querying more than one
+# passive source is how industrial enumerators (subfinder/amass) stay reliable
+# when any single source is rate-limited or down — crt.sh in particular returns
+# 502/timeout often enough that a lone source is not production-grade.
+CERTSPOTTER_URL    = os.environ.get("CERTSPOTTER_URL", "https://api.certspotter.com").rstrip("/")
 SUBDOMAIN_TIMEOUT  = _env_int("SUBDOMAIN_ENUM_TIMEOUT", 30)
 MAX_SUBDOMAINS     = _env_int("MAX_SUBDOMAINS", 500)   # safety cap on result size
+ENUM_RETRIES       = _env_int("SUBDOMAIN_ENUM_RETRIES", 2)  # retries on transient CT errors
+
+# Transient HTTP statuses worth retrying — crt.sh/Certspotter throw these under
+# load; a retry with backoff usually clears them.
+_TRANSIENT_STATUS: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 # A small public-suffix table so we can find the *registrable* domain of a host
 # without a heavyweight PSL dependency. Covers the common two-label suffixes,
@@ -63,10 +74,14 @@ _TWO_LEVEL_SUFFIXES: frozenset[str] = frozenset({
 
 @dataclass
 class SubdomainResult:
-    """Outcome of a passive subdomain enumeration for one registrable domain."""
+    """Outcome of a passive subdomain enumeration for one registrable domain.
+
+    `sources` lists the passive sources that actually returned data; `error` is
+    set only when *every* source failed (so a caller can distinguish "the domain
+    has no subdomains" from "enumeration could not run")."""
     domain: str
     subdomains: list[str] = field(default_factory=list)
-    source: str = "crt.sh"
+    sources: list[str] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -78,7 +93,7 @@ class SubdomainResult:
             "domain": self.domain,
             "subdomains": self.subdomains,
             "count": self.count,
-            "source": self.source,
+            "sources": self.sources,
             "error": self.error,
         }
 
@@ -166,33 +181,117 @@ def parse_crtsh_json(payload: object, domain: str) -> list[str]:
     return sorted(found)
 
 
-async def enumerate_subdomains_ct(
+def parse_certspotter_json(payload: object, domain: str) -> list[str]:
+    """Parse a Certspotter `/v1/issuances` response into sorted, in-scope
+    hostnames. Each issuance carries a `dns_names` list. Pure function."""
+    domain = (domain or "").strip().lower().rstrip(".")
+    if isinstance(payload, (str, bytes)):
+        try:
+            payload = json.loads(payload)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(payload, list):
+        return []
+
+    found: set[str] = set()
+    for record in payload:
+        if not isinstance(record, dict):
+            continue
+        for raw in record.get("dns_names", []) or []:
+            host = _clean_name(str(raw), domain)
+            if host:
+                found.add(host)
+    return sorted(found)
+
+
+async def _get_with_retries(
+    client: httpx.AsyncClient, url: str, *, headers: dict | None = None,
+) -> tuple[httpx.Response | None, str | None]:
+    """GET with backoff retries on transient statuses/timeouts. Returns
+    (response, None) on a final response, or (None, error) if every attempt
+    failed to produce one. Always names the failure type so errors are never
+    blank (the crt.sh timeout showed up as an empty string before)."""
+    last_err = "no attempt made"
+    for attempt in range(ENUM_RETRIES + 1):
+        try:
+            resp = await client.get(
+                url, headers=headers or {},
+                timeout=httpx.Timeout(SUBDOMAIN_TIMEOUT, connect=10.0),
+            )
+            if resp.status_code in _TRANSIENT_STATUS and attempt < ENUM_RETRIES:
+                last_err = f"HTTP {resp.status_code}"
+                await asyncio.sleep(2 ** attempt)
+                continue
+            return resp, None
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            last_err = f"{type(exc).__name__}: {exc}".rstrip(": ").strip()
+            if attempt < ENUM_RETRIES:
+                await asyncio.sleep(2 ** attempt)
+                continue
+    return None, last_err
+
+
+async def _fetch_crtsh(client: httpx.AsyncClient, domain: str) -> tuple[set[str], str | None]:
+    resp, err = await _get_with_retries(client, f"{CRTSH_URL}/?q=%25.{domain}&output=json")
+    if resp is None:
+        return set(), err
+    if resp.status_code != 200:
+        return set(), f"HTTP {resp.status_code}"
+    return set(parse_crtsh_json(resp.text, domain)), None
+
+
+async def _fetch_certspotter(client: httpx.AsyncClient, domain: str) -> tuple[set[str], str | None]:
+    url = (f"{CERTSPOTTER_URL}/v1/issuances?domain={domain}"
+           "&include_subdomains=true&expand=dns_names")
+    resp, err = await _get_with_retries(client, url)
+    if resp is None:
+        return set(), err
+    if resp.status_code != 200:
+        return set(), f"HTTP {resp.status_code}"
+    return set(parse_certspotter_json(resp.text, domain)), None
+
+
+async def enumerate_subdomains(
     client: httpx.AsyncClient,
     domain: str,
     *,
     limit: int = MAX_SUBDOMAINS,
 ) -> SubdomainResult:
-    """Passively enumerate subdomains of `domain` via Certificate Transparency.
+    """Passively enumerate subdomains of `domain` from multiple Certificate
+    Transparency sources (crt.sh + Certspotter), merged and deduplicated.
 
-    Never contacts the target — only crt.sh. Fails closed: on any error the
-    result carries an `error` string and an empty subdomain list so a caller can
-    proceed (and report the gap) instead of aborting."""
+    Never contacts the target. Fails closed: `error` is set only if *every*
+    source failed; if any source returns data the result is usable and lists the
+    sources that succeeded. Querying several sources is what keeps enumeration
+    reliable when one is rate-limited or down."""
     domain = (domain or "").strip().lower().rstrip(".")
     if not domain:
         return SubdomainResult(domain=domain, error="empty domain")
 
-    url = f"{CRTSH_URL}/?q=%25.{domain}&output=json"
-    try:
-        resp = await client.get(url, timeout=httpx.Timeout(SUBDOMAIN_TIMEOUT, connect=10.0))
-        if resp.status_code != 200:
-            return SubdomainResult(domain=domain, error=f"crt.sh HTTP {resp.status_code}")
-        subs = parse_crtsh_json(resp.text, domain)
-    except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        logger.debug("crt.sh enumeration failed for %s: %s", domain, exc)
-        return SubdomainResult(domain=domain, error=f"crt.sh request failed: {exc}")
+    all_hosts: set[str] = set()
+    ok_sources: list[str] = []
+    errors: list[str] = []
+    for name, fetch in (("crt.sh", _fetch_crtsh), ("certspotter", _fetch_certspotter)):
+        try:
+            hosts, err = await fetch(client, domain)
+        except Exception as exc:  # defensive: a source must never crash the run
+            hosts, err = set(), f"{type(exc).__name__}: {exc}".rstrip(": ").strip()
+        if hosts:
+            all_hosts |= hosts
+            ok_sources.append(name)
+        if err:
+            errors.append(f"{name}: {err}")
 
+    subs = sorted(all_hosts)
     if len(subs) > limit:
-        logger.debug("crt.sh returned %d subdomains for %s; capping at %d",
+        logger.debug("enumeration returned %d subdomains for %s; capping at %d",
                      len(subs), domain, limit)
         subs = subs[:limit]
-    return SubdomainResult(domain=domain, subdomains=subs)
+
+    error = None if ok_sources else ("; ".join(errors) or "no sources returned data")
+    return SubdomainResult(domain=domain, subdomains=subs, sources=ok_sources, error=error)
+
+
+# Backward-compatible alias: the original single-source name now maps to the
+# multi-source enumerator.
+enumerate_subdomains_ct = enumerate_subdomains
