@@ -210,3 +210,15 @@ def test_html_r9_no_evidence_callout_on_clean_scan():
     out = report.generate_html_report(clean)
     assert "CURRENTLY ACTIVE via" not in out   # no callout when nothing is verified-active
     assert "Detection quality" in out           # methodology still present
+
+
+def test_html_r8_posture_section_and_tile():
+    scan = _scan()
+    scan["posture_findings"] = [
+        {"name": "Missing HSTS", "severity": "MEDIUM", "cwe": "CWE-319",
+         "evidence": "No Strict-Transport-Security header.", "remediation": "Add HSTS.", "category": "Security Posture"},
+    ]
+    out = report.generate_html_report(scan)
+    assert "Security Posture &amp; Misconfigurations" in out
+    assert "Missing HSTS" in out
+    assert "Posture Issues" in out

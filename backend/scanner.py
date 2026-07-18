@@ -26,6 +26,7 @@ from google import genai
 from google.genai import errors as genai_errors, types
 from pydantic import BaseModel, Field, ValidationError
 
+import posture
 import verifier
 
 logger = logging.getLogger("secretnode.scanner")
@@ -886,6 +887,10 @@ MAX_SOURCE_MAPS = _env_int("MAX_SOURCE_MAPS", 40)
 # so we also decode each embedded source and scan it as real code.
 SCAN_SOURCEMAP_CONTENT = os.environ.get("SCAN_SOURCEMAP_CONTENT", "true").lower() == "true"
 MAX_SOURCEMAP_SOURCES  = _env_int("MAX_SOURCEMAP_SOURCES", 200)
+# R8: passive HTTP security-posture check (missing/weak security headers,
+# version disclosure, insecure cookies) on the target root. Pure analysis of the
+# response the target already serves — no exploitation, no third-party calls.
+SCAN_HTTP_POSTURE = os.environ.get("SCAN_HTTP_POSTURE", "true").lower() == "true"
 
 
 def _same_scope(base_host: str, candidate_host: str) -> bool:
@@ -1769,6 +1774,7 @@ async def run_scan(
         "verified_count": 0,
         "unverified_count": 0,
         "filtered_unverified_count": 0,
+        "posture_findings":   [],
         "errors":             [],
         "duration_seconds":   0.0,
     }
@@ -1796,6 +1802,19 @@ async def run_scan(
             "type": "log", "level": "INFO",
             "message": f"Asset collection complete — {len(assets)} files to scan",
         })
+
+        # ── 1b. Passive security-posture check (R8) ─────────────────────────
+        # Analyse the target root's own response headers for missing/weak
+        # security controls. Best-effort: never blocks or fails the scan.
+        if SCAN_HTTP_POSTURE:
+            state.check()
+            pfindings = await posture.fetch_posture(client, target_url)
+            result["posture_findings"] = [p.to_dict() for p in pfindings]
+            if pfindings:
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": f"Security posture: {len(pfindings)} header/misconfiguration issue(s) found",
+                })
 
         # ── 2. Regex Extraction ────────────────────────────────────────────
         state.check()

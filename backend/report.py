@@ -213,6 +213,19 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     else:
         verified_evidence = ""
 
+    # R8 — passive security-posture findings (missing/weak headers, misconfig).
+    posture = scan.get("posture_findings", [])
+
+    def _posture_row(p: dict[str, Any]) -> str:
+        return (
+            f'<tr><td>{sev_badge(_severity_of(p))}</td>'
+            f'<td>{html.escape(p.get("name",""))}<div class="small">{html.escape(str(p.get("cwe","")))}</div></td>'
+            f'<td class="mono small">{html.escape(p.get("evidence",""))}</td>'
+            f'<td class="small">{html.escape(p.get("remediation",""))}</td></tr>'
+        )
+    posture_html = "\n".join(_posture_row(p) for p in sorted(posture, key=_sort_key)) or \
+        '<tr><td colspan="4" class="empty">No header/misconfiguration issues detected.</td></tr>'
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -303,6 +316,7 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     <div class="stat"><div class="num">{new_count}</div><div class="label">New</div></div>
     <div class="stat"><div class="num">{recurring_count}</div><div class="label">Recurring</div></div>
     <div class="stat"><div class="num">{len(needs_review)}</div><div class="label">Needs Review</div></div>
+    <div class="stat"><div class="num">{len(posture)}</div><div class="label">Posture Issues</div></div>
   </div>
 
   <h2>Scope &amp; Methodology</h2>
@@ -328,6 +342,12 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
 
   <h2>Remediation Guidance</h2>
   {remediation_blocks}
+
+  <h2>Security Posture &amp; Misconfigurations</h2>
+  <table>
+    <thead><tr><th>Severity</th><th>Issue / CWE</th><th>Evidence</th><th>Remediation</th></tr></thead>
+    <tbody>{posture_html}</tbody>
+  </table>
 
   <h2>Flagged for Manual Review (AI validation unavailable)</h2>
   <table>

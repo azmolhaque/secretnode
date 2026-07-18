@@ -87,9 +87,15 @@ repo scanning; win the *web-surface* niche.
 - **R7 · Composite/proximity rule engine** for generic high-FP patterns (Gitleaks-style). [MED]
 
 ### Tier 3 — ASM breadth (fulfills the brand fully; larger)
-- **R8 · Passive attack-surface map** — CT-log subdomain discovery, security-header/misconfig checks,
-  dangling-DNS detection. Moves SecretNode from "secret scanner" toward the full "attack-surface
-  scanner" the brand promises. [HIGH]
+- **R8 · Passive attack-surface map.** ✅ **DONE 18 Jul (security-posture slice)** — `posture.py`
+  analyses the target root's own response for missing/weak security headers (HSTS, CSP, clickjacking,
+  X-Content-Type-Options, Referrer/Permissions-Policy), version disclosure, and insecure cookies. Pure
+  passive analysis (no exploitation, no third-party calls); each issue carries severity/CWE/evidence/
+  remediation and renders in a dedicated report section + KPI tile — so even a clean *credential* scan
+  now returns actionable ASM findings. Env-tunable (`SCAN_HTTP_POSTURE`); +11 tests. This is the first
+  step from "secret scanner" toward the full attack-surface scanner the brand promises.
+  *Remaining R8 follow-up (higher-risk / external network):* CT-log subdomain discovery (crt.sh),
+  DNS resolution + dangling-CNAME takeover checks; posture in CSV/SARIF export. [HIGH]
 
 ### Tier 4 — polish
 - **R9 · Executive-summary report page.** ✅ **DONE 18 Jul** — the HTML report now leads with a
