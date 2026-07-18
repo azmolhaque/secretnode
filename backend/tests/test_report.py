@@ -182,3 +182,31 @@ def test_sarif_message_carries_identity_and_keeps_token():
     assert v["message"]["text"].startswith("[VERIFIED ACTIVE]")
     assert "account acme-bot" in v["message"]["text"]
     assert v["properties"]["verified_detail"] == "account acme-bot · scopes: repo"
+
+
+def test_html_r9_verification_evidence_callout():
+    """R9: verified-active findings get a prominent live-access evidence block."""
+    out = report.generate_html_report(_scan())
+    assert "CURRENTLY ACTIVE" in out
+    assert "confirmed live access" in out
+    assert "account acme-bot" in out  # the R1 identity detail surfaces in the callout
+
+
+def test_html_r9_precision_statement_present():
+    out = report.generate_html_report(_scan())
+    assert "Detection quality" in out
+    assert "precision/recall" in out
+    assert "verification-first" in out
+
+
+def test_html_r9_verified_active_tile():
+    out = report.generate_html_report(_scan())
+    assert "Verified Active" in out
+
+
+def test_html_r9_no_evidence_callout_on_clean_scan():
+    clean = {"scan_id": "s0", "target_url": "https://x.com",
+             "confirmed_findings": [], "needs_review_findings": [], "assets_fetched": 3}
+    out = report.generate_html_report(clean)
+    assert "CURRENTLY ACTIVE via" not in out   # no callout when nothing is verified-active
+    assert "Detection quality" in out           # methodology still present

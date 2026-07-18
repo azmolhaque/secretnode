@@ -186,6 +186,33 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     if not remediation_blocks:
         remediation_blocks = '<div class="small">No remediation items — scan is clean.</div>'
 
+    # R9 — verification-evidence callout: the single strongest client-facing signal.
+    # For credentials confirmed CURRENTLY ACTIVE (read-only check against the provider),
+    # list exactly what an attacker reaches. Only rendered when there is live proof.
+    if verified_active:
+        ve_rows = ""
+        for f in confirmed:
+            if str(f.get("verified", "")).lower() != "verified":
+                continue
+            detail = html.escape(f.get("verified_detail", "") or "live access confirmed")
+            loc = html.escape(f.get("source_url", f.get("target_url", "")))
+            ve_rows += (
+                f'<li><b>{html.escape(f.get("secret_type",""))}</b> '
+                f'<span class="mono small">{loc}</span>'
+                f'<div class="ver-ev-detail">🔓 confirmed live access: {detail}</div></li>'
+            )
+        verified_evidence = (
+            '<div class="ver-evidence">'
+            f'<div class="ve-head">⚠ {verified_active} credential(s) confirmed CURRENTLY ACTIVE'
+            ' via a read-only check against the issuing provider</div>'
+            f'<ul class="ve-list">{ve_rows}</ul>'
+            '<div class="small">These are not look-alikes — each was live at scan time. '
+            'Rotate/revoke them at the provider immediately.</div>'
+            '</div>'
+        )
+    else:
+        verified_evidence = ""
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -232,6 +259,14 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
   .verdict-sub {{ font-size: 13px; color: #4a5568; margin-top: 8px; }}
   .scope p {{ font-size: 13px; color: #2d3748; }}
   td.impact {{ font-size: 12px; color: #742a2a; font-weight: 600; max-width: 260px; }}
+  .ver-evidence {{ background: #fff5f5; border: 1px solid #feb2b2; border-left: 6px solid #c53030; border-radius: 6px; padding: 14px 16px; margin: 16px 0; }}
+  .ver-evidence .ve-head {{ font-weight: 700; color: #c53030; font-size: 14px; }}
+  .ve-list {{ margin: 10px 0 6px; padding-left: 18px; font-size: 13px; }}
+  .ve-list li {{ margin: 6px 0; }}
+  .ver-ev-detail {{ font-family: 'Courier New', monospace; font-size: 12px; color: #742a2a; margin-top: 2px; }}
+  .stat.alert {{ border-color: #feb2b2; background: #fff5f5; }}
+  .stat.alert .num {{ color: #c53030; }}
+  .scope-quality {{ background: #f0fff4; border-left: 3px solid #276749; padding: 10px 12px; border-radius: 0 4px 4px 0; margin-top: 10px; }}
 </style>
 </head>
 <body>
@@ -246,6 +281,8 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     </div>
     <div class="verdict-sub">{html.escape(verdict_sub)}</div>
   </div>
+
+  {verified_evidence}
 
   <div class="meta">
     <div><b>Target</b> {target}</div>
@@ -262,6 +299,7 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     <div class="stat"><div class="num">{sev_counts['CRITICAL']}</div><div class="label">Critical</div></div>
     <div class="stat"><div class="num">{sev_counts['HIGH']}</div><div class="label">High</div></div>
     <div class="stat"><div class="num">{sev_counts['MEDIUM']}</div><div class="label">Medium</div></div>
+    <div class="stat{' alert' if verified_active else ''}"><div class="num">{verified_active}</div><div class="label">Verified Active</div></div>
     <div class="stat"><div class="num">{new_count}</div><div class="label">New</div></div>
     <div class="stat"><div class="num">{recurring_count}</div><div class="label">Recurring</div></div>
     <div class="stat"><div class="num">{len(needs_review)}</div><div class="label">Needs Review</div></div>
@@ -275,6 +313,11 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     Shannon-entropy analysis. High-entropy candidates were then contextually validated to distinguish live secrets
     from mocks, placeholders and minified-code artefacts. <b>No exploitation, authentication, data exfiltration, or
     write operations</b> were performed against the target — testing is passive and authorized-scope only.</p>
+    <p class="scope-quality"><b>Detection quality.</b> SecretNode is verification-first: where a credential type
+    supports it, a read-only check against the issuing provider confirms whether the key is currently active before
+    it is reported — so a "verified" finding is proven, not shape-matched. The deterministic detection layer is
+    continuously measured against a labelled benchmark corpus with a precision/recall gate in CI, so this report
+    favours confirmed impact over look-alikes and keeps false positives low.</p>
   </div>
 
   <h2>Confirmed Findings</h2>

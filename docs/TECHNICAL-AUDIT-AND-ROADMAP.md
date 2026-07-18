@@ -92,7 +92,11 @@ repo scanning; win the *web-surface* niche.
   scanner" the brand promises. [HIGH]
 
 ### Tier 4 — polish
-- **R9 · Executive-summary report page** + precision statement + verification-evidence block. [LOW–MED]
+- **R9 · Executive-summary report page.** ✅ **DONE 18 Jul** — the HTML report now leads with a
+  verification-evidence callout (each verified-active key + its R1 identity/scope as "confirmed live
+  access"), a "Verified Active" KPI tile, and an honest measured-precision "Detection quality"
+  statement (verification-first + CI-gated precision/recall). Turns the engine work into a
+  client-ready deliverable. +4 tests.
 - **R10 · Asset caching** (ETag/If-Modified-Since) + per-provider verify concurrency. [LOW]
 - **R11 · Distribution** — PyPI publish, tagged releases, docs. [LOW]
 
