@@ -118,6 +118,8 @@ class DeepScanResult:
             "historical_urls": self.historical_urls,
             "confirmed_findings": self._aggregate("confirmed_findings"),
             "needs_review_findings": self._aggregate("needs_review_findings"),
+            "associated_hosts": sorted({h for s in self.scans
+                                        for h in s.get("associated_hosts", [])}),
             "totals": {
                 "subdomains": len(self.subdomains),
                 "live_hosts": len(self.live_hosts),

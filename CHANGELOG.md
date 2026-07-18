@@ -6,6 +6,15 @@ All notable changes to SecretNode are documented here. This project adheres to
 ## [Unreleased]
 
 ### Added
+- **Surface intelligence: endpoints + associated-host graph (deep-ASM slices 5 & 4).** New
+  `backend/surface.py` mines every fetched asset (passively, no new target requests) for two things:
+  **(5)** URLs/paths referenced in the JavaScript — `fetch()`/`axios` targets, `/api/…` routes a live
+  page crawl never links to — and then fetches same-site `.js` endpoints **one level deeper** so
+  code-referenced bundles get secret-scanned too; and **(4)** the external hosts each asset talks to
+  (CDNs, APIs, third parties), aggregated into an **associated-asset graph**. `run_scan` now returns
+  `discovered_endpoints` + `associated_hosts`; both reports gain an "Attack Surface Intelligence"
+  section. Extractor regexes are bounded/ReDoS-safe. Config: `EXTRACT_SURFACE`, `MAX_ENDPOINT_SEEDS`,
+  `MAX_DISCOVERED_ENDPOINTS`.
 - **Dashboard domain-mode + deep-scan API (deep-ASM slice 6).** The whole deep-ASM pipeline is now
   drivable from the web UI, not just the CLI. New `POST /api/deep-scans` runs a domain-wide deep scan
   as a streaming background task — per-host progress flows over the existing `/ws/logs/{scan_id}`

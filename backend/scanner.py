@@ -27,6 +27,7 @@ from google.genai import errors as genai_errors, types
 from pydantic import BaseModel, Field, ValidationError
 
 import posture
+import surface
 import verifier
 
 logger = logging.getLogger("secretnode.scanner")
@@ -107,6 +108,10 @@ MAX_MATCHES_PER_PATTERN = _env_int("MAX_MATCHES_PER_PATTERN", 100)  # R3 defence
 MAX_SEED_URLS = _env_int("MAX_SEED_URLS", 200)  # cap externally-supplied seed assets fetched per scan
                                      # (e.g. historical JS bundles from public archives) — bounds the
                                      # extra fetches a deep scan does beyond the live crawl.
+EXTRACT_SURFACE = os.environ.get("EXTRACT_SURFACE", "true").lower() == "true"  # slice 5/4:
+                                     # mine fetched JS/HTML for referenced endpoints + external hosts
+MAX_ENDPOINT_SEEDS = _env_int("MAX_ENDPOINT_SEEDS", 50)   # same-site .js endpoints to fetch (deeper crawl)
+MAX_DISCOVERED_ENDPOINTS = _env_int("MAX_DISCOVERED_ENDPOINTS", 300)  # cap endpoints stored in report
 
 # ── Type alias for the broadcaster callback ────────────────────────────────────
 Broadcaster = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
@@ -1822,6 +1827,8 @@ async def run_scan(
         "unverified_count": 0,
         "filtered_unverified_count": 0,
         "posture_findings":   [],
+        "discovered_endpoints": [],   # slice 5: same-site URLs/paths referenced in JS/HTML
+        "associated_hosts":   [],     # slice 4: external hosts the assets talk to
         "errors":             [],
         "duration_seconds":   0.0,
     }
@@ -1868,6 +1875,47 @@ async def run_scan(
                 await emit({
                     "type": "log", "level": "INFO",
                     "message": f"Added {added} seed asset(s) from archives ({len(to_fetch) - added} unreachable)",
+                })
+
+        # ── 1b. Surface intel + one-level deeper crawl (slices 5 & 4) ──────
+        # Mine every fetched asset for referenced endpoints (JS-called URLs a live
+        # crawl never links to) and external hosts (the associated-asset graph).
+        # Then fetch same-site .js endpoints we don't already have, so code-
+        # referenced bundles get secret-scanned too.
+        if EXTRACT_SURFACE:
+            state.check()
+            base_host = urlparse(target_url).hostname or ""
+            all_eps: set[str] = set()
+            ext_hosts: set[str] = set()
+            for src_url, body in list(assets):
+                all_eps.update(surface.extract_endpoints(body, src_url))
+                ext_hosts.update(surface.extract_referenced_hosts(body, src_url))
+            same_eps, _assoc = surface.classify_endpoints(sorted(all_eps), base_host)
+
+            have = {u.split("?", 1)[0] for u, _ in assets}
+            js_eps = [
+                e for e in same_eps
+                if e.split("?", 1)[0].lower().endswith(".js") and e.split("?", 1)[0] not in have
+            ][:MAX_ENDPOINT_SEEDS]
+            if js_eps:
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": f"Deeper crawl: fetching {len(js_eps)} JS endpoint(s) referenced in code",
+                })
+                fetched = await asyncio.gather(
+                    *(fetch_url(client, u, semaphore, broadcast) for u in js_eps)
+                )
+                for u, body in fetched:
+                    if body:
+                        assets.append((u, body))
+
+            result["discovered_endpoints"] = same_eps[:MAX_DISCOVERED_ENDPOINTS]
+            result["associated_hosts"] = sorted(h for h in ext_hosts if h and h != base_host)
+            if result["discovered_endpoints"] or result["associated_hosts"]:
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": (f"Surface intel: {len(result['discovered_endpoints'])} endpoint(s), "
+                                f"{len(result['associated_hosts'])} associated host(s)"),
                 })
 
         result["assets_fetched"] = len(assets)

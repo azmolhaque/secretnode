@@ -307,6 +307,50 @@ class TestSeedUrlInjection:
         assert res["assets_fetched"] == 1
 
 
+class TestSurfaceExtraction:
+    """run_scan mines fetched assets for referenced endpoints + external hosts,
+    and fetches same-site .js endpoints one level deeper (slices 5 & 4)."""
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    def _patch(self, monkeypatch):
+        # Base asset references a same-site JS endpoint and an external host.
+        async def fake_spider(client, url, sem, broadcast, max_pages=1):
+            body = ('fetch("/api/v1/session");'
+                    'src="/static/deep.js";'
+                    'x="https://cdn.thirdparty.net/lib.js";')
+            return [("https://ex.com/app.js", body)]
+
+        async def fake_fetch(client, url, sem, broadcast=None):
+            return (url, "// deep bundle, no secrets")
+
+        async def fake_posture(client, url):
+            return []
+
+        monkeypatch.setattr(scanner, "spider_target", fake_spider)
+        monkeypatch.setattr(scanner, "fetch_url", fake_fetch)
+        monkeypatch.setattr(scanner, "build_client", lambda *a, **k: self._FakeClient())
+        monkeypatch.setattr(scanner.posture, "fetch_posture", fake_posture)
+
+    @pytest.mark.asyncio
+    async def test_endpoints_and_hosts_and_deeper_crawl(self, monkeypatch):
+        self._patch(monkeypatch)
+        res = await scanner.run_scan("https://ex.com")
+        # Same-site endpoints discovered (session API + the deep.js path).
+        assert "https://ex.com/api/v1/session" in res["discovered_endpoints"]
+        assert "https://ex.com/static/deep.js" in res["discovered_endpoints"]
+        # External host captured in the associated-asset graph.
+        assert "cdn.thirdparty.net" in res["associated_hosts"]
+        assert "ex.com" not in res["associated_hosts"]      # own host excluded
+        # deep.js was fetched one level deeper → 2 assets (base + deep.js).
+        assert res["assets_fetched"] == 2
+
+
 class TestNeedsReviewSentinel:
     def test_sentinel_is_negative(self):
         # Must never collide with a real 0-100 confidence value
