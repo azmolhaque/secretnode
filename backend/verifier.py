@@ -202,6 +202,104 @@ async def _telegram(token: str, client: Any) -> tuple[bool, str]:
     return True, _detail(f"Telegram bot @{bot}" if bot else "")
 
 
+async def _cloudflare(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        headers={"Authorization": f"Bearer {token}"}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    j = _safe_json(r)
+    res = j.get("result") if isinstance(j.get("result"), dict) else {}
+    active = bool(j.get("success")) and res.get("status", "active") == "active"
+    return (True, "") if active else (False, "")
+
+
+async def _digitalocean(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.digitalocean.com/v2/account",
+        headers={"Authorization": f"Bearer {token}"}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    acct = _safe_json(r).get("account")
+    email = acct.get("email", "") if isinstance(acct, dict) else ""
+    return True, _detail(f"DigitalOcean {email}" if email else "")
+
+
+async def _datadog(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.datadoghq.com/api/v1/validate",
+        headers={"DD-API-KEY": token}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    return (True, "") if _safe_json(r).get("valid") else (False, "")
+
+
+async def _notion(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.notion.com/v1/users/me",
+        headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
+        timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    name = _safe_json(r).get("name", "")
+    return True, _detail(f"Notion {name}" if name else "")
+
+
+async def _linear(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.post(
+        "https://api.linear.app/graphql",
+        headers={"Authorization": token, "Content-Type": "application/json"},
+        json={"query": "{ viewer { name email } }"}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    viewer = ((_safe_json(r).get("data") or {}).get("viewer") or {})
+    if not isinstance(viewer, dict) or not viewer:
+        return False, ""
+    who = viewer.get("email") or viewer.get("name") or ""
+    return True, _detail(f"Linear {who}" if who else "")
+
+
+async def _figma(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.figma.com/v1/me",
+        headers={"X-Figma-Token": token}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    j = _safe_json(r)
+    who = j.get("handle") or j.get("email") or ""
+    return True, _detail(f"Figma {who}" if who else "")
+
+
+async def _postman(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.getpostman.com/me",
+        headers={"X-Api-Key": token}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    user = _safe_json(r).get("user")
+    who = user.get("username", "") if isinstance(user, dict) else ""
+    return True, _detail(f"Postman {who}" if who else "")
+
+
+async def _doppler(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.doppler.com/v3/me",
+        headers={"Authorization": f"Bearer {token}"}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    wp = _safe_json(r).get("workplace")
+    who = wp.get("name", "") if isinstance(wp, dict) else ""
+    return True, _detail(f"Doppler {who}" if who else "")
+
+
 # secret_type (from scanner.SECRET_PATTERNS) -> verifier
 VERIFIERS: dict[str, Verifier] = {
     "GitHub Personal Access Token": _github,
@@ -218,6 +316,15 @@ VERIFIERS: dict[str, Verifier] = {
     "npm Access Token": _npm,
     "Mailgun API Key": _mailgun,
     "Telegram Bot Token": _telegram,
+    # R6 — additional read-only whoami/validate verifiers for existing detectors.
+    "Cloudflare API Token": _cloudflare,
+    "DigitalOcean PAT": _digitalocean,
+    "Datadog API Key": _datadog,
+    "Notion Integration Token": _notion,
+    "Linear API Key": _linear,
+    "Figma Personal Access Token": _figma,
+    "Postman API Key": _postman,
+    "Doppler Token": _doppler,
 }
 
 

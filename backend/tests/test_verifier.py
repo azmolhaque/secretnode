@@ -128,3 +128,46 @@ async def test_detailed_fails_closed():
         async def post(self, *a, **k): raise RuntimeError("down")
     res = await verifier.verify_finding_detailed("OpenAI API Key", "sk-x", _Boom())
     assert res.status == "unverified" and res.detail == ""
+
+
+@pytest.mark.asyncio
+async def test_r6_verifiers_registered():
+    for t in ("Cloudflare API Token", "DigitalOcean PAT", "Datadog API Key",
+              "Notion Integration Token", "Linear API Key",
+              "Figma Personal Access Token", "Postman API Key", "Doppler Token"):
+        assert verifier.is_supported(t), t
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_active_vs_disabled():
+    active = await verifier.verify_finding_detailed(
+        "Cloudflare API Token", "cf", _MockClient(_Resp(200, {"success": True, "result": {"status": "active"}})))
+    disabled = await verifier.verify_finding_detailed(
+        "Cloudflare API Token", "cf", _MockClient(_Resp(200, {"success": True, "result": {"status": "disabled"}})))
+    assert active.status == "verified"
+    assert disabled.status == "unverified"
+
+
+@pytest.mark.asyncio
+async def test_datadog_valid_field():
+    ok = await verifier.verify_finding("Datadog API Key", "dd", _MockClient(_Resp(200, {"valid": True})))
+    no = await verifier.verify_finding("Datadog API Key", "dd", _MockClient(_Resp(200, {"valid": False})))
+    assert ok == "verified" and no == "unverified"
+
+
+@pytest.mark.asyncio
+async def test_linear_identity_extracted():
+    res = await verifier.verify_finding_detailed(
+        "Linear API Key", "lin",
+        _MockClient(_Resp(200, {"data": {"viewer": {"name": "Ada", "email": "ada@x.com"}}})))
+    assert res.status == "verified" and "ada@x.com" in res.detail
+
+
+@pytest.mark.asyncio
+async def test_figma_and_digitalocean_identity():
+    fig = await verifier.verify_finding_detailed(
+        "Figma Personal Access Token", "fig", _MockClient(_Resp(200, {"handle": "ada"})))
+    do = await verifier.verify_finding_detailed(
+        "DigitalOcean PAT", "do", _MockClient(_Resp(200, {"account": {"email": "ops@acme.io"}})))
+    assert fig.status == "verified" and "ada" in fig.detail
+    assert do.status == "verified" and "ops@acme.io" in do.detail

@@ -77,8 +77,13 @@ repo scanning; win the *web-surface* niche.
   *Remaining R5 follow-up:* opt-in authorized known-path probe (`.env`, `.git/config`, `config.js`) —
   the one genuinely new *network* surface; deferred as higher-risk (extra requests, needs SSRF/scope
   review). [MED]
-- **R6 · Detector + verifier expansion.** Prioritize high-impact providers, each paired with a safe
-  read-only verifier. [MED, ongoing]
+- **R6 · Detector + verifier expansion.** ✅ **DONE 18 Jul (verifier slice)** — added 8 read-only
+  whoami/validate verifiers for existing detectors that previously returned `unsupported`: Cloudflare,
+  DigitalOcean, Datadog, Notion, Linear, Figma, Postman, Doppler. Live-verification coverage now spans
+  **17 providers** (was 9); each extracts R1 identity where available, is read-only, and fails closed.
+  Chosen deliberately over adding new *detectors* — this widens the verification-first differentiator
+  with **zero new false-positive risk** (no new regexes). +6 tests. *Follow-up:* new detectors (Twilio
+  SID-paired, GCP SA JSON, Supabase service_role) when each can ship with a corpus entry + verifier.
 - **R7 · Composite/proximity rule engine** for generic high-FP patterns (Gitleaks-style). [MED]
 
 ### Tier 3 — ASM breadth (fulfills the brand fully; larger)
