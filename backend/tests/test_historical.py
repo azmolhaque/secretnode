@@ -51,6 +51,20 @@ class TestHistoricalResultViews:
         assert r.paths == ["/a", "/b", "/static/app.js"]
         assert r.js_urls() == ["https://example.com/static/app.js"]
 
+    def test_js_urls_dedupes_cache_buster_variants(self):
+        # The same file under many ?v=… cache-busters must collapse to one seed —
+        # this is what turns 11 api_data.js?v=… into a single fetch.
+        r = historical.HistoricalResult(domain="example.com", urls=[
+            "https://rest.example.com/docs/api_data.js?v=1596328976710",
+            "https://rest.example.com/docs/api_data.js?v=1596328981612",
+            "https://rest.example.com/docs/api_data.js?v=1743672225794",
+            "https://rest.example.com/docs/api_project.js?v=1",
+        ])
+        assert r.js_urls() == [
+            "https://rest.example.com/docs/api_data.js?v=1596328976710",
+            "https://rest.example.com/docs/api_project.js?v=1",
+        ]
+
 
 class _Resp:
     def __init__(self, status_code: int, text: str = ""):

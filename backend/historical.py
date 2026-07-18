@@ -74,8 +74,23 @@ class HistoricalResult:
 
     def js_urls(self) -> list[str]:
         """Discovered URLs that look like JavaScript — the highest-value scan
-        seeds, since bundled JS is where secrets most often leak."""
-        return [u for u in self.urls if urlparse(u).path.lower().endswith(".js")]
+        seeds, since bundled JS is where secrets most often leak.
+
+        Deduplicated by (host, path): archives store the same file under many
+        cache-buster query strings (app.js?v=1, app.js?v=2, …); scanning each
+        variant re-finds the same secrets, so we keep only one URL per unique
+        file. This is what collapses e.g. 11 api_data.js?v=… variants to one."""
+        seen: set[tuple[str, str]] = set()
+        out: list[str] = []
+        for u in self.urls:
+            p = urlparse(u)
+            if not p.path.lower().endswith(".js"):
+                continue
+            key = ((p.hostname or "").lower(), p.path)
+            if key not in seen:
+                seen.add(key)
+                out.append(u)
+        return out
 
     def to_dict(self) -> dict:
         return {
