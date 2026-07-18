@@ -217,6 +217,56 @@ async def test_deep_scan_without_historical_passes_no_seeds():
 
 
 @pytest.mark.asyncio
+async def test_deep_scan_always_scans_specified_host():
+    # Regression: even if CT enumeration returns nothing and the typed host is a
+    # subdomain (not the apex), the host the caller specified must still be scanned.
+    seen: list[str] = []
+
+    async def _scan(*, target_url, seed_urls=None, **_kw):
+        seen.append(target_url)
+        return {"target_url": target_url, "confirmed_findings": [],
+                "needs_review_findings": [], "posture_findings": [], "assets_fetched": 1}
+
+    await orchestrator.run_deep_scan(
+        "testphp.example.com",
+        enumerate_fn=_enum_returning([]),          # CT found nothing
+        scan_fn=_scan,
+        client_factory=_client_factory(),
+    )
+    assert any("testphp.example.com" in u for u in seen)
+
+
+@pytest.mark.asyncio
+async def test_deep_scan_historical_reveals_hosts():
+    # Hostnames seen only in the archive become scan candidates, so a flaky CT
+    # source no longer zeroes out the run.
+    seen: list[str] = []
+
+    async def _scan(*, target_url, seed_urls=None, **_kw):
+        seen.append(recon._host_of(target_url))
+        return {"target_url": target_url, "confirmed_findings": [],
+                "needs_review_findings": [], "posture_findings": [], "assets_fetched": 1}
+
+    async def _hist(_client, domain):
+        return historical.HistoricalResult(
+            domain=domain,
+            urls=["https://testphp.example.com/x", "https://rest.example.com/b.js"],
+            sources=["wayback"],
+        )
+
+    await orchestrator.run_deep_scan(
+        "example.com",
+        include_historical=True,
+        enumerate_fn=_enum_returning([]),          # CT empty
+        scan_fn=_scan,
+        client_factory=_client_factory(),
+        discover_historical_fn=_hist,
+    )
+    assert "testphp.example.com" in seen
+    assert "rest.example.com" in seen
+
+
+@pytest.mark.asyncio
 async def test_deep_scan_ssrf_guard_skips_private_host(monkeypatch):
     # Turn the guard back on and force one host to look internal.
     monkeypatch.setenv("ALLOW_PRIVATE_TARGETS", "false")

@@ -208,13 +208,35 @@ async def run_deep_scan(
         result.scans = [scan]
         return result
 
+    original_host = recon._host_of(target)
     result = DeepScanResult(domain=domain)
     async with client_factory() as client:
         enum = await enumerate_fn(client, domain)
         result.subdomains = enum.subdomains
         result.enum_sources = enum.sources
-        # Always include the apex domain as a candidate even if CT omitted it.
-        candidates = list(dict.fromkeys([domain, *enum.subdomains]))
+
+        # Optional: recover historical URLs (Wayback/CommonCrawl) once for the
+        # domain. They enrich BOTH host discovery (hostnames seen in the archive)
+        # and per-host scan seeds (archived JS bundles) — so a flaky CT source no
+        # longer zeroes out the run, and forgotten bundles still get scanned.
+        js_by_host: dict[str, list[str]] = {}
+        hist_hosts: list[str] = []
+        if include_historical:
+            hist = await discover_historical_fn(client, domain)
+            result.historical_urls = hist.count
+            hist_hosts = [recon._host_of(u) for u in hist.urls]
+            for u in hist.js_urls():
+                js_by_host.setdefault(recon._host_of(u), []).append(u)
+
+        # Candidate hosts, in-scope and deduped. The host the caller actually
+        # typed is ALWAYS included first — enumeration must never be able to drop
+        # the specified target — followed by the apex, CT subdomains, and any
+        # hosts seen in the archive.
+        candidates = [
+            h for h in dict.fromkeys(
+                [original_host, domain, *enum.subdomains, *hist_hosts])
+            if h and (h == domain or h.endswith("." + domain))
+        ]
 
         # SSRF guard: never probe/scan a discovered host that resolves to an
         # internal address (a wildcard/misissued cert can name one). Bypassed
@@ -236,16 +258,6 @@ async def run_deep_scan(
         if not result.live_hosts:
             result.error = enum.error or "no live hosts found"
             return result
-
-        # Optional: recover historical URLs (Wayback/CommonCrawl) once for the
-        # domain and hand each host its archived JS bundles as scan seeds — so a
-        # forgotten bundle no page links to still gets fetched and scanned.
-        js_by_host: dict[str, list[str]] = {}
-        if include_historical:
-            hist = await discover_historical_fn(client, domain)
-            result.historical_urls = hist.count
-            for u in hist.js_urls():
-                js_by_host.setdefault(recon._host_of(u), []).append(u)
 
         targets = result.live_hosts[:max(1, max_targets)]
         for url in targets:
