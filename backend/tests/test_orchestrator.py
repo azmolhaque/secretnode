@@ -217,6 +217,37 @@ async def test_deep_scan_without_historical_passes_no_seeds():
 
 
 @pytest.mark.asyncio
+async def test_deep_scan_aggregates_findings_with_host_and_renders():
+    import report
+
+    async def _scan(*, target_url, seed_urls=None, **_kw):
+        host = recon._host_of(target_url)
+        conf = ([{"secret_type": "AWS Access Key", "severity": "CRITICAL"}]
+                if host.startswith("a.") else [])
+        rev = [{"secret_type": "Generic", "severity": "MEDIUM", "reason": "unclear"}]
+        return {"target_url": target_url, "confirmed_findings": conf,
+                "needs_review_findings": rev, "posture_findings": [], "assets_fetched": 1}
+
+    result = await orchestrator.run_deep_scan(
+        "example.com",
+        enumerate_fn=_enum_returning(["a.example.com"]),
+        scan_fn=_scan,
+        client_factory=_client_factory(),
+    )
+    d = result.to_dict()
+    # Confirmed finding is tagged with the host it came from.
+    assert any(f["_host"] == "a.example.com" and f["secret_type"] == "AWS Access Key"
+               for f in d["confirmed_findings"])
+    # Needs-review aggregated across both hosts (apex + a), each host-tagged.
+    assert len(d["needs_review_findings"]) == 2
+    assert all("_host" in f for f in d["needs_review_findings"])
+    # The combined report actually renders the detail, not just counts.
+    htmlrep = report.generate_deep_scan_html(d)
+    assert "Flagged for Manual Review (all hosts)" in htmlrep
+    assert "AWS Access Key" in htmlrep and "a.example.com" in htmlrep
+
+
+@pytest.mark.asyncio
 async def test_deep_scan_always_scans_specified_host():
     # Regression: even if CT enumeration returns nothing and the typed host is a
     # subdomain (not the apex), the host the caller specified must still be scanned.

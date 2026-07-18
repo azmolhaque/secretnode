@@ -580,6 +580,42 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
         '<tr><td colspan="7" class="empty">No live hosts were scanned.</td></tr>'
     subs = ", ".join(html.escape(s) for s in deep.get("subdomains", [])) or "—"
 
+    # Findings aggregated across every host, each tagged with its host of origin.
+    _MAX_ROWS = 250
+    confirmed_findings = deep.get("confirmed_findings", [])[:_MAX_ROWS]
+    review_findings = deep.get("needs_review_findings", [])[:_MAX_ROWS]
+
+    def _sev(f: dict[str, Any]) -> str:
+        s = str(f.get("severity", "MEDIUM")).upper()
+        return f'<span class="sev sev-{s.lower()}">{html.escape(s)}</span>'
+
+    def _loc(f: dict[str, Any]) -> str:
+        return html.escape(str(f.get("source_url", f.get("target_url", ""))))
+
+    def conf_row(f: dict[str, Any]) -> str:
+        return ("<tr>"
+                f'<td class="mono">{html.escape(str(f.get("_host", "")))}</td>'
+                f"<td>{_sev(f)}</td>"
+                f'<td>{html.escape(str(f.get("secret_type", "")))}</td>'
+                f'<td class="mono small">{_loc(f)}</td>'
+                f'<td style="text-align:center;">{int(f.get("confidence", 0) or 0)}%</td>'
+                f'<td class="small">{html.escape(str(f.get("reason", "")))}</td>'
+                "</tr>")
+
+    def review_row(f: dict[str, Any]) -> str:
+        return ("<tr>"
+                f'<td class="mono">{html.escape(str(f.get("_host", "")))}</td>'
+                f"<td>{_sev(f)}</td>"
+                f'<td>{html.escape(str(f.get("secret_type", "")))}</td>'
+                f'<td class="mono small">{_loc(f)}</td>'
+                f'<td class="small">{html.escape(str(f.get("reason", "")))}</td>'
+                "</tr>")
+
+    conf_rows = "\n".join(conf_row(f) for f in confirmed_findings) or \
+        '<tr><td colspan="6" class="empty">No confirmed credential exposures.</td></tr>'
+    review_rows = "\n".join(review_row(f) for f in review_findings) or \
+        '<tr><td colspan="5" class="empty">None.</td></tr>'
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Domain Attack-Surface Report — {domain}</title>
@@ -596,6 +632,11 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
   .empty {{ text-align: center; color: #718096; font-style: italic; padding: 20px; }}
   .hit {{ color: #c53030; font-weight: bold; }}
   .err {{ color: #dd6b20; font-weight: bold; }}
+  .sev {{ padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; color: #fff; }}
+  .sev-critical {{ background: #c53030; }}
+  .sev-high {{ background: #dd6b20; }}
+  .sev-medium {{ background: #d69e2e; }}
+  .sev-low {{ background: #3182ce; }}
   .verdict {{ background: #f7fafc; border: 1px solid #e2e8f0; border-left: 6px solid {pill_color};
              border-radius: 6px; padding: 16px 18px; margin: 18px 0; }}
   .risk-pill {{ color: #fff; font-weight: bold; font-size: 12px; letter-spacing: 0.06em;
@@ -629,6 +670,20 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
   <table>
     <thead><tr><th>Host</th><th>Status</th><th>Assets</th><th>Confirmed</th><th>Needs review</th><th>Posture</th><th>Note</th></tr></thead>
     <tbody>{rows}</tbody>
+  </table>
+
+  <h2>Confirmed Findings (all hosts)</h2>
+  <table>
+    <thead><tr><th>Host</th><th>Severity</th><th>Type</th><th>Location</th><th>Confidence</th><th>AI Reasoning</th></tr></thead>
+    <tbody>{conf_rows}</tbody>
+  </table>
+
+  <h2>Flagged for Manual Review (all hosts)</h2>
+  <div class="small">Candidates a human should confirm — a structural match the AI could not
+  confidently clear, or a scan where AI validation was unavailable. Not confirmed exposures.</div>
+  <table>
+    <thead><tr><th>Host</th><th>Severity</th><th>Type</th><th>Location</th><th>Note</th></tr></thead>
+    <tbody>{review_rows}</tbody>
   </table>
 
   <h2>Discovered subdomain surface</h2>

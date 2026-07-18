@@ -98,6 +98,16 @@ class DeepScanResult:
     def total_posture(self) -> int:
         return sum(h.posture_issues for h in self.hosts)
 
+    def _aggregate(self, key: str) -> list[dict]:
+        """Flatten a per-host finding list across all scans, tagging each finding
+        with the host it came from so the combined report can show provenance."""
+        out: list[dict] = []
+        for scan in self.scans:
+            host = recon._host_of(scan.get("target_url", "")) or scan.get("target_url", "")
+            for f in scan.get(key, []):
+                out.append({**f, "_host": host})
+        return out
+
     def to_dict(self) -> dict:
         return {
             "domain": self.domain,
@@ -106,6 +116,8 @@ class DeepScanResult:
             "live_hosts": self.live_hosts,
             "hosts": [h.to_dict() for h in self.hosts],
             "historical_urls": self.historical_urls,
+            "confirmed_findings": self._aggregate("confirmed_findings"),
+            "needs_review_findings": self._aggregate("needs_review_findings"),
             "totals": {
                 "subdomains": len(self.subdomains),
                 "live_hosts": len(self.live_hosts),
