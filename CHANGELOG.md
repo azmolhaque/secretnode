@@ -3,6 +3,43 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.6.0] — Detection quality, safety & attack-surface breadth
+
+A measured capability pass grounded in a fresh audit vs 2026 secret-scanning SOTA
+(TruffleHog/Gitleaks) — nine independent, test-backed slices. Test suite **145 → 187**,
+all green; ruff clean; the scanner stays passive and verification stays off-by-default.
+See `docs/TECHNICAL-AUDIT-AND-ROADMAP.md`.
+
+### Added
+- **Verified-credential identity/scope (R1).** A live credential now reports *who it belongs to and
+  what it reaches* — GitHub `@acct` + token scopes, Stripe account + LIVE/charges, Slack workspace/
+  user, OpenAI org, npm/GitLab/Telegram handle, SendGrid send-scope, Mailgun domain count — surfaced
+  in HTML/CSV/SARIF as the concrete blast radius. Never includes the secret value itself.
+- **FP/FN benchmark harness (R2).** `backend/bench/` labelled corpus + `make bench` precision/recall
+  report + a pytest CI gate. Current: **precision 1.000 · recall 1.000 · F1 1.000 · 0 false positives.**
+- **Live-verification coverage 9 → 17 providers (R6).** Added Cloudflare, DigitalOcean, Datadog,
+  Notion, Linear, Figma, Postman, Doppler — read-only, fail-closed.
+- **Source-map original-source scanning (R5).** Decodes a `.map`'s `sourcesContent` and scans it as
+  real code with per-file attribution — catches secrets escaped in the raw JSON or stripped from prod.
+- **Passive attack-surface / security-posture checks (R8).** `posture.py` flags missing/weak security
+  headers (HSTS, CSP, clickjacking, X-Content-Type-Options, Referrer/Permissions-Policy), software
+  version disclosure, and insecure cookies — so even a clean *credential* scan returns actionable ASM
+  findings, in a dedicated report section + KPI tile.
+- **Executive-summary report (R9).** A verification-evidence callout (each verified-active key + its
+  identity), a "Verified Active" KPI tile, and an honest measured-precision statement.
+- **SARIF full detector catalog (R4).** The driver advertises every detector as a rule (help text,
+  CWE, severity) even on a clean scan.
+
+### Security / hardening
+- **Regex ReDoS-proofing (R3).** A per-pattern match cap plus an automated backtracking gate
+  (empirical fuzz over all 54 detectors × adversarial inputs + a static nested-quantifier guard).
+
+### Notes
+- New env toggles: `SCAN_SOURCEMAP_CONTENT`, `MAX_SOURCEMAP_SOURCES`, `SCAN_HTTP_POSTURE`,
+  `MAX_MATCHES_PER_PATTERN`.
+- Backward compatible: `verify_finding()` keeps its string-only API; new `verify_finding_detailed()`
+  returns identity detail.
+
 ## [2.5.4] — Impact-aware validation: sell impact, not known-public information
 
 From a real scan: a Firebase Web `apiKey` shipped in client JS was reported as a
