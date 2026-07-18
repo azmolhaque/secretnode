@@ -27,6 +27,7 @@ import socket
 import sys
 from urllib.parse import urlparse
 
+import orchestrator
 import recon
 import report
 import scanner
@@ -83,7 +84,44 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Passive attack-surface discovery: enumerate the target's subdomains "
                          "via Certificate Transparency (crt.sh) and print them. Never contacts "
                          "the target. Authorized use only.")
+    ap.add_argument("--deep-scan", dest="deep_scan", action="store_true",
+                    help="Domain-wide deep scan: enumerate subdomains, probe which hosts are live, "
+                         "scan each, and write a combined report. Passive; authorized use only.")
+    ap.add_argument("--max-targets", dest="max_targets", type=int, default=orchestrator.MAX_TARGETS,
+                    help=f"Max live hosts to scan in a --deep-scan run (default: {orchestrator.MAX_TARGETS})")
     return ap
+
+
+async def _run_deep_scan(args) -> int:
+    """Domain-wide deep scan: enumerate → probe live hosts → scan each → combined report."""
+    result = await orchestrator.run_deep_scan(
+        args.target,
+        max_crawl_pages=max(1, args.crawl),
+        verify=args.verify,
+        only_verified=args.only_verified,
+        max_targets=max(1, args.max_targets),
+    )
+    if args.output:
+        report_fmt = (args.format if args.format in ("json",) else "html")
+        body = (json.dumps(result.to_dict(), indent=2) if report_fmt == "json"
+                else report.generate_deep_scan_html(result.to_dict()))
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        print(f"Deep-scan report written to {args.output}", file=sys.stderr)
+    else:
+        sys.stdout.write(json.dumps(result.to_dict(), indent=2) + "\n")
+
+    t = result.to_dict()["totals"]
+    print(
+        f"SecretNode deep scan of {result.domain}: {t['subdomains']} subdomain(s), "
+        f"{t['live_hosts']} live, {t['hosts_scanned']} scanned — "
+        f"{t['confirmed']} confirmed, {t['needs_review']} needs-review, "
+        f"{t['posture_issues']} posture issue(s).",
+        file=sys.stderr,
+    )
+    if args.fail_on_findings and t["confirmed"]:
+        return 1
+    return 0
 
 
 async def _run_subdomain_enum(target: str) -> int:
@@ -114,6 +152,11 @@ def main(argv: list[str] | None = None) -> int:
     # (no scheme) since it never fetches the target — only Certificate Transparency.
     if args.subdomains:
         return asyncio.run(_run_subdomain_enum(args.target))
+
+    # Domain-wide deep scan: enumerate → probe → scan each live host. Accepts a
+    # bare domain; the orchestrator applies the SSRF guard per discovered host.
+    if args.deep_scan:
+        return asyncio.run(_run_deep_scan(args))
 
     if not args.target.startswith(("http://", "https://")):
         raise SystemExit("Target must start with http:// or https://")

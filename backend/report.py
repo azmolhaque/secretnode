@@ -537,3 +537,103 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
         }],
     }
     return json.dumps(sarif, indent=2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deep-scan (multi-target) summary report — deep-ASM slice 2
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_deep_scan_html(deep: dict[str, Any]) -> str:
+    """Render a single client-facing summary for a domain-wide deep scan: the
+    discovered subdomain surface, which hosts were live, and per-host findings.
+    Input is orchestrator.DeepScanResult.to_dict()."""
+    domain = html.escape(str(deep.get("domain", "")))
+    totals = deep.get("totals", {})
+    hosts = deep.get("hosts", [])
+    sources = ", ".join(deep.get("enum_sources", [])) or "—"
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    confirmed_total = int(totals.get("confirmed", 0))
+    pill_color = "#c53030" if confirmed_total else "#276749"
+    pill_text = (f"{confirmed_total} confirmed credential exposure(s) across the domain"
+                 if confirmed_total else "No confirmed credential exposures across the domain")
+
+    def host_row(h: dict[str, Any]) -> str:
+        err = h.get("error")
+        conf = int(h.get("confirmed", 0))
+        conf_cell = (f'<span class="hit">{conf}</span>' if conf else "0")
+        status = ('<span class="err">error</span>' if err else "scanned")
+        note = html.escape(str(err)) if err else ""
+        return (
+            "<tr>"
+            f'<td class="mono">{html.escape(str(h.get("host", "")))}</td>'
+            f'<td>{status}</td>'
+            f'<td style="text-align:center;">{int(h.get("assets", 0))}</td>'
+            f'<td style="text-align:center;">{conf_cell}</td>'
+            f'<td style="text-align:center;">{int(h.get("needs_review", 0))}</td>'
+            f'<td style="text-align:center;">{int(h.get("posture_issues", 0))}</td>'
+            f'<td class="small">{note}</td>'
+            "</tr>"
+        )
+
+    rows = "\n".join(host_row(h) for h in hosts) or \
+        '<tr><td colspan="7" class="empty">No live hosts were scanned.</td></tr>'
+    subs = ", ".join(html.escape(s) for s in deep.get("subdomains", [])) or "—"
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Domain Attack-Surface Report — {domain}</title>
+<style>
+  body {{ font-family: 'Segoe UI', Arial, sans-serif; color: #1a202c; margin: 40px; line-height: 1.5; }}
+  h1 {{ font-size: 22px; border-bottom: 3px solid #276749; padding-bottom: 10px; }}
+  h2 {{ font-size: 16px; margin-top: 30px; color: #276749; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }}
+  th {{ background: #276749; color: #fff; text-align: left; padding: 8px; }}
+  td {{ padding: 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }}
+  tr:nth-child(even) {{ background: #f7fafc; }}
+  .mono {{ font-family: 'Courier New', monospace; word-break: break-all; }}
+  .small {{ font-size: 11px; color: #4a5568; }}
+  .empty {{ text-align: center; color: #718096; font-style: italic; padding: 20px; }}
+  .hit {{ color: #c53030; font-weight: bold; }}
+  .err {{ color: #dd6b20; font-weight: bold; }}
+  .verdict {{ background: #f7fafc; border: 1px solid #e2e8f0; border-left: 6px solid {pill_color};
+             border-radius: 6px; padding: 16px 18px; margin: 18px 0; }}
+  .risk-pill {{ color: #fff; font-weight: bold; font-size: 12px; letter-spacing: 0.06em;
+               padding: 4px 12px; border-radius: 4px; background: {pill_color}; }}
+  .grid {{ display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }}
+  .stat {{ flex: 1; min-width: 120px; background: #f7fafc; border: 1px solid #e2e8f0;
+          border-radius: 6px; padding: 12px; text-align: center; }}
+  .stat .num {{ font-size: 24px; font-weight: bold; color: #276749; }}
+  .stat .label {{ font-size: 11px; color: #718096; text-transform: uppercase; }}
+  footer {{ margin-top: 40px; font-size: 11px; color: #a0aec0; border-top: 1px solid #e2e8f0; padding-top: 12px; }}
+</style></head><body>
+  <h1>Domain Attack-Surface Report — {domain}</h1>
+  <div class="verdict"><span class="risk-pill">{'EXPOSURE' if confirmed_total else 'CLEAN'}</span>
+    &nbsp;<b>{pill_text}.</b>
+    <div class="small" style="margin-top:8px;">Passive assessment — subdomains discovered from
+    Certificate Transparency ({html.escape(sources)}); live hosts scanned for exposed credentials and
+    security-header posture. No exploitation, brute-force, or write operations were performed.</div>
+  </div>
+
+  <div class="grid">
+    <div class="stat"><div class="num">{int(totals.get('subdomains', 0))}</div><div class="label">Subdomains found</div></div>
+    <div class="stat"><div class="num">{int(totals.get('live_hosts', 0))}</div><div class="label">Live hosts</div></div>
+    <div class="stat"><div class="num">{int(totals.get('hosts_scanned', 0))}</div><div class="label">Hosts scanned</div></div>
+    <div class="stat"><div class="num">{confirmed_total}</div><div class="label">Confirmed exposures</div></div>
+    <div class="stat"><div class="num">{int(totals.get('needs_review', 0))}</div><div class="label">Needs review</div></div>
+    <div class="stat"><div class="num">{int(totals.get('posture_issues', 0))}</div><div class="label">Posture issues</div></div>
+  </div>
+
+  <h2>Per-host results</h2>
+  <table>
+    <thead><tr><th>Host</th><th>Status</th><th>Assets</th><th>Confirmed</th><th>Needs review</th><th>Posture</th><th>Note</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+
+  <h2>Discovered subdomain surface</h2>
+  <div class="small mono">{subs}</div>
+
+  <footer>Generated by SecretNode v{_TOOL_VERSION} — passive attack-surface scanner.
+  Report generated {generated}. Discovery via Certificate Transparency; all host scans passive
+  (no exploitation, data exfiltration, or write operations). Authorized-scope testing only.</footer>
+</body></html>"""

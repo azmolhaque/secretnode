@@ -6,6 +6,15 @@ All notable changes to SecretNode are documented here. This project adheres to
 ## [Unreleased]
 
 ### Added
+- **Multi-target orchestration (deep-ASM slice 2).** New `backend/orchestrator.py` closes the loop
+  from discovery to findings: a single domain → passive subdomain enumeration → liveness probe of
+  each host → the existing passive secret+posture scan per live host → one aggregated
+  `DeepScanResult`. Includes a per-host **SSRF guard** (a discovered host that resolves to a
+  private/internal address is skipped unless `ALLOW_PRIVATE_TARGETS=true`), a `MAX_TARGETS` cap,
+  concurrent probing, and per-host error isolation (one host failing never sinks the run). New
+  combined client report `report.generate_deep_scan_html()` (subdomain surface + live hosts +
+  per-host confirmed/needs-review/posture). CLI: `python cli.py <domain> --deep-scan -o report.html`.
+  Config: `MAX_TARGETS`, `PROBE_CONCURRENCY`, `PROBE_TIMEOUT`.
 - **Passive subdomain enumeration (deep-ASM slice 1).** New `backend/recon.py` expands a domain
   into its known subdomain surface from **Certificate Transparency** — fully passive, it never
   contacts the target, so it runs before a client engagement is signed. Queries **two independent CT
