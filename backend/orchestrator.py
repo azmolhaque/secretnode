@@ -46,9 +46,11 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-MAX_TARGETS       = _env_int("MAX_TARGETS", 25)          # cap hosts scanned per run
-PROBE_CONCURRENCY = _env_int("PROBE_CONCURRENCY", 10)    # parallel liveness probes
-PROBE_TIMEOUT     = _env_int("PROBE_TIMEOUT", 10)        # seconds per liveness probe
+MAX_TARGETS          = _env_int("MAX_TARGETS", 25)          # cap hosts scanned per run
+PROBE_CONCURRENCY    = _env_int("PROBE_CONCURRENCY", 10)    # parallel liveness probes
+PROBE_TIMEOUT        = _env_int("PROBE_TIMEOUT", 10)        # seconds per liveness probe
+HOST_SCAN_CONCURRENCY = _env_int("HOST_SCAN_CONCURRENCY", 3)  # hosts scanned in parallel — each
+                                     # host scan is itself concurrent, so keep this modest on a Pi
 
 # Type aliases for the injected collaborators.
 EnumerateFn = Callable[..., Awaitable["recon.SubdomainResult"]]
@@ -312,21 +314,39 @@ async def run_deep_scan(
             return result
 
         targets = result.live_hosts[:max(1, max_targets)]
-        await emit(log(f"{len(result.live_hosts)} host(s) live — scanning {len(targets)}"))
-        for i, url in enumerate(targets, 1):
+        n = len(targets)
+        await emit(log(f"{len(result.live_hosts)} host(s) live — scanning {n} "
+                       f"(concurrency {HOST_SCAN_CONCURRENCY})"))
+
+        # Scan hosts concurrently with a bounded semaphore instead of one-at-a-time.
+        # Results are collected in target order; a single host failing is isolated
+        # to that host and never sinks the run.
+        sem = asyncio.Semaphore(max(1, HOST_SCAN_CONCURRENCY))
+        done = {"n": 0}
+
+        async def _scan_host(url: str) -> tuple[HostScan, dict | None]:
             host = recon._host_of(url)
-            await emit(log(f"[host {i}/{len(targets)}] scanning {url}"))
-            try:
-                scan = await scan_fn(target_url=url, max_crawl_pages=max_crawl_pages,
-                                     verify=verify, only_verified=only_verified,
-                                     seed_urls=js_by_host.get(host, []), broadcast=broadcast)
-            except Exception as exc:  # a single host must not sink the whole run
-                logger.debug("deep scan: host %s failed: %s", url, exc)
-                result.hosts.append(HostScan(host=host, url=url,
-                                             error=f"{type(exc).__name__}: {exc}".strip(": ")))
-                continue
-            result.scans.append(scan)
-            result.hosts.append(_summarise_scan(host, url, scan))
+            async with sem:
+                try:
+                    scan = await scan_fn(target_url=url, max_crawl_pages=max_crawl_pages,
+                                         verify=verify, only_verified=only_verified,
+                                         seed_urls=js_by_host.get(host, []), broadcast=broadcast)
+                except Exception as exc:  # a single host must not sink the whole run
+                    logger.debug("deep scan: host %s failed: %s", url, exc)
+                    done["n"] += 1
+                    await emit(log(f"[{done['n']}/{n}] {host} — error: {type(exc).__name__}", "WARN"))
+                    return HostScan(host=host, url=url,
+                                    error=f"{type(exc).__name__}: {exc}".strip(": ")), None
+                done["n"] += 1
+                await emit(log(f"[{done['n']}/{n}] {host} — done "
+                               f"({len(scan.get('confirmed_findings', []))} confirmed)"))
+                return _summarise_scan(host, url, scan), scan
+
+        pairs = await asyncio.gather(*(_scan_host(u) for u in targets))
+        for host_scan, scan in pairs:
+            result.hosts.append(host_scan)
+            if scan is not None:
+                result.scans.append(scan)
 
     await emit({"type": "deep_scan_complete", "totals": result.to_dict()["totals"]})
     return result

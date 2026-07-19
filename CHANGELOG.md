@@ -5,6 +5,13 @@ All notable changes to SecretNode are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Changed
+- **Concurrent host orchestration (deep-dive slice D5).** A domain deep scan now scans its hosts in
+  parallel with a bounded semaphore (`HOST_SCAN_CONCURRENCY`, default 3) instead of one at a time —
+  a large multi-host domain finishes far faster. Results are collected in target order, per-host
+  error isolation is preserved (one host failing never sinks the run), and progress is emitted as
+  `[k/N] host — done` events. A test proves the parallelism is real *and* stays within the bound.
+
 ### Added
 - **Subdomain-takeover detection (deep-dive slice D1).** New `backend/takeover.py` flags hosts whose
   DNS still points (via CNAME) at an **unclaimed third-party service** (S3, GitHub Pages, Heroku,

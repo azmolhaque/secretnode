@@ -4,6 +4,8 @@ deterministically."""
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -295,6 +297,31 @@ async def test_deep_scan_historical_reveals_hosts():
     )
     assert "testphp.example.com" in seen
     assert "rest.example.com" in seen
+
+
+@pytest.mark.asyncio
+async def test_deep_scan_hosts_run_concurrently_but_bounded(monkeypatch):
+    monkeypatch.setattr(orchestrator, "HOST_SCAN_CONCURRENCY", 3)
+    inflight = {"cur": 0, "max": 0}
+
+    async def _scan(*, target_url, **_kw):
+        inflight["cur"] += 1
+        inflight["max"] = max(inflight["max"], inflight["cur"])
+        await asyncio.sleep(0.02)          # hold the slot so overlap is observable
+        inflight["cur"] -= 1
+        return {"target_url": target_url, "confirmed_findings": [],
+                "needs_review_findings": [], "posture_findings": [], "assets_fetched": 1}
+
+    result = await orchestrator.run_deep_scan(
+        "example.com",
+        enumerate_fn=_enum_returning(["a.example.com", "b.example.com",
+                                      "c.example.com", "d.example.com"]),
+        scan_fn=_scan,
+        client_factory=_client_factory(),
+    )
+    assert inflight["max"] > 1                       # genuinely ran in parallel
+    assert inflight["max"] <= 3                      # never exceeded the semaphore
+    assert result.to_dict()["totals"]["hosts_scanned"] == 5   # apex + 4, all scanned
 
 
 @pytest.mark.asyncio
