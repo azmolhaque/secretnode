@@ -3,7 +3,15 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.7.0] — Deep attack-surface platform (passive)
+
+SecretNode grows from a single-URL secret scanner into a **passive attack-surface platform**: give it
+a domain and it enumerates the subdomain surface, recovers historically-exposed URLs from public
+archives, mines JavaScript for referenced endpoints and third-party hosts, probes which hosts are
+live, checks each for **subdomain-takeover risk**, and scans them all — live pages *and* archived
+bundles — for exposed credentials and misconfigurations, aggregated into one reviewable report and
+drivable from the CLI **or** the dashboard. Every layer stays passive and authorized-scope only.
+Test suite **187 → 270**, all green; ruff clean. See `docs/TECHNICAL-AUDIT-AND-ROADMAP.md`.
 
 ### Changed
 - **Concurrent host orchestration (deep-dive slice D5).** A domain deep scan now scans its hosts in

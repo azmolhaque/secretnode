@@ -45,7 +45,7 @@ def _tool_version() -> str:
                 return s.split("=", 1)[1].strip().strip('"').strip("'")
     except Exception:
         pass
-    return "2.6.0"
+    return "2.7.0"
 
 
 _TOOL_VERSION = _tool_version()
