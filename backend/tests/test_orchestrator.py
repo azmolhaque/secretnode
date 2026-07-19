@@ -298,6 +298,28 @@ async def test_deep_scan_historical_reveals_hosts():
 
 
 @pytest.mark.asyncio
+async def test_deep_scan_runs_takeover_pass():
+    import takeover as tk
+
+    async def _fake_takeover(_client, hosts, **_kw):
+        # Flag one of the discovered hosts as a takeover risk.
+        return [tk.TakeoverFinding(host="blog.example.com", service="GitHub Pages",
+                                   severity="HIGH", evidence="sig", cname="x.github.io")]
+
+    result = await orchestrator.run_deep_scan(
+        "example.com",
+        enumerate_fn=_enum_returning(["blog.example.com"]),
+        scan_fn=_scan_returning(),
+        client_factory=_client_factory(),
+        takeover_fn=_fake_takeover,
+    )
+    d = result.to_dict()
+    assert d["totals"]["takeover_risks"] == 1
+    assert d["takeover_findings"][0]["service"] == "GitHub Pages"
+    assert d["takeover_findings"][0]["host"] == "blog.example.com"
+
+
+@pytest.mark.asyncio
 async def test_deep_scan_ssrf_guard_skips_private_host(monkeypatch):
     # Turn the guard back on and force one host to look internal.
     monkeypatch.setenv("ALLOW_PRIVATE_TARGETS", "false")

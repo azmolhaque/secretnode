@@ -34,6 +34,7 @@ import httpx
 import historical
 import recon
 import scanner
+import takeover
 
 logger = logging.getLogger("secretnode.orchestrator")
 
@@ -84,6 +85,7 @@ class DeepScanResult:
     hosts: list[HostScan] = field(default_factory=list)
     scans: list[dict] = field(default_factory=list)   # raw per-host scan dicts
     historical_urls: int = 0        # historical URLs discovered (0 if not requested)
+    takeover_findings: list[dict] = field(default_factory=list)  # dangling-CNAME hijack risks
     error: str | None = None
 
     @property
@@ -120,6 +122,7 @@ class DeepScanResult:
             "needs_review_findings": self._aggregate("needs_review_findings"),
             "associated_hosts": sorted({h for s in self.scans
                                         for h in s.get("associated_hosts", [])}),
+            "takeover_findings": self.takeover_findings,
             "totals": {
                 "subdomains": len(self.subdomains),
                 "live_hosts": len(self.live_hosts),
@@ -128,6 +131,7 @@ class DeepScanResult:
                 "confirmed": self.total_confirmed,
                 "needs_review": self.total_needs_review,
                 "posture_issues": self.total_posture,
+                "takeover_risks": len(self.takeover_findings),
             },
             "error": self.error,
         }
@@ -204,6 +208,7 @@ async def run_deep_scan(
     client_factory: ClientFactory = scanner.build_client,
     discover_historical_fn: Callable[..., Awaitable["historical.HistoricalResult"]]
         = historical.discover_historical_urls,
+    takeover_fn: Callable[..., Awaitable[list]] = takeover.scan_hosts_for_takeover,
 ) -> DeepScanResult:
     """Domain → enumerate → probe → scan each live host → aggregate.
 
@@ -280,6 +285,22 @@ async def run_deep_scan(
                     host=host, url=f"https://{host}",
                     error="skipped: resolves to a private/internal address (SSRF guard)"))
             # 'unresolved' hosts are silently dropped — nothing to scan.
+
+        # Subdomain-takeover pass (D1): check every in-scope host for a dangling
+        # CNAME pointing at an unclaimed third-party service — a hijackable
+        # subdomain. Runs on the full candidate set (a takeover target often is
+        # not a "normal" live host). Best-effort; never sinks the run.
+        if safe_hosts:
+            await emit(log(f"Checking {len(safe_hosts)} host(s) for subdomain-takeover risk…"))
+            try:
+                tos = await takeover_fn(client, safe_hosts)
+            except Exception as exc:  # defensive
+                logger.debug("takeover pass failed: %s", exc)
+                tos = []
+            result.takeover_findings = [t.to_dict() if hasattr(t, "to_dict") else t for t in tos]
+            if result.takeover_findings:
+                await emit(log(f"⚠ {len(result.takeover_findings)} potential subdomain "
+                               f"takeover(s) found", "WARN"))
 
         await emit(log(f"Probing {len(safe_hosts)} candidate host(s) for liveness…"))
         result.live_hosts = await probe_live_hosts(client, safe_hosts)

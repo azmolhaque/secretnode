@@ -635,6 +635,22 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
         '<tr><td colspan="5" class="empty">None.</td></tr>'
     assoc_hosts_html = ", ".join(html.escape(h) for h in deep.get("associated_hosts", [])) or "—"
 
+    takeovers = deep.get("takeover_findings", [])
+
+    def takeover_row(t: dict[str, Any]) -> str:
+        sev = str(t.get("severity", "HIGH")).upper()
+        cname = html.escape(str(t.get("cname", "")) or "—")
+        return ("<tr>"
+                f'<td class="mono">{html.escape(str(t.get("host", "")))}</td>'
+                f'<td><span class="sev sev-{sev.lower()}">{sev}</span></td>'
+                f'<td>{html.escape(str(t.get("service", "")))}</td>'
+                f'<td class="mono small">{cname}</td>'
+                f'<td class="small">{html.escape(str(t.get("evidence", "")))}</td>'
+                "</tr>")
+
+    takeover_rows = "\n".join(takeover_row(t) for t in takeovers) or \
+        '<tr><td colspan="5" class="empty">None detected.</td></tr>'
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Domain Attack-Surface Report — {domain}</title>
@@ -683,7 +699,17 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
     <div class="stat"><div class="num">{confirmed_total}</div><div class="label">Confirmed exposures</div></div>
     <div class="stat"><div class="num">{int(totals.get('needs_review', 0))}</div><div class="label">Needs review</div></div>
     <div class="stat"><div class="num">{int(totals.get('posture_issues', 0))}</div><div class="label">Posture issues</div></div>
+    <div class="stat"><div class="num">{int(totals.get('takeover_risks', 0))}</div><div class="label">Takeover risks</div></div>
   </div>
+
+  <h2>Subdomain Takeover Risks</h2>
+  <div class="small" style="margin-bottom:6px;">A host whose DNS still points at an unclaimed
+  third-party service can be hijacked by an attacker to serve content from your domain. Treat any
+  finding here as urgent: remove the dangling record or re-claim the resource.</div>
+  <table>
+    <thead><tr><th>Host</th><th>Severity</th><th>Service</th><th>CNAME</th><th>Evidence</th></tr></thead>
+    <tbody>{takeover_rows}</tbody>
+  </table>
 
   <h2>Per-host results</h2>
   <table>

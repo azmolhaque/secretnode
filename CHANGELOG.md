@@ -6,6 +6,14 @@ All notable changes to SecretNode are documented here. This project adheres to
 ## [Unreleased]
 
 ### Added
+- **Subdomain-takeover detection (deep-dive slice D1).** New `backend/takeover.py` flags hosts whose
+  DNS still points (via CNAME) at an **unclaimed third-party service** (S3, GitHub Pages, Heroku,
+  Netlify, Shopify, Fastly, Zendesk, …) — a hijackable subdomain an attacker can claim to serve
+  content from the target's domain. High-precision by design: a host is flagged only when the
+  response carries a service's *specific* unclaimed-resource signature (generic 404s excluded), with
+  the CNAME recorded as corroborating evidence. The deep scan runs a concurrent takeover pass over
+  every in-scope host; results surface as CRITICAL/HIGH findings with a "Subdomain Takeover Risks"
+  section + KPI in the combined report. Passive (DNS + one GET), stdlib-only, ReDoS-free.
 - **Surface intelligence: endpoints + associated-host graph (deep-ASM slices 5 & 4).** New
   `backend/surface.py` mines every fetched asset (passively, no new target requests) for two things:
   **(5)** URLs/paths referenced in the JavaScript — `fetch()`/`axios` targets, `/api/…` routes a live
