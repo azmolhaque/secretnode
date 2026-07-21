@@ -27,6 +27,7 @@ from google.genai import errors as genai_errors, types
 from pydantic import BaseModel, Field, ValidationError
 
 import posture
+import surface
 import verifier
 
 logger = logging.getLogger("secretnode.scanner")
@@ -89,6 +90,11 @@ FETCH_TIMEOUT           = _env_float("FETCH_TIMEOUT", 20.0)
 RETRY_ATTEMPTS          = _env_int("RETRY_ATTEMPTS", 3)
 RETRY_BACKOFF_BASE      = _env_float("RETRY_BACKOFF_BASE", 2.0)
 MIN_ENTROPY_THRESHOLD   = _env_float("MIN_ENTROPY_THRESHOLD", 3.5)
+MIN_STRUCTURAL_ENTROPY  = _env_float("MIN_STRUCTURAL_ENTROPY", 2.5)  # low anti-degenerate
+                                     # floor for high-precision structural detectors: rejects
+                                     # obvious junk (e.g. "AKIAAAAAAAAAAAAAAAAA", ~0.6 bits) while
+                                     # still catching genuinely modest-entropy live keys that the
+                                     # full generic bar would wrongly drop (false-negative guard).
 CONTEXT_WINDOW_CHARS    = _env_int("CONTEXT_WINDOW_CHARS", 120)
 MAX_ASSET_BYTES         = _env_int("MAX_ASSET_BYTES", 5 * 1024 * 1024)   # 5 MB
 GEMINI_CONFIDENCE_MIN   = _env_int("GEMINI_CONFIDENCE_MIN", 80)
@@ -99,6 +105,13 @@ MAX_RAW_FINDINGS_PER_SCAN = _env_int("MAX_RAW_FINDINGS_PER_SCAN", 500)  # safety
 MAX_MATCHES_PER_PATTERN = _env_int("MAX_MATCHES_PER_PATTERN", 100)  # R3 defence-in-depth: bound the
                                      # matches examined for ANY single pattern on ANY single text, so a
                                      # crafted blob cannot spawn millions of matches for one detector.
+MAX_SEED_URLS = _env_int("MAX_SEED_URLS", 200)  # cap externally-supplied seed assets fetched per scan
+                                     # (e.g. historical JS bundles from public archives) — bounds the
+                                     # extra fetches a deep scan does beyond the live crawl.
+EXTRACT_SURFACE = os.environ.get("EXTRACT_SURFACE", "true").lower() == "true"  # slice 5/4:
+                                     # mine fetched JS/HTML for referenced endpoints + external hosts
+MAX_ENDPOINT_SEEDS = _env_int("MAX_ENDPOINT_SEEDS", 50)   # same-site .js endpoints to fetch (deeper crawl)
+MAX_DISCOVERED_ENDPOINTS = _env_int("MAX_DISCOVERED_ENDPOINTS", 300)  # cap endpoints stored in report
 
 # ── Type alias for the broadcaster callback ────────────────────────────────────
 Broadcaster = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
@@ -124,6 +137,16 @@ class SecretPattern:
     severity: str = "HIGH"
     cwe: str = "CWE-798"                       # Use of Hard-coded Credentials
     remediation: str = _DEFAULT_REMEDIATION
+    # Entropy handling differs by detector class:
+    #   • Structural/provider detectors (AKIA…, ghp_…, sk_live_…, PEM blocks,
+    #     fixed-format hex/UUID tokens) are high-precision by shape. They get
+    #     only a LOW anti-degenerate floor (MIN_STRUCTURAL_ENTROPY) that rejects
+    #     obvious junk like "AKIAAAAAAAAAAAAAAAAA" while still catching genuinely
+    #     modest-entropy live keys — because gating these on the full generic bar
+    #     silently drops real credentials (a false negative, the worst failure).
+    #   • The generic keyword=value catch-all matches loosely and needs the full
+    #     MIN_ENTROPY_THRESHOLD randomness signal to stay quiet; it opts in below.
+    entropy_gated: bool = False
 
 
 @dataclass
@@ -314,6 +337,7 @@ SECRET_PATTERNS: list[SecretPattern] = [
         ),
         description="Generic credential assignment",
         severity="MEDIUM",
+        entropy_gated=True,   # loose keyword=value match — entropy keeps it quiet
     ),
     SecretPattern(
         name="Mailgun API Key",
@@ -1251,7 +1275,11 @@ def _scan_text(
             if is_benign_placeholder(raw_value):
                 continue
             entropy = shannon_entropy(raw_value)
-            if not passes_entropy_check(raw_value):
+            # Generic keyword=value catch-all must clear the full randomness bar;
+            # structural detectors only need to clear a low anti-degenerate floor
+            # so genuinely modest-entropy live keys are not silently dropped.
+            floor = MIN_ENTROPY_THRESHOLD if pattern.entropy_gated else MIN_STRUCTURAL_ENTROPY
+            if entropy < floor:
                 continue
             start = max(0, match.start() - CONTEXT_WINDOW_CHARS)
             end   = min(len(text), match.end() + CONTEXT_WINDOW_CHARS)
@@ -1717,6 +1745,29 @@ class ScanState:
 # Master Scan Orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
+def classify_validated(v: "ValidatedFinding") -> str:
+    """Route a validated finding to exactly one of: 'confirmed', 'review', 'drop'.
+
+    The critical rule is the last one: a *structural/provider* match (high-precision
+    by shape — AKIA…, ghp_…, sk_live_…, PEM) that the AI did **not confidently
+    dismiss** is sent to manual review, never silently dropped. Without this, a real
+    live key the AI merely under-called on (e.g. because a page gave it no
+    surrounding context) would vanish with no trace — a false negative, the worst
+    failure mode for a scanner. The generic keyword=value catch-all keeps the old
+    aggressive behaviour (an AI 'no' there is trusted and dropped), preserving the
+    'no false positives in Confirmed' promise."""
+    if v.confidence == NEEDS_REVIEW_SENTINEL:
+        return "review"                                    # AI unavailable — human decides
+    if v.is_valid and v.confidence >= GEMINI_CONFIDENCE_MIN:
+        return "confirmed"
+    meta = PATTERN_BY_NAME.get(v.raw.secret_type)
+    structural = meta is not None and not meta.entropy_gated
+    ai_confidently_dismissed = (not v.is_valid) and v.confidence >= GEMINI_CONFIDENCE_MIN
+    if structural and not ai_confidently_dismissed:
+        return "review"        # shape-anchored + AI not sure it's fake → human confirms
+    return "drop"
+
+
 async def run_scan(
     target_url: str,
     scan_id: str | None = None,
@@ -1727,6 +1778,7 @@ async def run_scan(
     max_crawl_pages: int = 1,
     verify: bool | None = None,
     only_verified: bool = False,
+    seed_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Full pipeline:
@@ -1775,6 +1827,8 @@ async def run_scan(
         "unverified_count": 0,
         "filtered_unverified_count": 0,
         "posture_findings":   [],
+        "discovered_endpoints": [],   # slice 5: same-site URLs/paths referenced in JS/HTML
+        "associated_hosts":   [],     # slice 4: external hosts the assets talk to
         "errors":             [],
         "duration_seconds":   0.0,
     }
@@ -1796,6 +1850,73 @@ async def run_scan(
             result["errors"].append(str(exc))
             await emit({"type": "scan_error", "error": str(exc)})
             return result
+
+        # ── 1a. Inject seed assets (deep-ASM slice 3.5) ────────────────────
+        # Externally-supplied URLs — e.g. historical JS bundles recovered from
+        # public archives (Wayback/CommonCrawl) — that the live crawl would never
+        # link to. Fetch any not already collected and add them to the scan set.
+        if seed_urls:
+            state.check()
+            have = {u for u, _ in assets}
+            to_fetch = [u for u in dict.fromkeys(seed_urls) if u not in have][:MAX_SEED_URLS]
+            if to_fetch:
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": f"Fetching {len(to_fetch)} seed asset(s) from archives",
+                })
+                fetched = await asyncio.gather(
+                    *(fetch_url(client, u, semaphore, broadcast) for u in to_fetch)
+                )
+                added = 0
+                for u, body in fetched:
+                    if body:
+                        assets.append((u, body))
+                        added += 1
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": f"Added {added} seed asset(s) from archives ({len(to_fetch) - added} unreachable)",
+                })
+
+        # ── 1b. Surface intel + one-level deeper crawl (slices 5 & 4) ──────
+        # Mine every fetched asset for referenced endpoints (JS-called URLs a live
+        # crawl never links to) and external hosts (the associated-asset graph).
+        # Then fetch same-site .js endpoints we don't already have, so code-
+        # referenced bundles get secret-scanned too.
+        if EXTRACT_SURFACE:
+            state.check()
+            base_host = urlparse(target_url).hostname or ""
+            all_eps: set[str] = set()
+            ext_hosts: set[str] = set()
+            for src_url, body in list(assets):
+                all_eps.update(surface.extract_endpoints(body, src_url))
+                ext_hosts.update(surface.extract_referenced_hosts(body, src_url))
+            same_eps, _assoc = surface.classify_endpoints(sorted(all_eps), base_host)
+
+            have = {u.split("?", 1)[0] for u, _ in assets}
+            js_eps = [
+                e for e in same_eps
+                if e.split("?", 1)[0].lower().endswith(".js") and e.split("?", 1)[0] not in have
+            ][:MAX_ENDPOINT_SEEDS]
+            if js_eps:
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": f"Deeper crawl: fetching {len(js_eps)} JS endpoint(s) referenced in code",
+                })
+                fetched = await asyncio.gather(
+                    *(fetch_url(client, u, semaphore, broadcast) for u in js_eps)
+                )
+                for u, body in fetched:
+                    if body:
+                        assets.append((u, body))
+
+            result["discovered_endpoints"] = same_eps[:MAX_DISCOVERED_ENDPOINTS]
+            result["associated_hosts"] = sorted(h for h in ext_hosts if h and h != base_host)
+            if result["discovered_endpoints"] or result["associated_hosts"]:
+                await emit({
+                    "type": "log", "level": "INFO",
+                    "message": (f"Surface intel: {len(result['discovered_endpoints'])} endpoint(s), "
+                                f"{len(result['associated_hosts'])} associated host(s)"),
+                })
 
         result["assets_fetched"] = len(assets)
         await emit({
@@ -1910,14 +2031,9 @@ async def run_scan(
                     reason=f"Unexpected validation error: {v}. Manual review required.",
                 ))
 
-        confirmed: list[ValidatedFinding] = [
-            v for v in validated
-            if v.is_valid and v.confidence >= GEMINI_CONFIDENCE_MIN
-        ]
-        needs_review: list[ValidatedFinding] = [
-            v for v in validated
-            if v.confidence == NEEDS_REVIEW_SENTINEL
-        ]
+        _routed = [(classify_validated(v), v) for v in validated]
+        confirmed: list[ValidatedFinding] = [v for b, v in _routed if b == "confirmed"]
+        needs_review: list[ValidatedFinding] = [v for b, v in _routed if b == "review"]
 
         # ── Suppress known false positives ──────────────────────────────
         if suppressed_fingerprints:

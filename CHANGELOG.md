@@ -3,6 +3,102 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.0] — Deep attack-surface platform (passive)
+
+SecretNode grows from a single-URL secret scanner into a **passive attack-surface platform**: give it
+a domain and it enumerates the subdomain surface, recovers historically-exposed URLs from public
+archives, mines JavaScript for referenced endpoints and third-party hosts, probes which hosts are
+live, checks each for **subdomain-takeover risk**, and scans them all — live pages *and* archived
+bundles — for exposed credentials and misconfigurations, aggregated into one reviewable report and
+drivable from the CLI **or** the dashboard. Every layer stays passive and authorized-scope only.
+Test suite **187 → 270**, all green; ruff clean. See `docs/TECHNICAL-AUDIT-AND-ROADMAP.md`.
+
+### Changed
+- **Concurrent host orchestration (deep-dive slice D5).** A domain deep scan now scans its hosts in
+  parallel with a bounded semaphore (`HOST_SCAN_CONCURRENCY`, default 3) instead of one at a time —
+  a large multi-host domain finishes far faster. Results are collected in target order, per-host
+  error isolation is preserved (one host failing never sinks the run), and progress is emitted as
+  `[k/N] host — done` events. A test proves the parallelism is real *and* stays within the bound.
+
+### Added
+- **Subdomain-takeover detection (deep-dive slice D1).** New `backend/takeover.py` flags hosts whose
+  DNS still points (via CNAME) at an **unclaimed third-party service** (S3, GitHub Pages, Heroku,
+  Netlify, Shopify, Fastly, Zendesk, …) — a hijackable subdomain an attacker can claim to serve
+  content from the target's domain. High-precision by design: a host is flagged only when the
+  response carries a service's *specific* unclaimed-resource signature (generic 404s excluded), with
+  the CNAME recorded as corroborating evidence. The deep scan runs a concurrent takeover pass over
+  every in-scope host; results surface as CRITICAL/HIGH findings with a "Subdomain Takeover Risks"
+  section + KPI in the combined report. Passive (DNS + one GET), stdlib-only, ReDoS-free.
+- **Surface intelligence: endpoints + associated-host graph (deep-ASM slices 5 & 4).** New
+  `backend/surface.py` mines every fetched asset (passively, no new target requests) for two things:
+  **(5)** URLs/paths referenced in the JavaScript — `fetch()`/`axios` targets, `/api/…` routes a live
+  page crawl never links to — and then fetches same-site `.js` endpoints **one level deeper** so
+  code-referenced bundles get secret-scanned too; and **(4)** the external hosts each asset talks to
+  (CDNs, APIs, third parties), aggregated into an **associated-asset graph**. `run_scan` now returns
+  `discovered_endpoints` + `associated_hosts`; both reports gain an "Attack Surface Intelligence"
+  section. Extractor regexes are bounded/ReDoS-safe. Config: `EXTRACT_SURFACE`, `MAX_ENDPOINT_SEEDS`,
+  `MAX_DISCOVERED_ENDPOINTS`.
+- **Dashboard domain-mode + deep-scan API (deep-ASM slice 6).** The whole deep-ASM pipeline is now
+  drivable from the web UI, not just the CLI. New `POST /api/deep-scans` runs a domain-wide deep scan
+  as a streaming background task — per-host progress flows over the existing `/ws/logs/{scan_id}`
+  WebSocket (`run_deep_scan` gained a `broadcast` hook and emits enumerate/probe/per-host/complete
+  events), and the report endpoint serves the combined multi-target report for deep results.
+  Frontend: a **DEEP toggle** turns the target box into a whole-domain scan (bare domain in →
+  enumerate + historical + probe + scan-all), finalising on `deep_scan_complete` rather than
+  per-host. API tests added (route, auth, input caps, start). Passive; authorized-scope only.
+- **Historical bundles fed into the scan (deep-ASM slice 3.5).** `run_scan()` gains a `seed_urls`
+  parameter — externally-supplied asset URLs are fetched and scanned alongside the live crawl,
+  deduped against it (capped by `MAX_SEED_URLS`). `run_deep_scan(include_historical=True)` now
+  recovers the domain's historical JS bundles (Wayback/CommonCrawl) and routes each host its own
+  archived bundles as seeds, so a secret in a forgotten bundle **no live page links to** still gets
+  fetched and confirmed. CLI: `python cli.py <domain> --deep-scan --with-historical`; the combined
+  report gains a "Historical URLs" metric. This turns discovery into findings — the payoff of the
+  whole passive discovery chain.
+- **Historical path discovery (deep-ASM slice 3).** New `backend/historical.py` recovers a domain's
+  historically-exposed URLs from **public web archives (Wayback Machine + CommonCrawl)** — the
+  passive alternative to directory/content brute-forcing, so no request ever touches the target. Two
+  sources merged with backoff retries and fail-closed handling (matching the subdomain layer);
+  surfaces forgotten endpoints, stale JS bundles and old admin paths a live crawl would never link
+  to. `HistoricalResult` exposes the raw URLs, the unique-path view ("hidden directories"), and a
+  `js_urls()` helper (highest-value scan seeds). CLI: `python cli.py <domain> --historical`. Config:
+  `WAYBACK_CDX_URL`, `COMMONCRAWL_COLLINFO`, `ENABLE_COMMONCRAWL`, `HISTORICAL_TIMEOUT`,
+  `HISTORICAL_RETRIES`, `MAX_HISTORICAL_URLS`.
+- **Multi-target orchestration (deep-ASM slice 2).** New `backend/orchestrator.py` closes the loop
+  from discovery to findings: a single domain → passive subdomain enumeration → liveness probe of
+  each host → the existing passive secret+posture scan per live host → one aggregated
+  `DeepScanResult`. Includes a per-host **SSRF guard** (a discovered host that resolves to a
+  private/internal address is skipped unless `ALLOW_PRIVATE_TARGETS=true`), a `MAX_TARGETS` cap,
+  concurrent probing, and per-host error isolation (one host failing never sinks the run). New
+  combined client report `report.generate_deep_scan_html()` (subdomain surface + live hosts +
+  per-host confirmed/needs-review/posture). CLI: `python cli.py <domain> --deep-scan -o report.html`.
+  Config: `MAX_TARGETS`, `PROBE_CONCURRENCY`, `PROBE_TIMEOUT`.
+- **Passive subdomain enumeration (deep-ASM slice 1).** New `backend/recon.py` expands a domain
+  into its known subdomain surface from **Certificate Transparency** — fully passive, it never
+  contacts the target, so it runs before a client engagement is signed. Queries **two independent CT
+  sources (crt.sh + Certspotter)** with backoff retries and merges them, so a single flaky/rate-
+  limited source (crt.sh 502s often) no longer zeroes out a good result; the result lists which
+  sources succeeded and only reports an error if *all* fail. `extract_registrable_domain()`
+  normalises URL/host/IP inputs (two-label public-suffix table incl. `.bd`). Exposed via the CLI:
+  `python cli.py <domain> --subdomains`. First layer of the passive attack-surface pipeline
+  (subdomains → historical paths → associated assets → existing secret/posture scan).
+
+### Fixed
+- **False-negative: structural keys wrongly entropy-gated.** The Shannon-entropy floor
+  (`MIN_ENTROPY_THRESHOLD=3.5`) was applied uniformly to every detector, silently dropping
+  genuinely low-entropy but well-formed provider keys (e.g. an AWS key ID at ~3.27 bits) before
+  they ever reached AI validation — the worst failure mode for a scanner. Entropy is now
+  class-aware: the *generic* keyword=value catch-all keeps the full 3.5 bar, while
+  *structural/provider* detectors (AKIA…, ghp_…, sk_live_…, PEM, fixed-format tokens) only clear a
+  low anti-degenerate floor (`MIN_STRUCTURAL_ENTROPY=2.5`) that still rejects obvious junk like
+  `AKIAAAAAAAAAAAAAAAAA`. Precision/recall stays 1.000/1.000.
+- **False-negative: AI-dismissed structural matches silently dropped.** A finding was routed to
+  manual review only when AI validation was *unavailable*; a structural/provider match the AI
+  *actively* rejected with a real confidence matched no bucket and was discarded — so a live key the
+  AI merely under-called on (e.g. lacking page context) vanished with no trace. New
+  `classify_validated()` sends any structural match the AI does **not confidently dismiss** to
+  manual review instead of dropping it; the generic catch-all keeps aggressive filtering, so the
+  "no false positives in Confirmed" promise holds. Suite **187 → 197**.
+
 ## [2.6.0] — Detection quality, safety & attack-surface breadth
 
 A measured capability pass grounded in a fresh audit vs 2026 secret-scanning SOTA

@@ -27,6 +27,9 @@ import socket
 import sys
 from urllib.parse import urlparse
 
+import historical
+import orchestrator
+import recon
 import report
 import scanner
 
@@ -78,11 +81,120 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-o", "--output", help="Write report to this file (default: stdout)")
     ap.add_argument("--fail-on-findings", action="store_true",
                     help="Exit non-zero if any confirmed findings (use as a CI gate)")
+    ap.add_argument("--subdomains", action="store_true",
+                    help="Passive attack-surface discovery: enumerate the target's subdomains "
+                         "via Certificate Transparency (crt.sh) and print them. Never contacts "
+                         "the target. Authorized use only.")
+    ap.add_argument("--historical", action="store_true",
+                    help="Passive path discovery: recover historically-exposed URLs for the domain "
+                         "from public web archives (Wayback Machine + CommonCrawl) and print them. "
+                         "Never contacts the target. Authorized use only.")
+    ap.add_argument("--deep-scan", dest="deep_scan", action="store_true",
+                    help="Domain-wide deep scan: enumerate subdomains, probe which hosts are live, "
+                         "scan each, and write a combined report. Passive; authorized use only.")
+    ap.add_argument("--max-targets", dest="max_targets", type=int, default=orchestrator.MAX_TARGETS,
+                    help=f"Max live hosts to scan in a --deep-scan run (default: {orchestrator.MAX_TARGETS})")
+    ap.add_argument("--with-historical", dest="with_historical", action="store_true",
+                    help="In a --deep-scan, also recover historical JS bundles from public archives "
+                         "(Wayback/CommonCrawl) and scan them as seeds — catches secrets in forgotten "
+                         "bundles no live page links to. Slower; passive.")
     return ap
+
+
+async def _run_deep_scan(args) -> int:
+    """Domain-wide deep scan: enumerate → probe live hosts → scan each → combined report."""
+    result = await orchestrator.run_deep_scan(
+        args.target,
+        max_crawl_pages=max(1, args.crawl),
+        verify=args.verify,
+        only_verified=args.only_verified,
+        max_targets=max(1, args.max_targets),
+        include_historical=args.with_historical,
+    )
+    if args.output:
+        report_fmt = (args.format if args.format in ("json",) else "html")
+        body = (json.dumps(result.to_dict(), indent=2) if report_fmt == "json"
+                else report.generate_deep_scan_html(result.to_dict()))
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        print(f"Deep-scan report written to {args.output}", file=sys.stderr)
+    else:
+        sys.stdout.write(json.dumps(result.to_dict(), indent=2) + "\n")
+
+    t = result.to_dict()["totals"]
+    hist = f", {t['historical_urls']} historical URL(s)" if t.get("historical_urls") else ""
+    print(
+        f"SecretNode deep scan of {result.domain}: {t['subdomains']} subdomain(s), "
+        f"{t['live_hosts']} live, {t['hosts_scanned']} scanned{hist} — "
+        f"{t['confirmed']} confirmed, {t['needs_review']} needs-review, "
+        f"{t['posture_issues']} posture issue(s).",
+        file=sys.stderr,
+    )
+    if args.fail_on_findings and t["confirmed"]:
+        return 1
+    return 0
+
+
+async def _run_subdomain_enum(target: str) -> int:
+    """Passive subdomain discovery mode: expand a domain into its known subdomain
+    surface from Certificate Transparency and print the results as JSON."""
+    domain = recon.extract_registrable_domain(target)
+    if domain is None:
+        raise SystemExit(
+            f"Cannot enumerate subdomains for {target!r} — need a domain "
+            "(subdomain enumeration does not apply to bare IP addresses)."
+        )
+    async with scanner.build_client() as client:
+        result = await recon.enumerate_subdomains(client, domain)
+    print(json.dumps(result.to_dict(), indent=2))
+    sources = ", ".join(result.sources) if result.sources else "none"
+    print(
+        f"SecretNode: discovered {result.count} subdomain(s) for {domain} "
+        f"(sources: {sources})." + (f" [error: {result.error}]" if result.error else ""),
+        file=sys.stderr,
+    )
+    return 0
+
+
+async def _run_historical(target: str) -> int:
+    """Passive path discovery: recover historically-exposed URLs from public
+    archives (Wayback + CommonCrawl) — the passive alternative to brute-forcing."""
+    domain = recon.extract_registrable_domain(target)
+    if domain is None:
+        raise SystemExit(
+            f"Cannot run historical discovery for {target!r} — need a domain "
+            "(does not apply to bare IP addresses)."
+        )
+    async with scanner.build_client() as client:
+        result = await historical.discover_historical_urls(client, domain)
+    print(json.dumps(result.to_dict(), indent=2))
+    sources = ", ".join(result.sources) if result.sources else "none"
+    print(
+        f"SecretNode: recovered {result.count} historical URL(s) "
+        f"({len(result.paths)} unique path(s), {len(result.js_urls())} JS) for {domain} "
+        f"(sources: {sources})." + (f" [error: {result.error}]" if result.error else ""),
+        file=sys.stderr,
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # Passive discovery mode: enumerate subdomains and exit. Accepts a bare domain
+    # (no scheme) since it never fetches the target — only Certificate Transparency.
+    if args.subdomains:
+        return asyncio.run(_run_subdomain_enum(args.target))
+
+    # Passive historical path discovery from public archives; accepts a bare domain.
+    if args.historical:
+        return asyncio.run(_run_historical(args.target))
+
+    # Domain-wide deep scan: enumerate → probe → scan each live host. Accepts a
+    # bare domain; the orchestrator applies the SSRF guard per discovered host.
+    if args.deep_scan:
+        return asyncio.run(_run_deep_scan(args))
+
     if not args.target.startswith(("http://", "https://")):
         raise SystemExit("Target must start with http:// or https://")
     assert_public_target(args.target)

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SecretNode v2.6.0 — ASM Scanner</title>
+  <title>SecretNode v2.7.0 — ASM Scanner</title>
   <meta name="color-scheme" content="dark" />
   <meta name="description" content="SecretNode — passive attack-surface &amp; exposed-secret scanner with a live dashboard. Self-hosted, offline-capable, multi-device." />
   <!-- No external CDNs: Tailwind and Google Fonts were removed. Fonts are
@@ -450,7 +450,7 @@
       </div>
       <div>
         <div class="header-title">SecretNode</div>
-        <div id="version-line" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.6.0 — ATTACK SURFACE MONITOR</div>
+        <div id="version-line" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.7.0 — ATTACK SURFACE MONITOR</div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:24px;">
@@ -507,6 +507,10 @@
         <label id="verify-toggle" style="border:1px solid #1a2e1f;border-radius:3px;padding:10px 12px;display:flex;align-items:center;gap:6px;background:#080c0a;cursor:pointer;user-select:none;" title="Live-verify confirmed findings against each provider's own API (read-only). Authorized use only — uses a discovered credential to check whether it is still active.">
           <input type="checkbox" id="verify-input" style="accent-color:#68d391;width:13px;height:13px;cursor:pointer;" />
           <span style="color:#4a7c59;font-family:'Share Tech Mono';font-size:9px;letter-spacing:0.05em;">VERIFY</span>
+        </label>
+        <label id="deep-toggle" style="border:1px solid #1a2e1f;border-radius:3px;padding:10px 12px;display:flex;align-items:center;gap:6px;background:#080c0a;cursor:pointer;user-select:none;" title="Domain deep scan: enumerate subdomains (Certificate Transparency), recover historical URLs from public archives, probe which hosts are live, and scan them all. Enter a bare domain. Passive; authorized-scope only.">
+          <input type="checkbox" id="deep-input" style="accent-color:#68d391;width:13px;height:13px;cursor:pointer;" onchange="onDeepToggle()" />
+          <span style="color:#4a7c59;font-family:'Share Tech Mono';font-size:9px;letter-spacing:0.05em;">DEEP</span>
         </label>
         <button id="btn-scan" class="btn-scan" onclick="startScan()">
           ▶ START SCAN
@@ -569,7 +573,7 @@
           </div>
         </div>
         <div id="console-output" style="padding:12px 14px;flex:1;">
-          <div class="log-SYS">SecretNode v2.6.0 initialised. Awaiting target...<span class="cursor"></span></div>
+          <div class="log-SYS">SecretNode v2.7.0 initialised. Awaiting target...<span class="cursor"></span></div>
         </div>
       </div>
 
@@ -649,7 +653,7 @@
     <!-- ── FOOTER ── -->
     <div class="app-footer">
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;letter-spacing:0.1em;">
-        SECRETNODE v2.6.0 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
+        SECRETNODE v2.7.0 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
       </span>
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;">
         ⚠ FOR AUTHORIZED SECURITY TESTING ONLY
@@ -1169,6 +1173,12 @@
           break;
 
         case 'scan_complete':
+          // In a deep scan this fires once PER HOST — don't finalise the UI or
+          // disconnect; just note the host finished. deep_scan_complete ends it.
+          if (state.deepScan) {
+            appendLog(`Host scan complete (${state.allFindings.length} confirmed so far)`, 'SYS');
+            break;
+          }
           setScanningUI(false);
           setProgress(100, 'complete');
           state.totalScans++;
@@ -1188,6 +1198,21 @@
           }, 2000);
           break;
 
+        case 'deep_scan_complete': {
+          setScanningUI(false);
+          setProgress(100, 'complete');
+          state.totalScans++;
+          animateNumber('stat-scans', state.totalScans);
+          const t = msg.totals || {};
+          appendLog(`=== Deep scan complete — ${t.hosts_scanned || 0} host(s), `
+            + `${t.confirmed || 0} confirmed, ${t.needs_review || 0} needs-review, `
+            + `${t.posture_issues || 0} posture ===`, 'SYS');
+          toast(`Deep scan complete — ${t.hosts_scanned || 0} host(s), ${t.confirmed || 0} confirmed`,
+            (t.confirmed ? 'error' : 'success'), 8000);
+          setTimeout(() => { if (state.ws) state.ws.close(); }, 2000);
+          break;
+        }
+
         case 'scan_cancelled':
           setScanningUI(false);
           setProgress(0, 'cancelled');
@@ -1205,10 +1230,18 @@
     }
 
     // ── Start Scan ────────────────────────────────────────────────────────────
+    // When DEEP is toggled, the input takes a bare domain rather than a full URL.
+    function onDeepToggle() {
+      const deep = $('deep-input')?.checked;
+      $('target-input').placeholder = deep ? 'example.com  (whole-domain deep scan)' : 'https://example.com';
+    }
+    window.onDeepToggle = onDeepToggle;
+
     async function startScan() {
-      const url = $('target-input').value.trim();
-      if (!url) { toast('Please enter a target URL', 'warn'); return; }
-      if (!url.startsWith('http')) { toast('URL must begin with http:// or https://', 'warn'); return; }
+      const target = $('target-input').value.trim();
+      const deep = $('deep-input')?.checked || false;
+      if (!target) { toast(deep ? 'Please enter a domain' : 'Please enter a target URL', 'warn'); return; }
+      if (!deep && !target.startsWith('http')) { toast('URL must begin with http:// or https://', 'warn'); return; }
 
       clearFindings();
       clearAssets();
@@ -1216,19 +1249,29 @@
       setProgress(0, '');
       $('stage-text').textContent = '';
 
-      appendLog(`Starting scan for: ${url}`, 'INFO');
+      appendLog(deep ? `Starting DEEP scan for domain: ${target}` : `Starting scan for: ${target}`, 'INFO');
+      state.deepScan = deep;         // a deep scan finalises on deep_scan_complete, not per-host
       state.wsReconnected = false;   // allow one auto-reconnect for this scan
       setScanningUI(true);
 
       try {
-        const resp = await fetch('/api/scans', {
+        const endpoint = deep ? '/api/deep-scans' : '/api/scans';
+        const payload = deep
+          ? {
+              domain: target,
+              crawl_pages: parseInt($('crawl-pages-input').value, 10) || 1,
+              verify: $('verify-input')?.checked || false,
+              include_historical: true,
+            }
+          : {
+              target_url: target,
+              crawl_pages: parseInt($('crawl-pages-input').value, 10) || 1,
+              verify: $('verify-input')?.checked || false,
+            };
+        const resp = await fetch(endpoint, {
           method: 'POST',
           headers: apiHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({
-            target_url: url,
-            crawl_pages: parseInt($('crawl-pages-input').value, 10) || 1,
-            verify: $('verify-input')?.checked || false,
-          }),
+          body: JSON.stringify(payload),
         });
 
         if (resp.status === 401) {

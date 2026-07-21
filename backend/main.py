@@ -43,6 +43,7 @@ load_dotenv()
 # so the speed-up is preserved without a module-level global side effect.
 
 from scanner import run_scan, ScanState
+import orchestrator
 from storage import (
     init_db, save_scan, load_scans, load_scan, get_previous_scan_for_target,
     mark_false_positive, unmark_false_positive, get_suppressed_fingerprints,
@@ -374,6 +375,95 @@ async def start_scan(request: ScanRequest, http_request: Request) -> dict[str, A
     }
 
 
+class DeepScanRequest(BaseModel):
+    """Domain-wide deep scan: enumerate → probe → scan each live host."""
+    domain: str
+    crawl_pages: int = DEFAULT_CRAWL_PAGES
+    verify: bool = False
+    only_verified: bool = False
+    include_historical: bool = False
+    max_targets: int = orchestrator.MAX_TARGETS
+
+    @field_validator("domain")
+    @classmethod
+    def validate_domain(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 253:
+            raise ValueError("Provide a domain (or host/URL) up to 253 characters.")
+        return v
+
+    @field_validator("crawl_pages")
+    @classmethod
+    def _cap_crawl(cls, v: int) -> int:
+        return max(1, min(v, MAX_CRAWL_PAGES_CAP))
+
+    @field_validator("max_targets")
+    @classmethod
+    def _cap_targets(cls, v: int) -> int:
+        return max(1, min(v, 100))
+
+
+@app.post("/api/deep-scans", status_code=202, dependencies=[Depends(require_api_key)])
+async def start_deep_scan(request: DeepScanRequest, http_request: Request) -> dict[str, Any]:
+    """Start a background domain-wide deep scan (enumerate → probe → scan each
+    live host). Returns a scan_id; connect to /ws/logs/{scan_id} to stream
+    progress. Discovery is passive; authorized-scope use only."""
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    logger.info("AUDIT deep_scan_request client=%s domain=%s", client_ip, request.domain)
+
+    active_count = sum(1 for e in _registry.values() if not e["task"].done())
+    if active_count >= MAX_CONCURRENT_SCANS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"{active_count} scan(s) already running (limit: {MAX_CONCURRENT_SCANS}).",
+        )
+
+    scan_id = str(uuid.uuid4())
+
+    async def broadcaster(event: dict[str, Any]) -> None:
+        await manager.broadcast_scan(scan_id, event)
+
+    async def _run() -> None:
+        try:
+            deep = await orchestrator.run_deep_scan(
+                request.domain,
+                max_crawl_pages=request.crawl_pages,
+                verify=request.verify,
+                only_verified=request.only_verified,
+                include_historical=request.include_historical,
+                max_targets=request.max_targets,
+                broadcast=broadcaster,
+            )
+            result = deep.to_dict()
+            result["scan_id"] = scan_id
+            result["target_url"] = deep.domain
+            result["deep_scan"] = True
+            totals = result.get("totals", {})
+            result["status"] = ("complete"
+                                if (totals.get("confirmed") or totals.get("needs_review")
+                                    or totals.get("posture_issues")) else "clean")
+            _registry[scan_id]["meta"] = result
+            await save_scan(scan_id, result)
+        except asyncio.CancelledError:
+            await manager.broadcast_scan(scan_id, {"type": "scan_cancelled", "scan_id": scan_id})
+        except Exception as exc:
+            logger.exception("Deep scan %s crashed", scan_id)
+            await manager.broadcast_scan(scan_id, {
+                "type": "scan_error", "scan_id": scan_id, "error": str(exc)})
+
+    task = asyncio.create_task(_run(), name=f"deep-scan-{scan_id}")
+    _registry[scan_id] = {
+        "state": ScanState(),
+        "task": task,
+        "meta": {"scan_id": scan_id, "target_url": request.domain,
+                 "status": "running", "deep_scan": True},
+    }
+    logger.info("Deep scan %s started for %s", scan_id, request.domain)
+    return {"scan_id": scan_id, "domain": request.domain, "status": "started",
+            "ws_url": f"/ws/logs/{scan_id}",
+            "message": "Connect to ws_url to receive live events."}
+
+
 @app.post("/api/scans/{scan_id}/stop", status_code=200, dependencies=[Depends(require_api_key)])
 async def stop_scan(scan_id: str) -> dict[str, Any]:
     """Signal a running scan to stop cooperatively."""
@@ -481,7 +571,10 @@ async def get_scan_report(
         )
 
     if format == "html":
-        body = report_gen.generate_html_report(scan, agency_name=agency_name)
+        # A domain-wide deep scan aggregates many hosts — render the combined
+        # multi-target report instead of the single-target one.
+        body = (report_gen.generate_deep_scan_html(scan) if scan.get("deep_scan")
+                else report_gen.generate_html_report(scan, agency_name=agency_name))
         return HTMLResponse(content=body, headers={
             "Content-Disposition": f'inline; filename="secretnode_report_{scan_id[:8]}.html"'
         })

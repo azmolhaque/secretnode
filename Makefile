@@ -20,7 +20,10 @@ bench: ## Measure detection-layer precision/recall on the labelled corpus (R2)
 	cd backend && SECRETNODE_API_KEY=bench python -m bench.run_bench
 
 run: ## Start the server (requires .env with SECRETNODE_API_KEY)
-	cd backend && uvicorn main:app --host 0.0.0.0 --port 8000 --loop uvloop
+	# `python -m uvicorn` uses the same interpreter that runs the CLI, so it works
+	# even when the `uvicorn` console script isn't on PATH; --loop auto uses uvloop
+	# when available and falls back to asyncio otherwise (no hard uvloop dependency).
+	cd backend && python -m uvicorn main:app --host 0.0.0.0 --port 8000 --loop auto
 
 docker: ## Build and run via docker compose
 	docker compose up --build
