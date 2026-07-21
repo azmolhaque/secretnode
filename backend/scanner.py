@@ -44,9 +44,15 @@ VERIFY_SECRETS: bool       = os.environ.get("VERIFY_SECRETS", "false").lower() =
 # and thinking levels are env-overridable so the engine tracks Google's lineup
 # without a code change. A legacy single-model GEMINI_MODEL override, if present,
 # is honoured as the Tier-1 model so existing deployments keep working.
+#
+# Defaults track Google's current lineup: Tier 1 on 3.5 Flash-Lite (fastest /
+# most cost-effective 3.5-class, ideal for the high-volume pre-filter) and Tier 2
+# on 3.6 Flash (stronger coding/reasoning workhorse). For security-focused
+# deployments, set GEMINI_TIER2_MODEL to the security-specialised 3.5 Flash Cyber
+# model (tuned to reason about vulnerabilities) once your key can call it.
 _LEGACY_MODEL              = os.environ.get("GEMINI_MODEL", "").strip()
-GEMINI_TIER1_MODEL: str    = os.environ.get("GEMINI_TIER1_MODEL", _LEGACY_MODEL or "gemini-3.1-flash-lite")
-GEMINI_TIER2_MODEL: str    = os.environ.get("GEMINI_TIER2_MODEL", "gemini-3.5-flash")
+GEMINI_TIER1_MODEL: str    = os.environ.get("GEMINI_TIER1_MODEL", _LEGACY_MODEL or "gemini-3.5-flash-lite")
+GEMINI_TIER2_MODEL: str    = os.environ.get("GEMINI_TIER2_MODEL", "gemini-3.6-flash")
 GEMINI_TIER1_THINKING: str = os.environ.get("GEMINI_TIER1_THINKING", "minimal")
 GEMINI_TIER2_THINKING: str = os.environ.get("GEMINI_TIER2_THINKING", "high")
 # Severities that ALWAYS escalate to the deep tier, even if the cheap pre-filter

@@ -102,8 +102,8 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (54 patterns) + 
 │    └─ shannon_entropy()   (filter < 3.5 bits)                   │
 │                                                                  │
 │  validate_with_gemini()  — two-tier engine (google-genai SDK)   │
-│    └─ Tier 1 pre-filter:  gemini-3.1-flash-lite (thinking:min)  │
-│    └─ Tier 2 deep-valid.: gemini-3.5-flash      (thinking:high) │
+│    └─ Tier 1 pre-filter:  gemini-3.5-flash-lite (thinking:min)  │
+│    └─ Tier 2 deep-valid.: gemini-3.6-flash      (thinking:high) │
 │    └─ Structured output → Pydantic GeminiVerdict               │
 │       {is_valid, confidence, reason}                            │
 │                                                                  │
