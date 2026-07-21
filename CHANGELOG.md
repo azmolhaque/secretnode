@@ -3,6 +3,27 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.1] — Gemini validation-engine model refresh
+
+Tracks Google's current Gemini lineup for the two-tier AI validation engine, with no
+change to the engine's logic — only the default model IDs (all remain env-overridable).
+
+### Changed
+- **Tier-1 pre-filter default → `gemini-3.5-flash-lite`** (was `gemini-3.1-flash-lite`): the
+  fastest / most cost-effective 3.5-class model, a natural fit for the high-volume noise-rejection
+  tier.
+- **Tier-2 deep-validation default → `gemini-3.6-flash`** (was `gemini-3.5-flash`): the stronger
+  coding/reasoning workhorse, for confirming genuine high-severity exposures.
+
+### Added
+- **Security-specialised Tier-2 option.** `.env.example` documents pointing `GEMINI_TIER2_MODEL`
+  at the security-tuned **3.5 Flash Cyber** model (built to reason about software vulnerabilities)
+  for security-focused deployments, once a key can call it — a strong fit for the deep
+  secret-validation tier.
+
+All model IDs stay overridable via `GEMINI_TIER1_MODEL` / `GEMINI_TIER2_MODEL`; the legacy
+single-model `GEMINI_MODEL` override is still honoured. No test or logic changes — suite stays green.
+
 ## [2.7.0] — Deep attack-surface platform (passive)
 
 SecretNode grows from a single-URL secret scanner into a **passive attack-surface platform**: give it
