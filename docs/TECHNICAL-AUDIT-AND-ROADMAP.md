@@ -26,9 +26,11 @@ repo scanning; win the *web-surface* niche.
   never silently dropped, SSRF guard, same-scope restriction, auth, redaction-before-dispatch.
 
 ## Honest gaps vs. 2026 SOTA (grounded in the code)
-1. **Verification depth.** Verifiers return only `verified/unverified`. TruffleHog surfaces the
-   *identity + scopes* a live key maps to (which account, what permissions). That detail is the
-   strongest possible "impact" statement — and Cindrasec sells impact.
+1. ~~**Verification depth.**~~ ✅ **CLOSED.** R1 shipped in v2.6.0 (identity/scope capture) and was
+   completed in **v2.7.3**, which paired a verifier with every AI/ML detector from the v2.7.2 pack.
+   Verifiers now return the *identity + scopes + billing surface* a live key maps to — e.g.
+   "ElevenLabs · creator tier · quota 12,345/100,000" — the strongest impact statement available,
+   and the one Cindrasec reports are built to sell. 29 secret types now have verifiers.
 2. **No FP/FN measurement harness.** There's good FP *handling* but no labeled corpus + precision/recall
    report, so changes aren't measured. Industrial tools track precision/recall on a benchmark.
 3. **Regex robustness.** No ReDoS/catastrophic-backtracking audit or regex timeout; a hostile minified

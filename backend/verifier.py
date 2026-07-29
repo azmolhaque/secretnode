@@ -300,6 +300,133 @@ async def _doppler(token: str, client: Any) -> tuple[bool, str]:
     return True, _detail(f"Doppler {who}" if who else "")
 
 
+# ── AI / ML provider verifiers (v2.7.3) ──────────────────────────────────────
+# Same contract as above: ONE read-only identity call to the credential's own
+# issuer, no writes, no inference/generation requests (which would bill the
+# victim's account). For AI keys the strongest impact signal is usually the
+# billing surface a live key exposes — plan tier and remaining quota — because
+# that is the concrete, quantified loss a leaked key enables.
+
+def _quota(used: Any, limit: Any) -> str:
+    """Render a spend/quota pair only when both look like real numbers."""
+    if isinstance(used, (int, float)) and isinstance(limit, (int, float)) and limit:
+        return f"quota {int(used):,}/{int(limit):,}"
+    return ""
+
+
+async def _elevenlabs(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.elevenlabs.io/v1/user",
+        headers={"xi-api-key": token}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    sub = _safe_json(r).get("subscription")
+    sub = sub if isinstance(sub, dict) else {}
+    tier = sub.get("tier", "")
+    return True, _detail(
+        "ElevenLabs",
+        f"{tier} tier" if tier else "",
+        _quota(sub.get("character_count"), sub.get("character_limit")),
+    )
+
+
+async def _groq(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.groq.com/openai/v1/models",
+        headers={"Authorization": f"Bearer {token}"}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    data = _safe_json(r).get("data")
+    n = len(data) if isinstance(data, list) else 0
+    return True, _detail("Groq", f"{n} models reachable" if n else "")
+
+
+async def _huggingface(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://huggingface.co/api/whoami-v2",
+        headers={"Authorization": f"Bearer {token}"}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    j = _safe_json(r)
+    who = j.get("name", "")
+    orgs = j.get("orgs")
+    n_orgs = len(orgs) if isinstance(orgs, list) else 0
+    auth = j.get("auth") if isinstance(j.get("auth"), dict) else {}
+    tok = auth.get("accessToken") if isinstance(auth.get("accessToken"), dict) else {}
+    role = tok.get("role", "")
+    return True, _detail(
+        f"Hugging Face @{who}" if who else "Hugging Face",
+        f"role: {role}" if role else "",
+        f"{n_orgs} org(s)" if n_orgs else "",
+    )
+
+
+async def _replicate(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.replicate.com/v1/account",
+        headers={"Authorization": f"Bearer {token}"}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    j = _safe_json(r)
+    who = j.get("username", "")
+    kind = j.get("type", "")
+    return True, _detail(f"Replicate @{who}" if who else "Replicate",
+                         kind if kind else "")
+
+
+async def _openrouter(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://openrouter.ai/api/v1/key",
+        headers={"Authorization": f"Bearer {token}"}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    d = _safe_json(r).get("data")
+    d = d if isinstance(d, dict) else {}
+    label = d.get("label", "")
+    return True, _detail(
+        "OpenRouter",
+        f"key: {label}" if label else "",
+        _quota(d.get("usage"), d.get("limit")),
+        "unlimited credit" if d.get("limit") is None and d.get("usage") is not None else "",
+    )
+
+
+async def _xai(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.x.ai/v1/api-key",
+        headers={"Authorization": f"Bearer {token}"}, timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    j = _safe_json(r)
+    name = j.get("name", "")
+    blocked = j.get("api_key_blocked") or j.get("api_key_disabled")
+    if blocked:
+        return False, ""
+    acl = j.get("acls")
+    n_acl = len(acl) if isinstance(acl, list) else 0
+    return True, _detail("xAI", f"key: {name}" if name else "",
+                         f"{n_acl} ACL(s)" if n_acl else "")
+
+
+async def _pinecone(token: str, client: Any) -> tuple[bool, str]:
+    r = await client.get(
+        "https://api.pinecone.io/indexes",
+        headers={"Api-Key": token, "X-Pinecone-API-Version": "2024-07"},
+        timeout=VERIFY_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return False, ""
+    idx = _safe_json(r).get("indexes")
+    n = len(idx) if isinstance(idx, list) else 0
+    return True, _detail("Pinecone", f"{n} index(es) readable" if n else "")
+
+
 # secret_type (from scanner.SECRET_PATTERNS) -> verifier
 VERIFIERS: dict[str, Verifier] = {
     "GitHub Personal Access Token": _github,
@@ -325,6 +452,14 @@ VERIFIERS: dict[str, Verifier] = {
     "Figma Personal Access Token": _figma,
     "Postman API Key": _postman,
     "Doppler Token": _doppler,
+    # v2.7.3 — AI/ML provider verifiers, paired with the v2.7.2 detector pack.
+    "ElevenLabs API Key": _elevenlabs,
+    "Groq API Key": _groq,
+    "Hugging Face Access Token": _huggingface,
+    "Replicate API Token": _replicate,
+    "OpenRouter API Key": _openrouter,
+    "xAI API Key": _xai,
+    "Pinecone API Key": _pinecone,
 }
 
 

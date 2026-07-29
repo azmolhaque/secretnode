@@ -3,6 +3,33 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.3] — R1 complete: impact-rich verification for AI/ML keys
+
+Closes roadmap item **R1 (verification depth)**. A verified credential no longer reports a bare
+"verified" — it reports *what the key actually reaches*, which is the concrete blast radius a
+client report needs.
+
+### Added
+- **Seven AI/ML provider verifiers**, pairing one with every safe detector from the v2.7.2 pack:
+  **ElevenLabs, Groq, Hugging Face, Replicate, OpenRouter, xAI, Pinecone**. Verifier count
+  22 → **29 secret types**.
+- **Billing-surface as the impact signal.** For AI keys the quantified loss is usually spend, so
+  verifiers surface plan tier and remaining quota where the provider exposes it:
+  - `ElevenLabs · creator tier · quota 12,345/100,000`
+  - `Hugging Face @acme-bot · role: write · 2 org(s)`
+  - `OpenRouter · key: prod-key · quota 42/500`
+- **Blocked-key handling.** xAI reports disabled keys with HTTP 200; the verifier reads
+  `api_key_blocked` / `api_key_disabled` and correctly returns *unverified* rather than claiming a
+  dead key is live.
+
+Every verifier keeps the existing contract: exactly ONE read-only identity call to the credential's
+own issuer (never the scan target), no writes, **no inference/generation calls** (which would bill
+the victim's account), the secret never stored or returned, and fail-closed on any error. Still
+OFF by default behind `VERIFY_SECRETS=true` — authorized-scope only.
+
++9 tests (identity parsing, dead-key, blocked-key, fail-closed, and a guard that every AI detector
+ships with a verifier). Suite **285 → 294**, all green; ruff clean.
+
 ## [2.7.2] — AI/ML provider detectors + duplicate-finding fix
 
 Grounded in a real authorized-scope scan: an ElevenLabs key shipped in a client-side
