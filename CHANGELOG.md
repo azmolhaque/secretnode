@@ -3,6 +3,42 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.4] — Mobile & tablet UX for the live dashboard
+
+The dashboard is how a client first sees SecretNode, and it is increasingly opened on a phone.
+The findings table had nine columns, so on a phone the two things an operator actually needs —
+the severity badge and the DETAIL / FP buttons — were hidden off-screen behind horizontal
+scrolling. This release makes the dashboard genuinely usable on touch devices without changing
+the desktop layout at all.
+
+### Changed
+- **Findings table becomes cards below 900px.** Each row renders as a self-contained card and
+  every cell is prefixed with its column name (driven by a `data-label` attribute), so no
+  information is lost and nothing scrolls sideways. The redundant row-number column is hidden,
+  long source URLs and AI reasoning wrap instead of being ellipsis-clipped, and DETAIL / FP
+  become full-width, thumb-sized buttons. The breakpoint is 900px rather than the phone
+  breakpoint because a nine-column table is cramped well above phone width — this covers tablets
+  in portrait too.
+- **Export toolbar reflows** from one cramped row into a two-column grid on small screens.
+
+### Added
+- **Touch sizing keyed to `pointer: coarse`, not screen width.** Touch capability is a property
+  of the input device, not the viewport, so a tablet gets thumb-sized targets even at 900px while
+  a mouse-driven desktop keeps its compact controls. Brings every interactive control to the
+  ~40-46px range on touch.
+- **iOS auto-zoom fix.** Text inputs render at 16px on touch layouts; below that Safari zooms the
+  whole page when an input is focused, which previously left the dashboard mis-scrolled after
+  typing a target.
+- **Safe-area insets** so the header and main content clear the notch and home indicator on
+  modern phones.
+
+### Verified
+Measured with Playwright across iPhone SE / iPhone 14 / Pixel 7 / iPad mini / iPad Pro / desktop:
+zero page-level horizontal overflow at every width, no interactive control under 32px on touch,
+and the desktop table layout confirmed byte-identical in behaviour (`thead` still
+`table-header-group`, all nine columns intact). The wide table on large tablets stays contained
+in its existing `overflow-x:auto` wrapper rather than breaking the page.
+
 ## [2.7.3] — R1 complete: impact-rich verification for AI/ML keys
 
 Closes roadmap item **R1 (verification depth)**. A verified credential no longer reports a bare
