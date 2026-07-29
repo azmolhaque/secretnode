@@ -3,6 +3,32 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.2] — AI/ML provider detectors + duplicate-finding fix
+
+Grounded in a real authorized-scope scan: an ElevenLabs key shipped in a client-side
+`EnvConfig.js` was caught only by the generic catch-all, so it was reported as an untyped
+MEDIUM *and* double-counted. Both problems are fixed.
+
+### Added
+- **AI/ML provider detector pack (9 new patterns, 54 → 63).** Modern AI stacks leak keys
+  constantly because a frontend calls the provider directly instead of proxying through a
+  backend. New structural detectors: **ElevenLabs, Groq, Hugging Face, Replicate, Perplexity,
+  xAI (Grok), OpenRouter, LangSmith, Pinecone**. Each is prefix + fixed-length, so it stays
+  high-precision without the generic entropy gate. ElevenLabs ships provider-specific
+  remediation (revoke in dashboard, proxy TTS server-side). +13 tests, incl. near-miss
+  precision guards and a ReDoS timing check.
+
+### Fixed
+- **One credential no longer reported twice.** `RawFinding.fingerprint` includes `secret_type`,
+  so a value matched by both a provider detector *and* the generic catch-all produced two
+  findings — double-counting the exposure in client reports, spending a second AI-validation
+  call on the same string, and leaving two conflicting severities (HIGH + MEDIUM) for one
+  credential. `_collapse_generic_duplicates()` now collapses per `(source_url, raw_match)`,
+  keeping the typed detector (accurate severity + provider remediation) and dropping the
+  generic claim. The catch-all still fires normally for credentials no detector types. +3 tests.
+
+Suite **282 → 285**, all green; ruff clean.
+
 ## [2.7.1] — Gemini validation-engine model refresh
 
 Tracks Google's current Gemini lineup for the two-tier AI validation engine, with no

@@ -246,6 +246,11 @@ class ValidatedFinding:
 # Secret Pattern Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
+# The loose keyword=value catch-all. Named here because the de-duplication pass
+# needs to know which detector is the fallback: when a provider-specific detector
+# has already typed a credential, the generic claim on the same value is dropped.
+GENERIC_SECRET_TYPE = "Generic High-Entropy Secret"
+
 SECRET_PATTERNS: list[SecretPattern] = [
     SecretPattern(
         name="AWS Access Key",
@@ -337,7 +342,7 @@ SECRET_PATTERNS: list[SecretPattern] = [
         severity="HIGH",
     ),
     SecretPattern(
-        name="Generic High-Entropy Secret",
+        name=GENERIC_SECRET_TYPE,
         regex=re.compile(
             r"(?i)(?:api[_-]?key|secret|token|password|passwd|auth)\s*[=:]\s*['\"]([A-Za-z0-9\-_.~+/]{20,80})['\"]"
         ),
@@ -380,6 +385,71 @@ SECRET_PATTERNS: list[SecretPattern] = [
         name="Anthropic API Key",
         regex=re.compile(r"\b(sk-ant-[A-Za-z0-9_\-]{20,})\b"),
         description="Anthropic (Claude) API key",
+        severity="CRITICAL",
+    ),
+    # ── AI / ML provider keys ────────────────────────────────────────────────
+    # Modern AI stacks leak these constantly: the key is shipped to the browser
+    # because a frontend calls the provider directly instead of proxying through
+    # a backend. Each pattern below is structural (distinctive prefix + fixed
+    # length), so it stays high-precision without the generic entropy gate.
+    SecretPattern(
+        name="ElevenLabs API Key",
+        regex=re.compile(r"\b(sk_[a-f0-9]{48})\b"),
+        description="ElevenLabs text-to-speech API key",
+        severity="HIGH",
+        remediation=(
+            "Revoke this key in the ElevenLabs dashboard and issue a replacement. A leaked key "
+            "lets anyone consume the account's character quota and credits, generate audio, and "
+            "reach private/cloned voice models. Never ship it to the browser: proxy "
+            "text-to-speech calls through your own backend so the key stays server-side."
+        ),
+    ),
+    SecretPattern(
+        name="Groq API Key",
+        regex=re.compile(r"\b(gsk_[A-Za-z0-9]{52})\b"),
+        description="Groq inference API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Hugging Face Access Token",
+        regex=re.compile(r"\b(hf_[A-Za-z0-9]{34,40})\b"),
+        description="Hugging Face user access token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Replicate API Token",
+        regex=re.compile(r"\b(r8_[A-Za-z0-9]{37,45})\b"),
+        description="Replicate model-inference API token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Perplexity API Key",
+        regex=re.compile(r"\b(pplx-[A-Za-z0-9]{32,64})\b"),
+        description="Perplexity AI API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="xAI API Key",
+        regex=re.compile(r"\b(xai-[A-Za-z0-9]{64,100})\b"),
+        description="xAI (Grok) API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="OpenRouter API Key",
+        regex=re.compile(r"\b(sk-or-v1-[a-f0-9]{64})\b"),
+        description="OpenRouter aggregated-inference API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="LangSmith API Key",
+        regex=re.compile(r"\b(lsv2_(?:pt|sk)_[a-f0-9]{32}_[a-f0-9]{10})\b"),
+        description="LangSmith / LangChain tracing API key",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Pinecone API Key",
+        regex=re.compile(r"\b(pcsk_[A-Za-z0-9_]{40,90})\b"),
+        description="Pinecone vector-database API key",
         severity="CRITICAL",
     ),
     SecretPattern(
@@ -1323,7 +1393,34 @@ def extract_secrets(
             continue
         seen.add(fp)
         unique.append(f)
-    return unique
+    return _collapse_generic_duplicates(unique)
+
+
+def _collapse_generic_duplicates(findings: list[RawFinding]) -> list[RawFinding]:
+    """Collapse one credential matched by several detectors into a single finding.
+
+    The generic keyword=value catch-all matches loosely and therefore also fires on
+    secrets a provider-specific detector already typed precisely. Reporting both is
+    wrong three ways: it double-counts the exposure in client reports, spends a
+    second AI-validation call on the same string, and leaves two conflicting
+    severities for one credential.
+
+    Identity here is (source_url, raw_match) — the same value at the same location.
+    When several detectors claim it, the typed/structural one wins over the generic
+    catch-all, because it carries the accurate severity and provider-specific
+    remediation. Order is otherwise preserved.
+    """
+    typed_locations = {
+        (f.source_url, f.raw_match)
+        for f in findings
+        if f.secret_type != GENERIC_SECRET_TYPE
+    }
+    return [
+        f
+        for f in findings
+        if f.secret_type != GENERIC_SECRET_TYPE
+        or (f.source_url, f.raw_match) not in typed_locations
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
