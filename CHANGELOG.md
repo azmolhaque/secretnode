@@ -3,6 +3,41 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.5] — Scan politeness & resilience
+
+Being a good guest on a client's infrastructure is part of the engagement, not an afterthought:
+an authorized scan that trips rate limiting looks like an attack to their SOC and gets the scanner
+blocked mid-assessment. This release makes SecretNode back off the way a well-behaved client
+should — and fixes a bug that was silently losing assets.
+
+### Fixed
+- **`Retry-After` as an HTTP-date no longer loses the asset.** RFC 7231 allows `Retry-After` to be
+  either delta-seconds *or* an HTTP-date. The header was parsed with a bare `float()`, so a
+  spec-compliant date raised `ValueError`, fell through to the generic exception handler, and made
+  the scanner abandon the asset outright — a **false negative caused by the server behaving
+  correctly**. `_parse_retry_after()` now handles both forms, clamps past dates to zero, falls back
+  on garbage, and never raises.
+
+### Added
+- **Jittered backoff.** Retry delays used a deterministic `RETRY_BACKOFF_BASE ** attempt`, so every
+  concurrent worker retried on the same tick — a thundering herd against a host that had just asked
+  for relief. Backoff now uses **equal jitter** (half fixed, half random, capped by
+  `RETRY_MAX_BACKOFF`), which de-synchronises workers while still guaranteeing a minimum pause —
+  something full jitter alone does not.
+- **Adaptive per-host throttle.** When a host answers **429 or 503**, SecretNode begins pacing
+  requests to *that host only*, growing by `THROTTLE_STEP` per signal up to `THROTTLE_MAX_DELAY`
+  and decaying as the host recovers (forgotten entirely once healthy). One fragile host no longer
+  slows the rest of the engagement, and a healthy host costs **nothing** — pacing starts at zero
+  and only appears after the host actually complains. Throttle state resets at the start of each
+  scan so pacing learned from one target never penalises the next.
+- Config: `RETRY_MAX_BACKOFF`, `THROTTLE_STEP`, `THROTTLE_MAX_DELAY` — documented in `.env.example`.
+
+This is resilience for **authorized** testing, not evasion. The identifiable-source posture is
+unchanged: `SECRETNODE_USER_AGENT` still lets an operator present a client-approved agent string,
+and scope, SSRF guard, passive-only behaviour and the authorization gate are all untouched.
+
++19 tests. Suite **294 → 313**, all green; ruff clean.
+
 ## [2.7.4] — Mobile & tablet UX for the live dashboard
 
 The dashboard is how a client first sees SecretNode, and it is increasingly opened on a phone.

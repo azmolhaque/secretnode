@@ -13,11 +13,13 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Coroutine
 from urllib.parse import urljoin, urlparse
 
@@ -759,6 +761,93 @@ _UA_OVERRIDE = os.environ.get("SECRETNODE_USER_AGENT", "").strip()
 _WAF_BLOCK_CODES = frozenset({401, 403, 406, 429, 503})
 
 
+# ── Politeness: adaptive per-host throttle (v2.7.5) ──────────────────────────
+#
+# Being a good guest on a client's infrastructure is part of the engagement, not
+# an afterthought: an authorized scan that trips rate limiting looks like an
+# attack to their SOC and gets the scanner blocked mid-assessment. Two mechanics:
+#
+#   • Jittered backoff. A deterministic 2**attempt makes every concurrent worker
+#     retry on the same tick — a thundering herd that keeps the host saturated
+#     exactly when it asked for relief. Randomising the delay spreads retries out.
+#   • Adaptive throttle. When a host answers 429/503 we start pacing subsequent
+#     requests to *that host only*, growing the pace while it keeps complaining
+#     and decaying it as it recovers. Cost is zero while a host is healthy.
+
+THROTTLE_MAX_DELAY = _env_float("THROTTLE_MAX_DELAY", 5.0)
+THROTTLE_STEP      = _env_float("THROTTLE_STEP", 0.5)
+RETRY_MAX_BACKOFF  = _env_float("RETRY_MAX_BACKOFF", 30.0)
+
+# host -> current politeness delay in seconds. Module-level so every worker
+# sharing the event loop cooperates on the same host budget.
+_host_delays: dict[str, float] = {}
+
+
+def reset_throttle() -> None:
+    """Clear all learned per-host pacing (used between scans and in tests)."""
+    _host_delays.clear()
+
+
+def _throttle_penalise(host: str) -> float:
+    """Record a rate-limit signal from `host`; return the new delay."""
+    delay = min(_host_delays.get(host, 0.0) + THROTTLE_STEP, THROTTLE_MAX_DELAY)
+    _host_delays[host] = delay
+    return delay
+
+
+def _throttle_reward(host: str) -> None:
+    """A clean response — relax pacing for `host`, forgetting it once healthy."""
+    current = _host_delays.get(host)
+    if current is None:
+        return
+    relaxed = current - (THROTTLE_STEP / 2)
+    if relaxed <= 0:
+        _host_delays.pop(host, None)
+    else:
+        _host_delays[host] = relaxed
+
+
+async def _throttle_wait(host: str) -> None:
+    """Pace a request to a host that has recently rate-limited us."""
+    delay = _host_delays.get(host, 0.0)
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff with equal jitter, capped.
+
+    Equal jitter (half fixed, half random) keeps a guaranteed minimum pause while
+    still de-synchronising concurrent workers, which full jitter alone does not.
+    """
+    ceiling = min(RETRY_BACKOFF_BASE ** attempt, RETRY_MAX_BACKOFF)
+    return (ceiling / 2) + random.uniform(0, ceiling / 2)
+
+
+def _parse_retry_after(raw: str | None, fallback: float) -> float:
+    """Parse a Retry-After header into seconds. Never raises.
+
+    RFC 7231 allows either delta-seconds *or* an HTTP-date. Before v2.7.5 this was
+    parsed with a bare float(), so a spec-compliant date raised ValueError, hit the
+    generic handler, and made the scanner abandon the asset outright — a false
+    negative caused by the server behaving correctly.
+    """
+    if not raw:
+        return fallback
+    raw = raw.strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+    except Exception:  # noqa: BLE001 — a malformed header must never break a scan
+        return fallback
+
+
 def _browser_headers(user_agent: str) -> dict[str, str]:
     """A realistic modern-Chrome header set. Client-Hints + Sec-Fetch-* are what
     modern WAFs look for; sending them lets an authorized scan reach a
@@ -841,10 +930,13 @@ async def fetch_url(
     giving up, and emit a diagnostic that names the likely cause instead of a
     bare "failed". Respects 429 Retry-After. Returns (url, body) or (url, None).
     """
+    host = urlparse(url).netloc
     async with semaphore:
         waf_block_status: int | None = None
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
+                # Pace ourselves if this host has recently rate-limited us.
+                await _throttle_wait(host)
                 if broadcast:
                     await broadcast({
                         "type": "log",
@@ -859,16 +951,20 @@ async def fetch_url(
                 response = await client.get(url, headers=extra_headers)
 
                 if response.status_code == 429:
-                    retry_after = float(
-                        response.headers.get("Retry-After", 10 * attempt)
+                    retry_after = _parse_retry_after(
+                        response.headers.get("Retry-After"), 10.0 * attempt
                     )
+                    paced = _throttle_penalise(host)
                     if broadcast:
                         await broadcast({
                             "type": "log",
                             "level": "WARN",
-                            "message": f"429 rate-limited on {url} — backing off {retry_after:.0f}s",
+                            "message": (
+                                f"429 rate-limited on {url} — backing off "
+                                f"{retry_after:.0f}s; pacing {host} at {paced:.1f}s/request."
+                            ),
                         })
-                    await asyncio.sleep(min(retry_after, 30.0))
+                    await asyncio.sleep(min(retry_after, RETRY_MAX_BACKOFF))
                     continue
 
                 if response.status_code in (404, 410):
@@ -876,6 +972,9 @@ async def fetch_url(
 
                 if response.status_code in _WAF_BLOCK_CODES:
                     waf_block_status = response.status_code
+                    if response.status_code == 503:
+                        # Overloaded, not hostile — slow down rather than hammer.
+                        _throttle_penalise(host)
                     server = response.headers.get("server", "")
                     hint = f" (server: {server})" if server else ""
                     if attempt < RETRY_ATTEMPTS:
@@ -887,7 +986,7 @@ async def fetch_url(
                                     f"WAF/CDN challenge; retrying with a different browser fingerprint."
                                 ),
                             })
-                        await asyncio.sleep(RETRY_BACKOFF_BASE ** attempt)
+                        await asyncio.sleep(_backoff_delay(attempt))
                         continue
                     if broadcast:
                         await broadcast({
@@ -902,6 +1001,8 @@ async def fetch_url(
                     return url, None
 
                 response.raise_for_status()
+                # Clean response — let this host's pacing relax back toward zero.
+                _throttle_reward(host)
 
                 cl = int(response.headers.get("content-length", 0))
                 if cl > MAX_ASSET_BYTES:
@@ -949,8 +1050,7 @@ async def fetch_url(
                 return url, None
 
             if attempt < RETRY_ATTEMPTS:
-                backoff = RETRY_BACKOFF_BASE ** attempt
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(_backoff_delay(attempt))
 
         return url, None
 
@@ -1905,6 +2005,9 @@ async def run_scan(
     # config error such as an invalid key or an unavailable model).
     global _ai_disabled_reason
     _ai_disabled_reason = None
+
+    # Pacing learned from a previous target must not penalise this one.
+    reset_throttle()
 
     async def emit(event: dict[str, Any]) -> None:
         if broadcast:
