@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import html
 import io
+import os
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,7 +46,7 @@ def _tool_version() -> str:
                 return s.split("=", 1)[1].strip().strip('"').strip("'")
     except Exception:
         pass
-    return "2.7.1"
+    return "2.7.9"
 
 
 _TOOL_VERSION = _tool_version()
@@ -53,6 +54,29 @@ _TOOL_VERSION = _tool_version()
 
 def _severity_of(finding: dict[str, Any]) -> str:
     return str(finding.get("severity", "MEDIUM")).upper()
+
+
+# Client reports get emailed, forwarded and archived. Writing a live credential
+# into one turns the deliverable itself into a second exposure — and the RoE we
+# ask clients to sign promises the opposite: "only the minimum evidence needed
+# to prove a finding, with sensitive data redacted".
+#
+# A redacted value still does its job: the developer can grep for the prefix and
+# identify exactly which key to rotate, without the report handing an attacker a
+# working credential. An operator who genuinely needs the full value (handing it
+# to the client's engineer for rotation) can opt in explicitly.
+REPORT_FULL_SECRETS = os.environ.get("REPORT_FULL_SECRETS", "false").lower() == "true"
+
+
+def redact_secret(value: str) -> str:
+    """Mask the middle of a credential, keeping enough to identify it."""
+    if not value:
+        return ""
+    if REPORT_FULL_SECRETS:
+        return value
+    if len(value) <= 12:
+        return "*" * len(value)
+    return f"{value[:6]}…{'*' * 6}…{value[-4:]}  ({len(value)} chars)"
 
 
 def _sort_key(finding: dict[str, Any]) -> tuple[int, int, str]:
@@ -153,7 +177,7 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
           <td class="mono">{html.escape(f.get('source_url', f.get('target_url','')))}</td>
           <td>{f.get('confidence',0)}%</td>
           <td>{badge}{ver_badge(f)}</td>
-          <td class="mono small">{html.escape(f.get('raw_match',''))}</td>
+          <td class="mono small">{html.escape(redact_secret(f.get('raw_match','')))}</td>
           <td class="small">{html.escape(f.get('reason',''))}</td>
         </tr>"""
 
@@ -400,13 +424,13 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
             f.get("source_url", f.get("target_url", "")),
             f.get("confidence", 0), "NEW" if f.get("is_new", True) else "RECURRING",
             f.get("verified", "disabled"), f.get("verified_detail", ""), f.get("impact", ""),
-            f.get("raw_match", ""), f.get("reason", ""), f.get("found_at", ""),
+            redact_secret(f.get("raw_match", "")), f.get("reason", ""), f.get("found_at", ""),
         ])
     for f in scan.get("needs_review_findings", []):
         writer.writerow([
             "NEEDS_REVIEW", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
             f.get("source_url", f.get("target_url", "")),
-            "", "", "", "", f.get("impact", ""), f.get("raw_match", ""),
+            "", "", "", "", f.get("impact", ""), redact_secret(f.get("raw_match", "")),
             f.get("reason", ""), f.get("found_at", ""),
         ])
     return buf.getvalue()

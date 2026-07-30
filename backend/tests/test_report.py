@@ -222,3 +222,51 @@ def test_html_r8_posture_section_and_tile():
     assert "Security Posture &amp; Misconfigurations" in out
     assert "Missing HSTS" in out
     assert "Posture Issues" in out
+
+
+# ── v2.7.9 — client reports must not carry live credentials ──────────────────
+
+def test_reports_redact_the_secret_value():
+    """A report gets emailed, forwarded and archived. Writing a live credential
+    into one turns the deliverable itself into a second exposure — and the RoE
+    we ask clients to sign promises redaction."""
+    secret = "sk_" + "a1b2c3d4" * 6          # 51 chars
+    scan = {
+        "target_url": "https://t", "scan_id": "s1", "status": "complete",
+        "assets_fetched": 1, "raw_findings": 1, "confirmed_count": 1,
+        "confirmed_findings": [{
+            "secret_type": "ElevenLabs API Key", "severity": "HIGH", "cwe": "CWE-798",
+            "source_url": "https://t/app.js", "confidence": 95, "raw_match": secret,
+            "reason": "hardcoded", "impact": "quota theft", "found_at": "2026-01-01T00:00:00Z",
+        }],
+        "needs_review_findings": [],
+    }
+    html_out = report.generate_html_report(scan)
+    csv_out = report.generate_csv_report(scan)
+    assert secret not in html_out, "HTML report leaked the full credential"
+    assert secret not in csv_out, "CSV report leaked the full credential"
+    # still identifiable enough to find and rotate
+    assert secret[:6] in csv_out
+
+
+def test_redaction_keeps_the_finding_identifiable():
+    value = "sk_abcdef0123456789abcdef0123456789"
+    out = report.redact_secret(value)
+    assert out.startswith("sk_abc")          # greppable prefix survives
+    assert "…6789" in out                    # tail aids identification
+    assert f"({len(value)} chars)" in out    # length disclosed, value is not
+    assert value not in out
+
+
+def test_short_values_are_fully_masked():
+    assert set(report.redact_secret("shortsecret")) == {"*"}
+    assert report.redact_secret("") == ""
+
+
+def test_operator_can_opt_in_to_full_values():
+    original = report.REPORT_FULL_SECRETS
+    try:
+        report.REPORT_FULL_SECRETS = True
+        assert report.redact_secret("sk_abcdef0123456789") == "sk_abcdef0123456789"
+    finally:
+        report.REPORT_FULL_SECRETS = original

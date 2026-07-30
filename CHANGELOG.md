@@ -3,6 +3,41 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.9] — Deep QA before release: reports no longer leak the credential
+
+A full pre-PR QA pass: booted the application, ran real end-to-end scans against a local target
+with planted secrets, exercised every export format, the CLI, and a re-scan to prove the cache. It
+surfaced one serious defect and one cosmetic one.
+
+### Fixed
+- **Client reports contained the full, live credential.** The CSV column was named
+  `matched_value_partial` but wrote `raw_match` verbatim, and the HTML report did the same. A report
+  is emailed, forwarded and archived — writing a working secret into one turns the deliverable
+  itself into a second exposure, and directly contradicts the Rules of Engagement we ask clients to
+  sign ("only the minimum evidence needed to prove a finding, with sensitive data redacted").
+  Values are now redacted to `sk_798…******…3fc4  (51 chars)`: still greppable, so a developer can
+  identify exactly which key to rotate, but not usable. `REPORT_FULL_SECRETS=true` opts back in for
+  the case where an operator deliberately needs the full value. SARIF was already clean.
+- **Version drift in the dashboard.** The footer and boot log were hardcoded to v2.7.1 and never
+  touched by the runtime `/api/health` sync, so a client demo showed a stale version indefinitely.
+  The footer is now synced too and the boot log no longer hardcodes a version. `report.py`'s
+  fallback constant was also stale.
+
+### Verified end to end (not just unit-tested)
+- Application boots; `/api/health` reports the correct version; dashboard serves.
+- Real scan of a local target found **both** of this session's headline features working in a live
+  system: the v2.7.2 **ElevenLabs detector**, and a v2.7.6 recovery of an Anthropic key that was
+  `\uXXXX`-escaped inside `__NEXT_DATA__` (with a raw `<` in the blob, exercising the v2.7.8 fix).
+- **Re-scan** repopulated findings rather than losing them, and `asset_cache` correctly recorded
+  both assets as `was_clean=False` so they will always be refetched.
+- HTML / CSV / SARIF all generate and stamp the right version; SARIF carries all 63 rules.
+- CLI produces correct CSV output.
+- **SSRF guard confirmed working** — refused a localhost target until `ALLOW_PRIVATE_TARGETS` was
+  explicitly set for the lab run.
+- Inline dashboard JavaScript passes `node --check` after the mobile-layout edits.
+
+Suite **349 → 353**, all green; ruff clean; bench 1.000/1.000.
+
 ## [2.7.8] — Pre-release review: three real bugs, and a quality gate that can fail
 
 A deliberate self-review of everything shipped in v2.7.2–v2.7.7 before opening the PR. It found
