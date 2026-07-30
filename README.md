@@ -231,7 +231,7 @@ http://<raspberry-pi-ip>:8000
 
 ---
 
-## Secret Patterns Detected (44)
+## Secret Patterns Detected (63)
 
 Every pattern carries a **severity** and a **CWE** id, and only fires after passing a Shannon-entropy
 filter (so obvious placeholders like `YOUR_API_KEY_HERE` are dropped before the AI stage).

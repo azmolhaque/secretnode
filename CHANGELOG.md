@@ -3,6 +3,260 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.9] — Deep QA before release: reports no longer leak the credential
+
+A full pre-PR QA pass: booted the application, ran real end-to-end scans against a local target
+with planted secrets, exercised every export format, the CLI, and a re-scan to prove the cache. It
+surfaced one serious defect and one cosmetic one.
+
+### Fixed
+- **Client reports contained the full, live credential.** The CSV column was named
+  `matched_value_partial` but wrote `raw_match` verbatim, and the HTML report did the same. A report
+  is emailed, forwarded and archived — writing a working secret into one turns the deliverable
+  itself into a second exposure, and directly contradicts the Rules of Engagement we ask clients to
+  sign ("only the minimum evidence needed to prove a finding, with sensitive data redacted").
+  Values are now redacted to `sk_798…******…3fc4  (51 chars)`: still greppable, so a developer can
+  identify exactly which key to rotate, but not usable. `REPORT_FULL_SECRETS=true` opts back in for
+  the case where an operator deliberately needs the full value. SARIF was already clean.
+- **Version drift in the dashboard.** The footer and boot log were hardcoded to v2.7.1 and never
+  touched by the runtime `/api/health` sync, so a client demo showed a stale version indefinitely.
+  The footer is now synced too and the boot log no longer hardcodes a version. `report.py`'s
+  fallback constant was also stale.
+
+### Verified end to end (not just unit-tested)
+- Application boots; `/api/health` reports the correct version; dashboard serves.
+- Real scan of a local target found **both** of this session's headline features working in a live
+  system: the v2.7.2 **ElevenLabs detector**, and a v2.7.6 recovery of an Anthropic key that was
+  `\uXXXX`-escaped inside `__NEXT_DATA__` (with a raw `<` in the blob, exercising the v2.7.8 fix).
+- **Re-scan** repopulated findings rather than losing them, and `asset_cache` correctly recorded
+  both assets as `was_clean=False` so they will always be refetched.
+- HTML / CSV / SARIF all generate and stamp the right version; SARIF carries all 63 rules.
+- CLI produces correct CSV output.
+- **SSRF guard confirmed working** — refused a localhost target until `ALLOW_PRIVATE_TARGETS` was
+  explicitly set for the lab run.
+- Inline dashboard JavaScript passes `node --check` after the mobile-layout edits.
+
+Suite **349 → 353**, all green; ruff clean; bench 1.000/1.000.
+
+## [2.7.8] — Pre-release review: three real bugs, and a quality gate that can fail
+
+A deliberate self-review of everything shipped in v2.7.2–v2.7.7 before opening the PR. It found
+three genuine defects — two of them in the very code written to prevent that class of failure —
+and one process gap that mattered more than any of them.
+
+### Fixed
+- **Inline-JSON extraction truncated at the first raw `<`.** `_INLINE_SCRIPT_RE` used a `[^<]`
+  character class, so any blob containing a literal `<` — prose like `"a < b"`, embedded HTML
+  fragments, templates — was cut short and failed to parse, losing every secret after that point.
+  Now lazily matched to the `</script>` terminator (linear-time, still ReDoS-free: verified at
+  0.18s on hostile input).
+- **A previously-dirty asset could be lost on 304 when `RETRY_ATTEMPTS=1`.** The refetch was done
+  via `continue`, which consumed a retry attempt; with only one attempt configured the request was
+  never re-issued and the asset was dropped — **the exact "a finding silently vanishes" failure
+  the cache was designed to prevent.** The unconditional refetch now happens inline.
+- **An unprompted `304` with no cache entry burned a retry.** Now refetched immediately, and a
+  server that answers 304 even unconditionally terminates instead of spinning.
+
+### Added — the detection quality gate is now real
+- **The benchmark corpus covers this session's work.** 27 → **45 samples**. All nine v2.7.2 AI/ML
+  detectors, the v2.7.6 inline-SSR path, and **eight hard negatives** chosen to be structurally
+  confusable with the new patterns: `sk_` + wrong-length hex, a 64-hex SHA digest that resembles an
+  OpenRouter key, provider-shaped placeholders, benign inline JSON. Shipping nine detectors with
+  zero corpus coverage meant the "measured precision" claim did not cover them.
+- **`make bench` can fail.** It previously printed a report and always exited 0, so it could not
+  block anything. It now enforces `BENCH_MIN_PRECISION` / `BENCH_MIN_RECALL` (default 1.0), prints
+  the offending samples, and exits non-zero.
+- **CI runs it.** A precision regression is now release-blocking. Verified end to end by
+  deliberately loosening the ElevenLabs regex: precision falls 1.000 → 0.917, the two false
+  positives are named, and the build fails.
+
+Suite **337 → 349**, all green; ruff clean; bench 1.000/1.000 on the larger corpus.
+
+## [2.7.7] — R10: asset caching for re-scans
+
+Closes roadmap item **R10**. Re-scanning a target refetched every asset from scratch — wasted
+bandwidth on the client's servers and wasted CPU on ours, since most assets neither change between
+engagements nor contain anything.
+
+### Added
+- **Conditional GET on re-scans.** SecretNode now sends `If-None-Match` / `If-Modified-Since` from
+  a per-target cache of HTTP validators (`asset_cache` table, 24h TTL).
+- **Correctness rule for 304s.** A `304 Not Modified` is acted on by history, not blindly:
+  - asset was **clean** last scan → **skipped entirely** (unchanged + previously clean means still
+    clean), and never enters the scan text;
+  - asset previously **yielded a finding** → **refetched unconditionally**, so the finding is
+    reproduced. A finding that disappeared from a report would read as *resolved*, which is a
+    dangerous lie to tell a client.
+- `purge_asset_cache()` for clearing one target's cache or all of it.
+- Config: `ASSET_CACHE` (default on).
+
+### Privacy: no response bodies are cached
+The obvious implementation stores bodies so a 304 can still be scanned. We deliberately do not: a
+client's JavaScript can contain live credentials, and caching it would leave a long-lived copy of
+their secrets on our disk — which the engagement's confidentiality terms do not allow. The cache
+holds **only** the validators, a truncated content hash, and a clean/dirty flag. That is enough to
+skip the overwhelming majority of assets, and a test asserts no body content is ever persisted.
+
++10 tests, including a **mutation check** (with `ASSET_CACHE=false`, five cache tests fail, proving
+they exercise the real path) and a real-SQLite round-trip covering upsert, per-target isolation and
+purge. Suite **327 → 337**, all green; ruff clean.
+
+## [2.7.6] — Inline SSR state decoding
+
+Server-rendered apps embed their bootstrap state in the HTML — Next.js writes
+`<script id="__NEXT_DATA__">`, Nuxt writes `window.__NUXT__`, Redux-style apps write
+`window.__INITIAL_STATE__` — and that blob is built server-side, so it regularly carries config a
+developer never meant to ship.
+
+### Added
+- **Inline JSON/SSR state blobs are decoded before scanning.** New `extract_inline_json_strings()`
+  finds inline `<script>` JSON (typed `application/json`, or assigned to `__NEXT_DATA__`,
+  `__NUXT__`, `__INITIAL_STATE__`, `__APOLLO_STATE__`, `__PRELOADED_STATE__`, `__remixContext`),
+  parses it, and scans the decoded string values.
+- Config: `SCAN_INLINE_JSON`, `MAX_INLINE_JSON_BYTES`.
+
+### Why this is narrower than the roadmap claimed
+The roadmap listed inline JSON *and* HTML comments as uncovered surface. Measured against the
+code, both are already caught — the whole response body goes through the raw-text pass, so a
+plainly-embedded secret in a comment or a JSON blob has always been found. The **only** genuine
+miss was a value whose JSON **escaping** breaks the credential's shape: a `\uXXXX`-escaped
+character mid-token, as emitted by XSS-safe serializers (Next.js's `htmlEscapeJsonString`) or
+light obfuscation. The regex sees `sk\u002Dant\u002D…` and no longer recognises it. Decoding the
+JSON recovers it — the same rationale that already justifies decoding source-map
+`sourcesContent`. The roadmap entry has been corrected rather than left overstating the gap.
+
+Purely local decoding: **no additional requests**, so the scan stays passive. Bounded by a shared
+byte budget, non-greedy bounded regexes (no nested quantifiers), and defensive throughout — a
+malformed blob is skipped, never fatal.
+
++14 tests, including a **mutation check**: with `SCAN_INLINE_JSON=false` the recovery tests fail,
+proving they exercise the decoder rather than passing incidentally via the raw-text pass.
+Suite **313 → 327**, all green; ruff clean.
+
+## [2.7.5] — Scan politeness & resilience
+
+Being a good guest on a client's infrastructure is part of the engagement, not an afterthought:
+an authorized scan that trips rate limiting looks like an attack to their SOC and gets the scanner
+blocked mid-assessment. This release makes SecretNode back off the way a well-behaved client
+should — and fixes a bug that was silently losing assets.
+
+### Fixed
+- **`Retry-After` as an HTTP-date no longer loses the asset.** RFC 7231 allows `Retry-After` to be
+  either delta-seconds *or* an HTTP-date. The header was parsed with a bare `float()`, so a
+  spec-compliant date raised `ValueError`, fell through to the generic exception handler, and made
+  the scanner abandon the asset outright — a **false negative caused by the server behaving
+  correctly**. `_parse_retry_after()` now handles both forms, clamps past dates to zero, falls back
+  on garbage, and never raises.
+
+### Added
+- **Jittered backoff.** Retry delays used a deterministic `RETRY_BACKOFF_BASE ** attempt`, so every
+  concurrent worker retried on the same tick — a thundering herd against a host that had just asked
+  for relief. Backoff now uses **equal jitter** (half fixed, half random, capped by
+  `RETRY_MAX_BACKOFF`), which de-synchronises workers while still guaranteeing a minimum pause —
+  something full jitter alone does not.
+- **Adaptive per-host throttle.** When a host answers **429 or 503**, SecretNode begins pacing
+  requests to *that host only*, growing by `THROTTLE_STEP` per signal up to `THROTTLE_MAX_DELAY`
+  and decaying as the host recovers (forgotten entirely once healthy). One fragile host no longer
+  slows the rest of the engagement, and a healthy host costs **nothing** — pacing starts at zero
+  and only appears after the host actually complains. Throttle state resets at the start of each
+  scan so pacing learned from one target never penalises the next.
+- Config: `RETRY_MAX_BACKOFF`, `THROTTLE_STEP`, `THROTTLE_MAX_DELAY` — documented in `.env.example`.
+
+This is resilience for **authorized** testing, not evasion. The identifiable-source posture is
+unchanged: `SECRETNODE_USER_AGENT` still lets an operator present a client-approved agent string,
+and scope, SSRF guard, passive-only behaviour and the authorization gate are all untouched.
+
++19 tests. Suite **294 → 313**, all green; ruff clean.
+
+## [2.7.4] — Mobile & tablet UX for the live dashboard
+
+The dashboard is how a client first sees SecretNode, and it is increasingly opened on a phone.
+The findings table had nine columns, so on a phone the two things an operator actually needs —
+the severity badge and the DETAIL / FP buttons — were hidden off-screen behind horizontal
+scrolling. This release makes the dashboard genuinely usable on touch devices without changing
+the desktop layout at all.
+
+### Changed
+- **Findings table becomes cards below 900px.** Each row renders as a self-contained card and
+  every cell is prefixed with its column name (driven by a `data-label` attribute), so no
+  information is lost and nothing scrolls sideways. The redundant row-number column is hidden,
+  long source URLs and AI reasoning wrap instead of being ellipsis-clipped, and DETAIL / FP
+  become full-width, thumb-sized buttons. The breakpoint is 900px rather than the phone
+  breakpoint because a nine-column table is cramped well above phone width — this covers tablets
+  in portrait too.
+- **Export toolbar reflows** from one cramped row into a two-column grid on small screens.
+
+### Added
+- **Touch sizing keyed to `pointer: coarse`, not screen width.** Touch capability is a property
+  of the input device, not the viewport, so a tablet gets thumb-sized targets even at 900px while
+  a mouse-driven desktop keeps its compact controls. Brings every interactive control to the
+  ~40-46px range on touch.
+- **iOS auto-zoom fix.** Text inputs render at 16px on touch layouts; below that Safari zooms the
+  whole page when an input is focused, which previously left the dashboard mis-scrolled after
+  typing a target.
+- **Safe-area insets** so the header and main content clear the notch and home indicator on
+  modern phones.
+
+### Verified
+Measured with Playwright across iPhone SE / iPhone 14 / Pixel 7 / iPad mini / iPad Pro / desktop:
+zero page-level horizontal overflow at every width, no interactive control under 32px on touch,
+and the desktop table layout confirmed byte-identical in behaviour (`thead` still
+`table-header-group`, all nine columns intact). The wide table on large tablets stays contained
+in its existing `overflow-x:auto` wrapper rather than breaking the page.
+
+## [2.7.3] — R1 complete: impact-rich verification for AI/ML keys
+
+Closes roadmap item **R1 (verification depth)**. A verified credential no longer reports a bare
+"verified" — it reports *what the key actually reaches*, which is the concrete blast radius a
+client report needs.
+
+### Added
+- **Seven AI/ML provider verifiers**, pairing one with every safe detector from the v2.7.2 pack:
+  **ElevenLabs, Groq, Hugging Face, Replicate, OpenRouter, xAI, Pinecone**. Verifier count
+  22 → **29 secret types**.
+- **Billing-surface as the impact signal.** For AI keys the quantified loss is usually spend, so
+  verifiers surface plan tier and remaining quota where the provider exposes it:
+  - `ElevenLabs · creator tier · quota 12,345/100,000`
+  - `Hugging Face @acme-bot · role: write · 2 org(s)`
+  - `OpenRouter · key: prod-key · quota 42/500`
+- **Blocked-key handling.** xAI reports disabled keys with HTTP 200; the verifier reads
+  `api_key_blocked` / `api_key_disabled` and correctly returns *unverified* rather than claiming a
+  dead key is live.
+
+Every verifier keeps the existing contract: exactly ONE read-only identity call to the credential's
+own issuer (never the scan target), no writes, **no inference/generation calls** (which would bill
+the victim's account), the secret never stored or returned, and fail-closed on any error. Still
+OFF by default behind `VERIFY_SECRETS=true` — authorized-scope only.
+
++9 tests (identity parsing, dead-key, blocked-key, fail-closed, and a guard that every AI detector
+ships with a verifier). Suite **285 → 294**, all green; ruff clean.
+
+## [2.7.2] — AI/ML provider detectors + duplicate-finding fix
+
+Grounded in a real authorized-scope scan: an ElevenLabs key shipped in a client-side
+`EnvConfig.js` was caught only by the generic catch-all, so it was reported as an untyped
+MEDIUM *and* double-counted. Both problems are fixed.
+
+### Added
+- **AI/ML provider detector pack (9 new patterns, 54 → 63).** Modern AI stacks leak keys
+  constantly because a frontend calls the provider directly instead of proxying through a
+  backend. New structural detectors: **ElevenLabs, Groq, Hugging Face, Replicate, Perplexity,
+  xAI (Grok), OpenRouter, LangSmith, Pinecone**. Each is prefix + fixed-length, so it stays
+  high-precision without the generic entropy gate. ElevenLabs ships provider-specific
+  remediation (revoke in dashboard, proxy TTS server-side). +13 tests, incl. near-miss
+  precision guards and a ReDoS timing check.
+
+### Fixed
+- **One credential no longer reported twice.** `RawFinding.fingerprint` includes `secret_type`,
+  so a value matched by both a provider detector *and* the generic catch-all produced two
+  findings — double-counting the exposure in client reports, spending a second AI-validation
+  call on the same string, and leaving two conflicting severities (HIGH + MEDIUM) for one
+  credential. `_collapse_generic_duplicates()` now collapses per `(source_url, raw_match)`,
+  keeping the typed detector (accurate severity + provider remediation) and dropping the
+  generic claim. The catch-all still fires normally for credentials no detector types. +3 tests.
+
+Suite **282 → 285**, all green; ruff clean.
+
 ## [2.7.1] — Gemini validation-engine model refresh
 
 Tracks Google's current Gemini lineup for the two-tier AI validation engine, with no

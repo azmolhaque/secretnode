@@ -142,3 +142,100 @@ def test_extract_secrets_deduplicates_by_fingerprint():
     fs = [f for f in scanner.extract_secrets("s", "https://t", "https://t/a.js", body)
           if f.secret_type == "GitLab Personal Access Token"]
     assert len(fs) == 1
+
+
+# ── v2.7.2 — AI/ML provider detector pack ────────────────────────────────────
+# Grounded in a real authorized-scope finding: an ElevenLabs key shipped in a
+# client-side EnvConfig.js was previously caught only by the generic
+# high-entropy catch-all (MEDIUM, untyped). These structural detectors type it
+# correctly and carry provider-specific remediation.
+
+def _hex(n: int) -> str:
+    return "".join(secrets.choice("abcdef0123456789") for _ in range(n))
+
+
+@pytest.mark.parametrize(
+    "expected,body",
+    [
+        ("ElevenLabs API Key",         f'window.REACT_APP_ELEVENLABS_API_KEY = "sk_{_hex(48)}";'),
+        ("Groq API Key",               f'k="gsk_{_rnd(52)}"'),
+        ("Hugging Face Access Token",  f'k="hf_{_rnd(37)}"'),
+        ("Replicate API Token",        f'k="r8_{_rnd(40)}"'),
+        ("Perplexity API Key",         f'k="pplx-{_rnd(48)}"'),
+        ("xAI API Key",                f'k="xai-{_rnd(80)}"'),
+        ("OpenRouter API Key",         f'k="sk-or-v1-{_hex(64)}"'),
+        ("LangSmith API Key",          f'k="lsv2_pt_{_hex(32)}_{_hex(10)}"'),
+        ("Pinecone API Key",           f'k="pcsk_{_rnd(60)}"'),
+    ],
+)
+def test_ai_provider_patterns_detected(expected: str, body: str) -> None:
+    assert expected in _hits(body), f"{expected} not detected in: {body[:70]}"
+
+
+def test_elevenlabs_is_typed_not_generic() -> None:
+    """The real-world case: a typed detector must win over the generic catch-all."""
+    body = f'window.REACT_APP_ELEVENLABS_API_KEY = "sk_{_hex(48)}";'
+    hits = _hits(body)
+    assert "ElevenLabs API Key" in hits
+
+
+def test_ai_provider_patterns_reject_near_misses() -> None:
+    """Wrong length / wrong alphabet must not match — precision guard."""
+    negatives = [
+        f'k="sk_{_hex(20)}"',            # ElevenLabs: too short
+        f'k="sk_{_rnd(48)}XYZ"',         # ElevenLabs: not pure hex, over length
+        f'k="gsk_{_rnd(10)}"',           # Groq: too short
+        f'k="hf_{_rnd(5)}"',             # HF: too short
+        f'k="r8_{_rnd(4)}"',             # Replicate: too short
+        'k="sk-or-v1-nothex"',           # OpenRouter: not hex
+    ]
+    for body in negatives:
+        typed = _hits(body) - {"Generic High-Entropy Secret"}
+        assert not typed, f"false positive on {body!r}: {typed}"
+
+
+def test_ai_provider_regexes_are_redos_safe() -> None:
+    """A hostile minified bundle must not stall the new detectors."""
+    import time
+    ai_names = {
+        "ElevenLabs API Key", "Groq API Key", "Hugging Face Access Token",
+        "Replicate API Token", "Perplexity API Key", "xAI API Key",
+        "OpenRouter API Key", "LangSmith API Key", "Pinecone API Key",
+    }
+    hostile = "sk_" + "a" * 5000 + "!" + "gsk_" + "0" * 5000
+    for p in scanner.SECRET_PATTERNS:
+        if p.name in ai_names:
+            t0 = time.monotonic()
+            p.regex.search(hostile)
+            assert time.monotonic() - t0 < 0.5, f"{p.name} too slow (possible ReDoS)"
+
+
+def test_typed_detector_collapses_generic_duplicate() -> None:
+    """One credential must yield ONE finding, typed — not a typed + generic pair.
+
+    Regression guard: the fingerprint includes secret_type, so before v2.7.2 the
+    same value at the same URL was reported twice (HIGH typed + MEDIUM generic),
+    double-counting the exposure and spending two AI-validation calls on it.
+    """
+    body = f'window.REACT_APP_ELEVENLABS_API_KEY = "sk_{_hex(48)}";'
+    findings = scanner.extract_secrets("s", "https://t", "https://t/EnvConfig.js", body)
+    assert len(findings) == 1, [f.secret_type for f in findings]
+    assert findings[0].secret_type == "ElevenLabs API Key"
+
+
+def test_generic_survives_when_no_typed_detector_matches() -> None:
+    """The catch-all must still fire for credentials no provider detector knows."""
+    body = f'api_key = "{_rnd(44)}"'
+    hits = _hits(body)
+    assert hits == {scanner.GENERIC_SECRET_TYPE}, hits
+
+
+def test_generic_kept_for_a_different_value_in_same_file() -> None:
+    """Collapsing is per-value, not per-file: an untyped second secret survives."""
+    body = (
+        f'window.REACT_APP_ELEVENLABS_API_KEY = "sk_{_hex(48)}";\n'
+        f'window.OTHER_TOKEN = "{_rnd(44)}";'
+    )
+    hits = _hits(body)
+    assert "ElevenLabs API Key" in hits
+    assert scanner.GENERIC_SECRET_TYPE in hits

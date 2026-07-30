@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 _ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+_HEX   = "0123456789abcdef"
 
 
 def _rand(n: int, seed: str, alphabet: str = _ALNUM) -> str:
@@ -50,6 +51,12 @@ class Sample:
     @property
     def is_positive(self) -> bool:
         return self.expect is not None
+
+
+def _hex(n: int, seed: str = "hex") -> str:
+    """Deterministic lowercase-hex string — the shape ElevenLabs / OpenRouter /
+    LangSmith keys and SHA digests use."""
+    return _rand(n, seed + str(n), _HEX)
 
 
 # ── POSITIVES — a real (synthetic) secret is planted; the layer must catch it ──
@@ -113,4 +120,47 @@ _NEGATIVES: list[Sample] = [
     Sample("css-color-hash", ".btn { color: #a3f2c1; background: #1b2e4d; border: #ff00aa; }", None),
 ]
 
-CORPUS: list[Sample] = _POSITIVES + _NEGATIVES
+# ── v2.7.7 · AI/ML provider detectors + inline-SSR decoding ─────────────────
+# A quality gate that does not cover the newest detectors is not a quality gate.
+# These exercise every pattern added in v2.7.2 plus the v2.7.6 inline-JSON path.
+
+_AI_POSITIVES: list[Sample] = [
+    Sample("elevenlabs", f'window.REACT_APP_ELEVENLABS_API_KEY = "sk_{_hex(48)}";',
+           "ElevenLabs API Key"),
+    Sample("groq", f'client = Groq(api_key="gsk_{_rand(52, "groq")}")', "Groq API Key"),
+    Sample("huggingface", f'HF_TOKEN = "hf_{_rand(37, "hf")}"', "Hugging Face Access Token"),
+    Sample("replicate", f'REPLICATE_API_TOKEN="r8_{_rand(40, "rep")}"', "Replicate API Token"),
+    Sample("perplexity", f'PPLX_KEY = "pplx-{_rand(48, "pplx")}"', "Perplexity API Key"),
+    Sample("xai", f'XAI_API_KEY="xai-{_rand(80, "xai")}"', "xAI API Key"),
+    Sample("openrouter", f'k = "sk-or-v1-{_hex(64)}"', "OpenRouter API Key"),
+    Sample("langsmith", f'LANGCHAIN_API_KEY="lsv2_pt_{_hex(32)}_{_hex(10)}"',
+           "LangSmith API Key"),
+    Sample("pinecone", f'pc = Pinecone(api_key="pcsk_{_rand(60, "pc")}")', "Pinecone API Key"),
+    # v2.7.6: the credential is \uXXXX-escaped inside inline SSR state, so the
+    # raw-text pass cannot see it — only decoding the JSON recovers it.
+    Sample("inline-ssr-escaped",
+           '<script id="__NEXT_DATA__" type="application/json">{"props":{"k":"'
+           + ("sk-ant-" + _rand(40, "ant")).replace("-", r"\u002D") + '"}}</script>',
+           "Anthropic API Key"),
+]
+
+# Hard negatives: strings that structurally resemble the new detectors but are
+# not credentials. These are where false positives actually come from.
+_AI_NEGATIVES: list[Sample] = [
+    # sk_ + hex but the wrong length for ElevenLabs
+    Sample("sk-hex-short", f'id = "sk_{_hex(20)}"', None),
+    Sample("sk-hex-long", f'id = "sk_{_hex(72)}"', None),
+    # right prefix, obvious placeholder
+    Sample("elevenlabs-placeholder", 'ELEVENLABS_API_KEY = "sk_your_api_key_here"', None),
+    Sample("hf-placeholder", 'HF_TOKEN = "hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"', None),
+    # a 64-hex blob that is a digest, not an OpenRouter key
+    Sample("sha256-digest", f'integrity = "{_hex(64)}"', None),
+    # docs-style examples
+    Sample("groq-docs", 'api_key="gsk_YOUR_GROQ_KEY"', None),
+    Sample("openrouter-docs", 'Authorization: Bearer sk-or-v1-<your-key>', None),
+    # benign inline JSON must not produce anything
+    Sample("inline-json-benign",
+           '<script type="application/json">{"title":"Docs","items":[1,2,3]}</script>', None),
+]
+
+CORPUS: list[Sample] = _POSITIVES + _NEGATIVES + _AI_POSITIVES + _AI_NEGATIVES

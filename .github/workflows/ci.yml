@@ -37,6 +37,13 @@ jobs:
       - name: Run test suite
         run: pytest
 
+      # A scanner's whole value is that its findings can be trusted, so a
+      # precision regression is release-blocking, not a warning. This measures
+      # the deterministic detection layer against the labelled corpus and fails
+      # the build if precision or recall drops.
+      - name: Detection quality gate (precision/recall)
+        run: make bench
+
   docker-build:
     runs-on: ubuntu-latest
     steps:

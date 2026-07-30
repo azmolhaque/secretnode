@@ -61,6 +61,115 @@
       .stat-card      { padding:14px 12px; }
       .header-arch, .header-sep { display:none; }
       .hex-decoration { display:none; }
+
+      /* Toolbar: let the export buttons breathe instead of cramming one line. */
+      .findings-toolbar { align-items:stretch; }
+      .findings-toolbar > div:last-child {
+        display:grid; grid-template-columns:1fr 1fr; gap:8px; width:100%;
+        justify-content:stretch !important;
+      }
+      .findings-toolbar > div:last-child > * {
+        width:100%; min-height:40px; font-size:9px !important;
+      }
+      .findings-toolbar > div:last-child > select { grid-column:1 / -1; }
+
+      /* Comfortable tap targets on the scan controls. Apple/WCAG guidance is
+         ~44px; anything under that is a mis-tap on a real phone. */
+      #verify-toggle, #deep-toggle { min-height:44px; }
+      .control-row .btn-scan, .control-row .btn-stop { min-height:46px; }
+      /* Secondary panel actions (terminal COPY/CLR, toolbar chips) are tiny by
+         design on desktop — give them a real hit area on touch. */
+      .panel button { min-height:32px; }
+      #modal-box { padding:20px 18px; width:94%; max-height:88vh; }
+    }
+
+
+    /* Card layout covers tablets in portrait too — a 9-column table is
+       cramped well above phone width, so the breakpoint is wider than the
+       phone-specific tweaks above. */
+    @media (max-width: 900px) {
+      /* ── Findings: table → cards ───────────────────────────────────────────
+         A 9-column table cannot be read on a phone; horizontal scrolling hides
+         the severity and the action buttons, which are the two things an
+         operator actually needs. Below 680px each row becomes a self-contained
+         card and every cell is prefixed with its column name via data-label,
+         so no information is lost and nothing scrolls sideways. */
+      .findings-table thead { display:none; }
+      .findings-table,
+      .findings-table tbody,
+      .findings-table tr,
+      .findings-table td { display:block; width:100%; }
+
+      .findings-table tr {
+        border:1px solid #1a2e1f; border-radius:4px;
+        background:#0d1410; margin-bottom:10px; padding:10px 12px;
+      }
+      .findings-table tr:hover td { background:transparent; }
+
+      .findings-table td {
+        border-bottom:none; padding:5px 0;
+        display:flex; align-items:flex-start; gap:10px;
+        max-width:none !important; width:auto !important;
+        white-space:normal !important;
+      }
+      /* Column name, rendered from the cell's data-label. */
+      .findings-table td[data-label]::before {
+        content:attr(data-label);
+        flex:0 0 82px;
+        font-family:'Orbitron',monospace; font-size:8px; letter-spacing:0.1em;
+        color:#4a7c59; text-transform:uppercase; padding-top:3px;
+      }
+      /* Row number is redundant once rows are cards. */
+      .findings-table td.col-idx { display:none; }
+      /* Long values wrap instead of being clipped by an ellipsis. */
+      .findings-table td.col-source > div,
+      .findings-table td.col-reason {
+        white-space:normal !important; overflow:visible !important;
+        text-overflow:clip !important; word-break:break-word;
+      }
+      .findings-table td.col-reason { display:flex; }
+      .code-snippet {
+        max-width:100%; white-space:pre-wrap !important; word-break:break-all;
+      }
+      .findings-table td.col-conf .confidence-bar { width:100%; }
+      /* Actions get real, thumb-sized targets. */
+      .findings-table td.col-action {
+        gap:8px; padding-top:9px; margin-top:4px; border-top:1px solid #12210f;
+      }
+      .findings-table td.col-action button {
+        flex:1 1 auto; min-height:40px; font-size:10px !important;
+        margin-left:0 !important;
+      }
+      .findings-table td.col-action::before { display:none; }
+
+    }
+
+
+    /* Touch sizing is a property of the input device, not the screen width:
+       a tablet needs thumb-sized targets even at 900px. */
+    @media (pointer: coarse) {
+      .panel button, .findings-toolbar button, .findings-toolbar select { min-height:36px; }
+      .findings-table td.col-action button { min-height:40px; }
+      .control-row .btn-scan, .control-row .btn-stop { min-height:46px; }
+      #verify-toggle, #deep-toggle { min-height:44px; }
+      .scan-input, #crawl-pages-input { font-size:16px !important; }
+    }
+
+    /* iOS zooms the whole page when a focused input is under 16px. Keeping the
+       text inputs at 16px on touch layouts avoids that jarring auto-zoom. */
+    @media (max-width: 680px) {
+      .scan-input, #crawl-pages-input { font-size:16px !important; }
+    }
+
+    /* Respect the notch / home indicator on modern phones. */
+    @supports (padding: max(0px)) {
+      @media (max-width: 680px) {
+        .app-header { padding-left:max(14px, env(safe-area-inset-left));
+                      padding-right:max(14px, env(safe-area-inset-right)); }
+        .app-main   { padding-left:max(13px, env(safe-area-inset-left));
+                      padding-right:max(13px, env(safe-area-inset-right));
+                      padding-bottom:max(14px, env(safe-area-inset-bottom)); }
+      }
     }
     @media (max-width: 380px) {
       .stats-grid { grid-template-columns:1fr 1fr; }
@@ -573,7 +682,7 @@
           </div>
         </div>
         <div id="console-output" style="padding:12px 14px;flex:1;">
-          <div class="log-SYS">SecretNode v2.7.1 initialised. Awaiting target...<span class="cursor"></span></div>
+          <div class="log-SYS">SecretNode initialised. Awaiting target...<span class="cursor"></span></div>
         </div>
       </div>
 
@@ -652,7 +761,7 @@
 
     <!-- ── FOOTER ── -->
     <div class="app-footer">
-      <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;letter-spacing:0.1em;">
+      <span id="footer-version" style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;letter-spacing:0.1em;">
         SECRETNODE v2.7.1 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
       </span>
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;">
@@ -867,28 +976,28 @@
         : '<span style="background:#742a2a;color:#feb2b2;font-size:8px;padding:1px 6px;border-radius:8px;margin-left:5px;">NEW</span>';
 
       tr.innerHTML = `
-        <td style="color:#2d4a35;width:40px;">${index + 1}</td>
-        <td>
+        <td class="col-idx" style="color:#2d4a35;width:40px;">${index + 1}</td>
+        <td data-label="TYPE">
           <span class="badge badge-${sev}">${sev.toUpperCase()}</span>${newBadge}
           <div style="margin-top:5px;color:#9ae6b4;font-size:10px;">${finding.secret_type}</div>
         </td>
-        <td style="max-width:180px;">
+        <td data-label="SOURCE" class="col-source" style="max-width:180px;">
           <div style="color:#4a7c59;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${source}">${sourceShort}</div>
         </td>
-        <td><code class="code-snippet" title="${snippet}">${snippet}</code></td>
-        <td style="white-space:nowrap;">
+        <td data-label="SNIPPET"><code class="code-snippet" title="${snippet}">${snippet}</code></td>
+        <td data-label="ENTROPY" style="white-space:nowrap;">
           <span style="color:#63b3ed;">${finding.entropy.toFixed(2)}</span>
           <span style="color:#2d4a35;font-size:9px;"> bits</span>
         </td>
-        <td style="width:100px;">
+        <td data-label="CONFIDENCE" class="col-conf" style="width:100px;">
           <div style="color:${cc};font-size:13px;font-weight:700;">${finding.confidence}%</div>
           <div class="confidence-bar">
             <div class="confidence-fill" style="width:${finding.confidence}%;background:${cc};"></div>
           </div>
         </td>
-        <td style="color:#68d391;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${reason}">${reason}</td>
-        <td style="color:#2d4a35;white-space:nowrap;">${time}</td>
-        <td style="white-space:nowrap;">
+        <td data-label="AI REASON" class="col-reason" style="color:#68d391;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${reason}">${reason}</td>
+        <td data-label="TIME" style="color:#2d4a35;white-space:nowrap;">${time}</td>
+        <td data-label="ACTION" class="col-action" style="white-space:nowrap;">
           <button onclick="showFindingDetail(${index})"
             style="font-family:'Orbitron';font-size:8px;letter-spacing:0.08em;color:#4a7c59;padding:4px 8px;border:1px solid #2d4a35;border-radius:2px;background:transparent;cursor:pointer;transition:all 0.2s;"
             onmouseover="this.style.color='#00ff88';this.style.borderColor='#38a169'"
@@ -1399,6 +1508,9 @@
         const el = document.getElementById('version-line');
         if (el) el.textContent = 'v' + h.version + ' — ATTACK SURFACE MONITOR';
         document.title = 'SecretNode v' + h.version + ' — ASM Scanner';
+        const fv = document.getElementById('footer-version');
+        if (fv) fv.textContent =
+          'SECRETNODE v' + h.version + ' — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64';
       }
     }).catch(() => {});
 

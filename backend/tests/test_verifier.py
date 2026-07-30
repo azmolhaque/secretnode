@@ -171,3 +171,101 @@ async def test_figma_and_digitalocean_identity():
         "DigitalOcean PAT", "do", _MockClient(_Resp(200, {"account": {"email": "ops@acme.io"}})))
     assert fig.status == "verified" and "ada" in fig.detail
     assert do.status == "verified" and "ops@acme.io" in do.detail
+
+
+# ── v2.7.3 — AI/ML provider verifiers ────────────────────────────────────────
+# Each pairs with a v2.7.2 detector. The impact signal for an AI key is usually
+# the billing surface it exposes (tier + remaining quota), so the assertions
+# check that the identity label actually carries that detail.
+
+@pytest.mark.asyncio
+async def test_elevenlabs_reports_tier_and_quota():
+    payload = {"subscription": {"tier": "creator",
+                                "character_count": 12345, "character_limit": 100000}}
+    client = _MockClient(_Resp(200, payload))
+    res = await verifier.verify_finding_detailed("ElevenLabs API Key", "sk_x", client)
+    assert res.status == "verified"
+    assert "creator tier" in res.detail
+    assert "quota 12,345/100,000" in res.detail
+    assert client.calls[0][1] == "https://api.elevenlabs.io/v1/user"
+    # the key must go to its own issuer as a header, never to the scan target
+    assert client.calls[0][2]["headers"]["xi-api-key"] == "sk_x"
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_dead_key_is_unverified():
+    client = _MockClient(_Resp(401))
+    res = await verifier.verify_finding_detailed("ElevenLabs API Key", "sk_x", client)
+    assert res.status == "unverified"
+    assert res.detail == ""
+
+
+@pytest.mark.asyncio
+async def test_huggingface_reports_user_role_and_orgs():
+    payload = {"name": "acme-bot", "orgs": [{"name": "acme"}, {"name": "acme-labs"}],
+               "auth": {"accessToken": {"role": "write"}}}
+    res = await verifier.verify_finding_detailed(
+        "Hugging Face Access Token", "hf_x", _MockClient(_Resp(200, payload)))
+    assert res.status == "verified"
+    assert "@acme-bot" in res.detail
+    assert "role: write" in res.detail
+    assert "2 org(s)" in res.detail
+
+
+@pytest.mark.asyncio
+async def test_openrouter_reports_credit_exposure():
+    payload = {"data": {"label": "prod-key", "usage": 42, "limit": 500}}
+    res = await verifier.verify_finding_detailed(
+        "OpenRouter API Key", "sk-or-v1-x", _MockClient(_Resp(200, payload)))
+    assert "key: prod-key" in res.detail
+    assert "quota 42/500" in res.detail
+
+
+@pytest.mark.asyncio
+async def test_replicate_reports_account():
+    payload = {"username": "acme", "type": "organization"}
+    res = await verifier.verify_finding_detailed(
+        "Replicate API Token", "r8_x", _MockClient(_Resp(200, payload)))
+    assert "@acme" in res.detail and "organization" in res.detail
+
+
+@pytest.mark.asyncio
+async def test_xai_blocked_key_counts_as_unverified():
+    """A 200 that reports the key as blocked must not be called live."""
+    payload = {"name": "old-key", "api_key_blocked": True}
+    res = await verifier.verify_finding_detailed(
+        "xAI API Key", "xai-x", _MockClient(_Resp(200, payload)))
+    assert res.status == "unverified"
+
+
+@pytest.mark.asyncio
+async def test_groq_and_pinecone_verify():
+    groq = await verifier.verify_finding_detailed(
+        "Groq API Key", "gsk_x", _MockClient(_Resp(200, {"data": [{"id": "a"}, {"id": "b"}]})))
+    assert groq.status == "verified" and "2 models" in groq.detail
+    pc = await verifier.verify_finding_detailed(
+        "Pinecone API Key", "pcsk_x", _MockClient(_Resp(200, {"indexes": [{"name": "i"}]})))
+    assert pc.status == "verified" and "1 index" in pc.detail
+
+
+@pytest.mark.asyncio
+async def test_ai_verifiers_fail_closed_on_exception():
+    class _Boom:
+        async def get(self, *a, **kw):
+            raise RuntimeError("network down")
+
+    for stype, val in [("ElevenLabs API Key", "sk_x"), ("Groq API Key", "gsk_x"),
+                       ("OpenRouter API Key", "sk-or-x"), ("Pinecone API Key", "pcsk_x")]:
+        res = await verifier.verify_finding_detailed(stype, val, _Boom())
+        assert res.status == "unverified", stype
+
+
+def test_every_ai_detector_has_a_verifier_or_is_documented():
+    """Guard: a new AI detector should ship with a verifier where one is safe."""
+    import scanner
+    ai = {"ElevenLabs API Key", "Groq API Key", "Hugging Face Access Token",
+          "Replicate API Token", "OpenRouter API Key", "xAI API Key", "Pinecone API Key"}
+    names = {p.name for p in scanner.SECRET_PATTERNS}
+    assert ai <= names, "detector missing from scanner"
+    for t in ai:
+        assert verifier.is_supported(t), f"{t} has no verifier"

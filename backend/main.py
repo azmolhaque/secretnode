@@ -42,10 +42,11 @@ load_dotenv()
 # 3.12+, and uvicorn already selects the event loop itself via --loop (auto/uvloop),
 # so the speed-up is preserved without a module-level global side effect.
 
-from scanner import run_scan, ScanState
+from scanner import run_scan, ScanState, load_asset_cache, drain_asset_cache
 import orchestrator
 from storage import (
     init_db, save_scan, load_scans, load_scan, get_previous_scan_for_target,
+    get_asset_cache, save_asset_cache,
     mark_false_positive, unmark_false_positive, get_suppressed_fingerprints,
     list_false_positives,
 )
@@ -327,6 +328,10 @@ async def start_scan(request: ScanRequest, http_request: Request) -> dict[str, A
             )
             suppressed_fps = await get_suppressed_fingerprints(request.target_url)
 
+            # Prime the conditional-GET cache so unchanged, previously-clean
+            # assets can be skipped instead of re-downloaded.
+            load_asset_cache(await get_asset_cache(request.target_url))
+
             result = await run_scan(
                 target_url=request.target_url,
                 scan_id=scan_id,
@@ -340,6 +345,7 @@ async def start_scan(request: ScanRequest, http_request: Request) -> dict[str, A
             )
             _registry[scan_id]["meta"] = result
             await save_scan(scan_id, result)
+            await save_asset_cache(request.target_url, drain_asset_cache())
         except asyncio.CancelledError:
             logger.info("Scan %s task cancelled", scan_id)
             await manager.broadcast_scan(scan_id, {

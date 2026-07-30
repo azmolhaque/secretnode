@@ -26,17 +26,25 @@ repo scanning; win the *web-surface* niche.
   never silently dropped, SSRF guard, same-scope restriction, auth, redaction-before-dispatch.
 
 ## Honest gaps vs. 2026 SOTA (grounded in the code)
-1. **Verification depth.** Verifiers return only `verified/unverified`. TruffleHog surfaces the
-   *identity + scopes* a live key maps to (which account, what permissions). That detail is the
-   strongest possible "impact" statement — and Cindrasec sells impact.
+1. ~~**Verification depth.**~~ ✅ **CLOSED.** R1 shipped in v2.6.0 (identity/scope capture) and was
+   completed in **v2.7.3**, which paired a verifier with every AI/ML detector from the v2.7.2 pack.
+   Verifiers now return the *identity + scopes + billing surface* a live key maps to — e.g.
+   "ElevenLabs · creator tier · quota 12,345/100,000" — the strongest impact statement available,
+   and the one Cindrasec reports are built to sell. 29 secret types now have verifiers.
 2. **No FP/FN measurement harness.** There's good FP *handling* but no labeled corpus + precision/recall
    report, so changes aren't measured. Industrial tools track precision/recall on a benchmark.
 3. **Regex robustness.** No ReDoS/catastrophic-backtracking audit or regex timeout; a hostile minified
    bundle could stall a detector. No composite/proximity rules (a Gitleaks 2026 feature) for generic
    high-FP patterns.
-4. **Surface coverage.** Mines JS + source maps well, but modern leaks also hide in inline JSON
-   (`__NEXT_DATA__`, `window.__INITIAL_STATE__`), HTML comments, source-map `sourcesContent`, wasm
-   strings, and common exposed paths (`.env`, `.git/config`, `config.js`, backups). All authorized-only.
+4. ~~**Surface coverage.**~~ ⚠️ **Largely closed — and the original entry overstated it.** Measured
+   against the code: HTML comments and inline JSON were *already* covered, because the whole response
+   body goes through the raw-text pass. Source-map `sourcesContent` was closed in R5. The one real
+   miss was a value whose JSON **escaping** breaks the credential's shape (`\uXXXX` mid-token, as
+   emitted by XSS-safe serializers) — closed in **v2.7.6** by decoding inline SSR state blobs.
+   *Still open:* wasm strings [LOW]. **Deliberately not done:** probing for unlinked paths
+   (`.env`, `.git/config`, backups) is active enumeration, not passive discovery — it would
+   contradict the "passive assessment" statement in every client report. If it is ever added it
+   must be a separate, clearly-labelled opt-in mode, not folded into the default scan.
 5. **Detector breadth.** ~54 patterns vs TruffleHog's 700+. Quality > quantity, but high-impact
    providers are missing (Twilio, GCP service-account JSON, Azure AD, Cloudflare, Shopify, Supabase
    `service_role`, Vercel, Notion). Each new detector should ship *with* a verifier where safe.
@@ -103,7 +111,10 @@ repo scanning; win the *web-surface* niche.
   access"), a "Verified Active" KPI tile, and an honest measured-precision "Detection quality"
   statement (verification-first + CI-gated precision/recall). Turns the engine work into a
   client-ready deliverable. +4 tests.
-- **R10 · Asset caching** (ETag/If-Modified-Since) + per-provider verify concurrency. [LOW]
+- ~~**R10 · Asset caching**~~ ✅ **DONE (v2.7.7)** — conditional GET with a per-target validator
+  cache; a 304 skips an unchanged *and previously clean* asset, but always refetches one that
+  had a finding so nothing silently vanishes from a report. No response bodies cached, by
+  design. *Still open:* per-provider verify concurrency. [LOW]
 - **R11 · Distribution** — PyPI publish, tagged releases, docs. [LOW]
 
 ## Recommended next steps (highest ROI for Cindrasec's stage)

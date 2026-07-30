@@ -13,11 +13,13 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Coroutine
 from urllib.parse import urljoin, urlparse
 
@@ -246,6 +248,11 @@ class ValidatedFinding:
 # Secret Pattern Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
+# The loose keyword=value catch-all. Named here because the de-duplication pass
+# needs to know which detector is the fallback: when a provider-specific detector
+# has already typed a credential, the generic claim on the same value is dropped.
+GENERIC_SECRET_TYPE = "Generic High-Entropy Secret"
+
 SECRET_PATTERNS: list[SecretPattern] = [
     SecretPattern(
         name="AWS Access Key",
@@ -337,7 +344,7 @@ SECRET_PATTERNS: list[SecretPattern] = [
         severity="HIGH",
     ),
     SecretPattern(
-        name="Generic High-Entropy Secret",
+        name=GENERIC_SECRET_TYPE,
         regex=re.compile(
             r"(?i)(?:api[_-]?key|secret|token|password|passwd|auth)\s*[=:]\s*['\"]([A-Za-z0-9\-_.~+/]{20,80})['\"]"
         ),
@@ -380,6 +387,71 @@ SECRET_PATTERNS: list[SecretPattern] = [
         name="Anthropic API Key",
         regex=re.compile(r"\b(sk-ant-[A-Za-z0-9_\-]{20,})\b"),
         description="Anthropic (Claude) API key",
+        severity="CRITICAL",
+    ),
+    # ── AI / ML provider keys ────────────────────────────────────────────────
+    # Modern AI stacks leak these constantly: the key is shipped to the browser
+    # because a frontend calls the provider directly instead of proxying through
+    # a backend. Each pattern below is structural (distinctive prefix + fixed
+    # length), so it stays high-precision without the generic entropy gate.
+    SecretPattern(
+        name="ElevenLabs API Key",
+        regex=re.compile(r"\b(sk_[a-f0-9]{48})\b"),
+        description="ElevenLabs text-to-speech API key",
+        severity="HIGH",
+        remediation=(
+            "Revoke this key in the ElevenLabs dashboard and issue a replacement. A leaked key "
+            "lets anyone consume the account's character quota and credits, generate audio, and "
+            "reach private/cloned voice models. Never ship it to the browser: proxy "
+            "text-to-speech calls through your own backend so the key stays server-side."
+        ),
+    ),
+    SecretPattern(
+        name="Groq API Key",
+        regex=re.compile(r"\b(gsk_[A-Za-z0-9]{52})\b"),
+        description="Groq inference API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Hugging Face Access Token",
+        regex=re.compile(r"\b(hf_[A-Za-z0-9]{34,40})\b"),
+        description="Hugging Face user access token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Replicate API Token",
+        regex=re.compile(r"\b(r8_[A-Za-z0-9]{37,45})\b"),
+        description="Replicate model-inference API token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Perplexity API Key",
+        regex=re.compile(r"\b(pplx-[A-Za-z0-9]{32,64})\b"),
+        description="Perplexity AI API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="xAI API Key",
+        regex=re.compile(r"\b(xai-[A-Za-z0-9]{64,100})\b"),
+        description="xAI (Grok) API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="OpenRouter API Key",
+        regex=re.compile(r"\b(sk-or-v1-[a-f0-9]{64})\b"),
+        description="OpenRouter aggregated-inference API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="LangSmith API Key",
+        regex=re.compile(r"\b(lsv2_(?:pt|sk)_[a-f0-9]{32}_[a-f0-9]{10})\b"),
+        description="LangSmith / LangChain tracing API key",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Pinecone API Key",
+        regex=re.compile(r"\b(pcsk_[A-Za-z0-9_]{40,90})\b"),
+        description="Pinecone vector-database API key",
         severity="CRITICAL",
     ),
     SecretPattern(
@@ -689,6 +761,155 @@ _UA_OVERRIDE = os.environ.get("SECRETNODE_USER_AGENT", "").strip()
 _WAF_BLOCK_CODES = frozenset({401, 403, 406, 429, 503})
 
 
+# ── Politeness: adaptive per-host throttle (v2.7.5) ──────────────────────────
+#
+# Being a good guest on a client's infrastructure is part of the engagement, not
+# an afterthought: an authorized scan that trips rate limiting looks like an
+# attack to their SOC and gets the scanner blocked mid-assessment. Two mechanics:
+#
+#   • Jittered backoff. A deterministic 2**attempt makes every concurrent worker
+#     retry on the same tick — a thundering herd that keeps the host saturated
+#     exactly when it asked for relief. Randomising the delay spreads retries out.
+#   • Adaptive throttle. When a host answers 429/503 we start pacing subsequent
+#     requests to *that host only*, growing the pace while it keeps complaining
+#     and decaying it as it recovers. Cost is zero while a host is healthy.
+
+THROTTLE_MAX_DELAY = _env_float("THROTTLE_MAX_DELAY", 5.0)
+THROTTLE_STEP      = _env_float("THROTTLE_STEP", 0.5)
+RETRY_MAX_BACKOFF  = _env_float("RETRY_MAX_BACKOFF", 30.0)
+
+# host -> current politeness delay in seconds. Module-level so every worker
+# sharing the event loop cooperates on the same host budget.
+_host_delays: dict[str, float] = {}
+
+
+def reset_throttle() -> None:
+    """Clear all learned per-host pacing (used between scans and in tests)."""
+    _host_delays.clear()
+
+
+def _throttle_penalise(host: str) -> float:
+    """Record a rate-limit signal from `host`; return the new delay."""
+    delay = min(_host_delays.get(host, 0.0) + THROTTLE_STEP, THROTTLE_MAX_DELAY)
+    _host_delays[host] = delay
+    return delay
+
+
+def _throttle_reward(host: str) -> None:
+    """A clean response — relax pacing for `host`, forgetting it once healthy."""
+    current = _host_delays.get(host)
+    if current is None:
+        return
+    relaxed = current - (THROTTLE_STEP / 2)
+    if relaxed <= 0:
+        _host_delays.pop(host, None)
+    else:
+        _host_delays[host] = relaxed
+
+
+async def _throttle_wait(host: str) -> None:
+    """Pace a request to a host that has recently rate-limited us."""
+    delay = _host_delays.get(host, 0.0)
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+# ── R10 · conditional fetch (asset caching) ──────────────────────────────────
+#
+# Re-scanning a target refetched every asset from scratch. Most assets do not
+# change between engagements and most contain nothing, so that is wasted
+# bandwidth on the client's servers and wasted CPU on ours.
+#
+# We send If-None-Match / If-Modified-Since and act on a 304 as follows:
+#   • asset was clean last time  -> skip it entirely (unchanged + previously
+#     clean means still clean), returning CACHED_CLEAN.
+#   • asset had a finding        -> refetch unconditionally, so the finding is
+#     reproduced rather than silently vanishing from the report. A finding that
+#     disappears reads as "resolved", which would be a dangerous lie.
+#
+# No response body is ever cached: a client's JavaScript can hold live
+# credentials and we do not keep copies of it. Only validators + a content hash.
+
+ASSET_CACHE_ENABLED = os.environ.get("ASSET_CACHE", "true").lower() == "true"
+
+# Sentinel distinguishing "unchanged, previously clean, skip" from a real body
+# and from a failure (None).
+CACHED_CLEAN = "\x00__SECRETNODE_CACHED_CLEAN__"
+
+# Scan-scoped cache state. Module-level for the same reason _host_delays is:
+# every fetch in a scan shares it without threading a parameter through
+# spider_target and its six call sites.
+_asset_cache_in: dict[str, dict[str, Any]] = {}
+_asset_cache_out: dict[str, dict[str, Any]] = {}
+
+
+def load_asset_cache(entries: dict[str, dict[str, Any]]) -> None:
+    """Prime the conditional-GET cache for a scan."""
+    _asset_cache_in.clear()
+    _asset_cache_in.update(entries or {})
+    _asset_cache_out.clear()
+
+
+def drain_asset_cache() -> dict[str, dict[str, Any]]:
+    """Validators observed during this scan, for persisting afterwards."""
+    return dict(_asset_cache_out)
+
+
+def extract_headers_without_validators(headers: dict[str, str] | None) -> dict[str, str] | None:
+    """Strip conditional-request headers so a refetch actually returns a body."""
+    if not headers:
+        return None
+    stripped = {k: v for k, v in headers.items()
+                if k.lower() not in ("if-none-match", "if-modified-since")}
+    return stripped or None
+
+
+def _usable_body(body: str | None) -> bool:
+    """A real, scannable body — not a failure and not a cache hit."""
+    return bool(body) and body != CACHED_CLEAN
+
+
+def mark_asset_dirty(url: str) -> None:
+    """Record that `url` yielded a finding, so a future 304 refetches it
+    instead of skipping — a finding must never silently vanish."""
+    if url in _asset_cache_out:
+        _asset_cache_out[url]["was_clean"] = False
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff with equal jitter, capped.
+
+    Equal jitter (half fixed, half random) keeps a guaranteed minimum pause while
+    still de-synchronising concurrent workers, which full jitter alone does not.
+    """
+    ceiling = min(RETRY_BACKOFF_BASE ** attempt, RETRY_MAX_BACKOFF)
+    return (ceiling / 2) + random.uniform(0, ceiling / 2)
+
+
+def _parse_retry_after(raw: str | None, fallback: float) -> float:
+    """Parse a Retry-After header into seconds. Never raises.
+
+    RFC 7231 allows either delta-seconds *or* an HTTP-date. Before v2.7.5 this was
+    parsed with a bare float(), so a spec-compliant date raised ValueError, hit the
+    generic handler, and made the scanner abandon the asset outright — a false
+    negative caused by the server behaving correctly.
+    """
+    if not raw:
+        return fallback
+    raw = raw.strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+    except Exception:  # noqa: BLE001 — a malformed header must never break a scan
+        return fallback
+
+
 def _browser_headers(user_agent: str) -> dict[str, str]:
     """A realistic modern-Chrome header set. Client-Hints + Sec-Fetch-* are what
     modern WAFs look for; sending them lets an authorized scan reach a
@@ -762,6 +983,8 @@ async def fetch_url(
     url: str,
     semaphore: asyncio.Semaphore,
     broadcast: Broadcaster | None = None,
+    cache: dict[str, dict[str, Any]] | None = None,
+    cache_out: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str, str | None]:
     """
     Fetch a URL with retry + exponential backoff.
@@ -771,10 +994,14 @@ async def fetch_url(
     giving up, and emit a diagnostic that names the likely cause instead of a
     bare "failed". Respects 429 Retry-After. Returns (url, body) or (url, None).
     """
+    host = urlparse(url).netloc
     async with semaphore:
         waf_block_status: int | None = None
+        revalidate = True
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
+                # Pace ourselves if this host has recently rate-limited us.
+                await _throttle_wait(host)
                 if broadcast:
                     await broadcast({
                         "type": "log",
@@ -786,19 +1013,61 @@ async def fetch_url(
                 extra_headers = None
                 if attempt > 1 and waf_block_status and not _UA_OVERRIDE:
                     extra_headers = _browser_headers(_USER_AGENTS[(attempt - 1) % len(_USER_AGENTS)])
+
+                # Conditional GET: only on the first attempt, and only while the
+                # cache is still trusted. `revalidate` flips off once we have
+                # decided we must see the body regardless.
+                _cin = cache if cache is not None else _asset_cache_in
+                _cout = cache_out if cache_out is not None else _asset_cache_out
+                entry = _cin.get(url) if (_cin and ASSET_CACHE_ENABLED) else None
+                if entry and revalidate:
+                    cond = dict(extra_headers or {})
+                    if entry.get("etag"):
+                        cond["If-None-Match"] = entry["etag"]
+                    if entry.get("last_modified"):
+                        cond["If-Modified-Since"] = entry["last_modified"]
+                    if len(cond) > len(extra_headers or {}):
+                        extra_headers = cond
+
                 response = await client.get(url, headers=extra_headers)
 
-                if response.status_code == 429:
-                    retry_after = float(
-                        response.headers.get("Retry-After", 10 * attempt)
+                if response.status_code == 304:
+                    _throttle_reward(host)
+                    if entry and entry.get("was_clean", True):
+                        # Unchanged and previously clean -> nothing to re-scan.
+                        _cout[url] = dict(entry)
+                        return url, CACHED_CLEAN
+                    # Either the asset yielded a finding last time, or the server
+                    # sent 304 unprompted. Both need the body: a finding that
+                    # vanished from a report reads as "resolved", which would be
+                    # a dangerous lie. Re-issue immediately WITHOUT the validators
+                    # rather than looping — consuming a retry here means that with
+                    # RETRY_ATTEMPTS=1 the refetch never happens and the asset is
+                    # silently lost.
+                    revalidate = False
+                    response = await client.get(
+                        url, headers=extract_headers_without_validators(extra_headers)
                     )
+                    if response.status_code == 304:
+                        # Server insists nothing changed even unconditionally —
+                        # treat as unreachable rather than spin.
+                        return url, None
+
+                if response.status_code == 429:
+                    retry_after = _parse_retry_after(
+                        response.headers.get("Retry-After"), 10.0 * attempt
+                    )
+                    paced = _throttle_penalise(host)
                     if broadcast:
                         await broadcast({
                             "type": "log",
                             "level": "WARN",
-                            "message": f"429 rate-limited on {url} — backing off {retry_after:.0f}s",
+                            "message": (
+                                f"429 rate-limited on {url} — backing off "
+                                f"{retry_after:.0f}s; pacing {host} at {paced:.1f}s/request."
+                            ),
                         })
-                    await asyncio.sleep(min(retry_after, 30.0))
+                    await asyncio.sleep(min(retry_after, RETRY_MAX_BACKOFF))
                     continue
 
                 if response.status_code in (404, 410):
@@ -806,6 +1075,9 @@ async def fetch_url(
 
                 if response.status_code in _WAF_BLOCK_CODES:
                     waf_block_status = response.status_code
+                    if response.status_code == 503:
+                        # Overloaded, not hostile — slow down rather than hammer.
+                        _throttle_penalise(host)
                     server = response.headers.get("server", "")
                     hint = f" (server: {server})" if server else ""
                     if attempt < RETRY_ATTEMPTS:
@@ -817,7 +1089,7 @@ async def fetch_url(
                                     f"WAF/CDN challenge; retrying with a different browser fingerprint."
                                 ),
                             })
-                        await asyncio.sleep(RETRY_BACKOFF_BASE ** attempt)
+                        await asyncio.sleep(_backoff_delay(attempt))
                         continue
                     if broadcast:
                         await broadcast({
@@ -832,6 +1104,8 @@ async def fetch_url(
                     return url, None
 
                 response.raise_for_status()
+                # Clean response — let this host's pacing relax back toward zero.
+                _throttle_reward(host)
 
                 cl = int(response.headers.get("content-length", 0))
                 if cl > MAX_ASSET_BYTES:
@@ -849,7 +1123,21 @@ async def fetch_url(
                 # Guard against a chunked/undeclared body that exceeds the cap.
                 text = response.text
                 if len(text) > MAX_ASSET_BYTES:
-                    return url, text[:MAX_ASSET_BYTES]
+                    text = text[:MAX_ASSET_BYTES]
+                if ASSET_CACHE_ENABLED:
+                    et = response.headers.get("etag")
+                    lm = response.headers.get("last-modified")
+                    if et or lm:
+                        _cout[url] = {
+                            "etag": et,
+                            "last_modified": lm,
+                            "content_hash": hashlib.sha256(
+                                text.encode("utf-8", "replace")
+                            ).hexdigest()[:32],
+                            # Findings are unknown at fetch time; the scan loop
+                            # corrects this once the asset has been scanned.
+                            "was_clean": True,
+                        }
                 return url, text
 
             except httpx.TimeoutException:
@@ -879,8 +1167,7 @@ async def fetch_url(
                 return url, None
 
             if attempt < RETRY_ATTEMPTS:
-                backoff = RETRY_BACKOFF_BASE ** attempt
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(_backoff_delay(attempt))
 
         return url, None
 
@@ -997,6 +1284,107 @@ def looks_like_sourcemap(url: str, body: str) -> bool:
         return True
     head = body[:4000]
     return '"sourcesContent"' in head or ('"mappings"' in head and '"version"' in head)
+
+
+# ── Inline SSR state blobs (v2.7.6) ──────────────────────────────────────────
+#
+# Server-rendered apps embed their bootstrap state in the HTML: Next.js writes
+# <script id="__NEXT_DATA__" type="application/json">, Nuxt writes
+# window.__NUXT__, Redux-style apps write window.__INITIAL_STATE__. That blob is
+# built server-side and regularly carries config a developer never meant to ship.
+#
+# The raw HTML is already scanned as text, so a plainly-embedded secret is caught
+# today. What is missed is a value whose JSON *escaping* breaks the secret's
+# shape — a \uXXXX-escaped character mid-token, or the < /   escaping
+# that XSS-safe serializers (Next.js's htmlEscapeJsonString) apply. The regex
+# sees "sk-ant-A1b2-C3d4" and no longer recognises the credential.
+#
+# The fix is the same one already used for source maps: decode the JSON and scan
+# the *decoded* string values as real text. Purely local — no new requests, so
+# the scan stays passive.
+
+SCAN_INLINE_JSON = os.environ.get("SCAN_INLINE_JSON", "true").lower() == "true"
+MAX_INLINE_JSON_BYTES = _env_int("MAX_INLINE_JSON_BYTES", 2_000_000)
+
+# Inline <script> bodies. Bounded and non-greedy: no nested quantifier, so a
+# hostile page cannot drive catastrophic backtracking.
+# Lazy match to the literal </script> terminator. A [^<] class would truncate at
+# the first raw "<", which JSON blobs contain constantly (prose like "a < b",
+# embedded HTML fragments) — that silently lost the rest of the blob. Lazy
+# matching to a fixed terminator is linear-time, so this stays ReDoS-free.
+_INLINE_SCRIPT_RE = re.compile(
+    r"<script\b[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL
+)
+# A JSON object assigned to a known SSR state global, e.g. window.__NUXT__={…}
+_STATE_ASSIGN_RE = re.compile(
+    r"(?:window\.)?(?:__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|__APOLLO_STATE__"
+    r"|__PRELOADED_STATE__|__remixContext)\s*=\s*(\{[^\0]{0,2000000})",
+)
+
+
+def _json_string_values(node: Any, out: list[str], budget: list[int]) -> None:
+    """Walk a decoded JSON document, collecting string values (and keys, which
+    sometimes hold the credential). Bounded by a shared byte budget."""
+    if budget[0] <= 0:
+        return
+    if isinstance(node, str):
+        budget[0] -= len(node)
+        out.append(node)
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            if budget[0] <= 0:
+                return
+            if isinstance(k, str):
+                out.append(k)
+            _json_string_values(v, out, budget)
+    elif isinstance(node, list):
+        for v in node:
+            if budget[0] <= 0:
+                return
+            _json_string_values(v, out, budget)
+
+
+def extract_inline_json_strings(html: str) -> str:
+    """Decode inline SSR/JSON script blobs and return their string values as
+    scannable text, one per line.
+
+    Returns "" when nothing parses. Fully defensive: any malformed blob is
+    skipped rather than failing the scan.
+    """
+    if not SCAN_INLINE_JSON or not html:
+        return ""
+    candidates: list[str] = []
+    for m in _INLINE_SCRIPT_RE.finditer(html):
+        body = m.group(1).strip()
+        if not body:
+            continue
+        if body.startswith(("{", "[")):
+            candidates.append(body)
+            continue
+        assign = _STATE_ASSIGN_RE.search(body)
+        if assign:
+            candidates.append(assign.group(1))
+
+    values: list[str] = []
+    budget = [MAX_INLINE_JSON_BYTES]
+    for blob in candidates:
+        if budget[0] <= 0:
+            break
+        # A state assignment often ends in ";" or trailing JS — walk back to the
+        # last closing brace so json.loads gets a complete document.
+        text = blob
+        if not text.endswith(("}", "]")):
+            cut = max(text.rfind("}"), text.rfind("]"))
+            if cut == -1:
+                continue
+            text = text[: cut + 1]
+        try:
+            doc = json.loads(text)
+        except Exception:  # noqa: BLE001 — a non-JSON blob is simply not our business
+            continue
+        _json_string_values(doc, values, budget)
+
+    return "\n".join(values)
 
 
 def extract_sourcemap_sources(map_body: str, map_url: str) -> list[tuple[str, str]]:
@@ -1129,7 +1517,9 @@ async def spider_target(
             })
         return []
 
-    assets: list[tuple[str, str]] = [(root_url, html_body)]
+    assets: list[tuple[str, str]] = (
+        [(root_url, html_body)] if _usable_body(html_body) else []
+    )
     html_pages: list[tuple[str, str]] = [(root_url, html_body)]
     visited_pages: set[str] = {root_url}
     all_js_urls: set[str] = set(extract_js_urls(html_body, target_url))
@@ -1144,7 +1534,7 @@ async def spider_target(
             fetched_pages = await asyncio.gather(*fetch_tasks, return_exceptions=False)
             for page_url, page_body in fetched_pages:
                 visited_pages.add(page_url)
-                if not page_body:
+                if not _usable_body(page_body):
                     continue
                 html_pages.append((page_url, page_body))
                 assets.append((page_url, page_body))
@@ -1169,7 +1559,7 @@ async def spider_target(
         tasks = [fetch_url(client, u, semaphore, broadcast) for u in js_urls]
         fetched = await asyncio.gather(*tasks, return_exceptions=False)
         for js_url, js_body in fetched:
-            if js_body:
+            if _usable_body(js_body):
                 assets.append((js_url, js_body))
                 js_bodies.append((js_url, js_body))
 
@@ -1192,7 +1582,7 @@ async def spider_target(
             map_tasks = [fetch_url(client, u, semaphore, broadcast) for u in map_urls]
             fetched_maps = await asyncio.gather(*map_tasks, return_exceptions=False)
             for map_url, map_body in fetched_maps:
-                if map_body:
+                if _usable_body(map_body):
                     assets.append((map_url, map_body))
 
     # Broadcast every non-HTML asset we actually collected (JS + source maps),
@@ -1314,6 +1704,15 @@ def extract_secrets(
     # Also inspect base64-decoded blobs for secrets hidden inside encoded strings.
     for decoded in _decode_base64_blobs(text):
         findings.extend(_scan_text(scan_id, target_url, source_url, decoded, decoded=True))
+    # Inline SSR state (__NEXT_DATA__, __NUXT__, __INITIAL_STATE__ …): decode the
+    # JSON and scan its string values, so a credential mangled by JSON escaping
+    # is still recognised. Only worth doing on markup.
+    if SCAN_INLINE_JSON and "<script" in text[:MAX_INLINE_JSON_BYTES].lower():
+        decoded_json = extract_inline_json_strings(text)
+        if decoded_json:
+            findings.extend(
+                _scan_text(scan_id, target_url, source_url, decoded_json, decoded=True)
+            )
     # De-duplicate by fingerprint (same secret found raw and base64-encoded = one finding).
     seen: set[str] = set()
     unique: list[RawFinding] = []
@@ -1323,7 +1722,34 @@ def extract_secrets(
             continue
         seen.add(fp)
         unique.append(f)
-    return unique
+    return _collapse_generic_duplicates(unique)
+
+
+def _collapse_generic_duplicates(findings: list[RawFinding]) -> list[RawFinding]:
+    """Collapse one credential matched by several detectors into a single finding.
+
+    The generic keyword=value catch-all matches loosely and therefore also fires on
+    secrets a provider-specific detector already typed precisely. Reporting both is
+    wrong three ways: it double-counts the exposure in client reports, spends a
+    second AI-validation call on the same string, and leaves two conflicting
+    severities for one credential.
+
+    Identity here is (source_url, raw_match) — the same value at the same location.
+    When several detectors claim it, the typed/structural one wins over the generic
+    catch-all, because it carries the accurate severity and provider-specific
+    remediation. Order is otherwise preserved.
+    """
+    typed_locations = {
+        (f.source_url, f.raw_match)
+        for f in findings
+        if f.secret_type != GENERIC_SECRET_TYPE
+    }
+    return [
+        f
+        for f in findings
+        if f.secret_type != GENERIC_SECRET_TYPE
+        or (f.source_url, f.raw_match) not in typed_locations
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1809,6 +2235,9 @@ async def run_scan(
     global _ai_disabled_reason
     _ai_disabled_reason = None
 
+    # Pacing learned from a previous target must not penalise this one.
+    reset_throttle()
+
     async def emit(event: dict[str, Any]) -> None:
         if broadcast:
             await broadcast(event)
@@ -1875,7 +2304,7 @@ async def run_scan(
                 )
                 added = 0
                 for u, body in fetched:
-                    if body:
+                    if _usable_body(body):
                         assets.append((u, body))
                         added += 1
                 await emit({
@@ -1912,7 +2341,7 @@ async def run_scan(
                     *(fetch_url(client, u, semaphore, broadcast) for u in js_eps)
                 )
                 for u, body in fetched:
-                    if body:
+                    if _usable_body(body):
                         assets.append((u, body))
 
             result["discovered_endpoints"] = same_eps[:MAX_DISCOVERED_ENDPOINTS]
@@ -1970,6 +2399,9 @@ async def run_scan(
 
             found = extract_secrets(scan_id, target_url, source_url, body)
             if found:
+                # This asset yielded something: a future 304 must refetch it
+                # rather than skip, so the finding cannot silently disappear.
+                mark_asset_dirty(source_url)
                 await emit({
                     "type": "log", "level": "WARN",
                     "message": f"Found {len(found)} potential match(es) in {source_url}",
