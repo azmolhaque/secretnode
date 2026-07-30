@@ -180,6 +180,72 @@ _registry: dict[str, dict[str, Any]] = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Credential redaction at the API boundary
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The registry and SQLite hold the full matched value on purpose: report
+# generation needs it (report.py masks on the way out, and REPORT_FULL_SECRETS
+# lets an operator opt into the real value in a report they control), and the
+# fingerprint used for false-positive suppression is derived from it.
+#
+# What must never happen is that value reaching a browser or a WebSocket
+# subscriber. Until now it did: /api/scans/{id} returned the finding dicts
+# verbatim and the dashboard's finding-detail modal rendered `raw_match` under
+# a "MATCHED VALUE (PARTIAL)" heading that was simply not true — a 51-character
+# key fits inside the 60-character client-side slice. The dashboard is served
+# over whatever transport the operator deployed it on, gets screenshotted into
+# tickets, and is the one surface a client is most likely to be looking at
+# over someone's shoulder.
+#
+# So: redact here, at the boundary, and leave storage untouched.
+
+_FINDING_LISTS = ("confirmed_findings", "needs_review_findings")
+
+
+def public_finding(finding: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a finding safe to hand to an API/WebSocket client."""
+    raw = finding.get("raw_match")
+    if not raw:
+        return finding
+    # mask_secret, not redact_secret: REPORT_FULL_SECRETS is an opt-in for a
+    # report the operator generates and controls, not for every dashboard
+    # session and WebSocket subscriber.
+    return {**finding, "raw_match": report_gen.mask_secret(str(raw))}
+
+
+def public_scan(scan: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a scan record with every credential masked."""
+    if not isinstance(scan, dict):
+        return scan
+    out = dict(scan)
+    for key in _FINDING_LISTS:
+        findings = out.get(key)
+        if isinstance(findings, list):
+            out[key] = [public_finding(f) if isinstance(f, dict) else f
+                        for f in findings]
+    return out
+
+
+def public_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Redact live scan events before they go out over a WebSocket.
+
+    Two shapes carry findings, and missing the second is easy: the per-finding
+    events wrap one finding under "data", but `scan_complete` ships the entire
+    result dict under "result" — including both finding lists. Scrubbing only
+    the former left the whole unmasked set going out in the final frame of
+    every scan.
+    """
+    etype = event.get("type")
+    if etype in ("finding", "finding_needs_review"):
+        data = event.get("data")
+        return {**event, "data": public_finding(data)} if isinstance(data, dict) else event
+    if etype in ("scan_complete", "deep_scan_complete"):
+        result = event.get("result")
+        return {**event, "result": public_scan(result)} if isinstance(result, dict) else event
+    return event
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Lifespan
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -317,7 +383,7 @@ async def start_scan(request: ScanRequest, http_request: Request) -> dict[str, A
     state   = ScanState()
 
     async def broadcaster(event: dict[str, Any]) -> None:
-        await manager.broadcast_scan(scan_id, event)
+        await manager.broadcast_scan(scan_id, public_event(event))
 
     async def _run() -> None:
         try:
@@ -427,7 +493,7 @@ async def start_deep_scan(request: DeepScanRequest, http_request: Request) -> di
     scan_id = str(uuid.uuid4())
 
     async def broadcaster(event: dict[str, Any]) -> None:
-        await manager.broadcast_scan(scan_id, event)
+        await manager.broadcast_scan(scan_id, public_event(event))
 
     async def _run() -> None:
         try:
@@ -495,7 +561,7 @@ async def list_scans(
 ) -> dict[str, Any]:
     """List known scans for this session (in-memory)."""
     scans = [
-        entry["meta"]
+        public_scan(entry["meta"])
         for entry in list(_registry.values())[offset: offset + limit]
     ]
     return {"scans": scans, "count": len(scans)}
@@ -507,7 +573,7 @@ async def scan_history(
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     """List all scans ever run, persisted in SQLite — survives restarts."""
-    scans = await load_scans(limit=limit, offset=offset)
+    scans = [public_scan(s) for s in await load_scans(limit=limit, offset=offset)]
     return {"scans": scans, "count": len(scans)}
 
 
@@ -515,14 +581,14 @@ async def scan_history(
 async def get_scan(scan_id: str) -> dict[str, Any]:
     entry = _registry.get(scan_id)
     if entry:
-        meta = entry["meta"].copy()
+        meta = public_scan(entry["meta"])
         task: asyncio.Task = entry["task"]
         if task.done():
             meta["status"] = "complete" if not task.cancelled() else "cancelled"
         return meta
     persisted = await load_scan(scan_id)
     if persisted:
-        return persisted
+        return public_scan(persisted)
     raise HTTPException(status_code=404, detail="Scan not found")
 
 
@@ -538,11 +604,15 @@ async def get_scan_status(scan_id: str) -> dict[str, Any]:
     return {
         "scan_id": scan_id,
         "status":  status,
-        "meta":    entry["meta"],
+        "meta":    public_scan(entry["meta"]),
     }
 
 
 async def _resolve_scan(scan_id: str) -> dict[str, Any]:
+    """Fetch the *unredacted* scan record for report generation. Every report
+    format masks the credential itself (report.redact_secret), so this is the
+    one path that must not pre-redact — otherwise a report would show a mask of
+    a mask, and REPORT_FULL_SECRETS would have nothing left to reveal."""
     entry = _registry.get(scan_id)
     if entry:
         return entry["meta"]
@@ -594,7 +664,7 @@ async def get_scan_report(
         return Response(content=body, media_type="application/sarif+json", headers={
             "Content-Disposition": f'attachment; filename="secretnode_report_{scan_id[:8]}.sarif"'
         })
-    return JSONResponse(content=scan)
+    return JSONResponse(content=report_gen.generate_json_report(scan))
 
 
 @app.post("/api/findings/suppress", dependencies=[Depends(require_api_key)])
@@ -638,7 +708,7 @@ async def list_suppressed_findings(
 @app.get("/api/active", dependencies=[Depends(require_api_key)])
 async def active_scans() -> dict[str, Any]:
     active = [
-        entry["meta"]
+        public_scan(entry["meta"])
         for entry in _registry.values()
         if not entry["task"].done()
     ]
