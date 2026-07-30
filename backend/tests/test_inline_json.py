@@ -115,3 +115,22 @@ def test_can_be_disabled_by_config():
         ) == ""
     finally:
         scanner.SCAN_INLINE_JSON = original
+
+
+# ── v2.7.8 regression: raw "<" inside a JSON blob ────────────────────────────
+
+def test_raw_angle_bracket_in_blob_does_not_truncate():
+    """The original [^<] class stopped at the first raw '<', silently losing the
+    rest of the blob. JSON contains '<' constantly: prose, embedded HTML."""
+    for blob in [
+        '{"desc":"a < b","k":"' + ESC + '"}',
+        '{"html":"<b>hi</b>","k":"' + ESC + '"}',
+        '{"tmpl":"<div class=\\"x\\">","k":"' + ESC + '"}',
+    ]:
+        html = '<script type="application/json">' + blob + "</script>"
+        assert "Anthropic API Key" in _hits(html), blob[:40]
+
+
+def test_multiline_blob_is_matched():
+    html = '<script type="application/json">\n{\n  "k": "' + ESC + '"\n}\n</script>'
+    assert "Anthropic API Key" in _hits(html)

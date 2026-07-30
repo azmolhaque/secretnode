@@ -157,3 +157,54 @@ def test_can_be_disabled_by_config():
         assert "If-None-Match" not in c.requests[0]["headers"]
     finally:
         scanner.ASSET_CACHE_ENABLED = original
+
+
+# ── v2.7.8 regressions in the 304 path ───────────────────────────────────────
+
+def test_dirty_304_refetches_even_with_one_retry_attempt():
+    """The refetch must not consume a retry attempt.
+
+    With RETRY_ATTEMPTS=1 the `continue`-based implementation never re-issued the
+    request, so a previously-dirty asset was dropped — the exact "finding
+    silently vanishes" failure the cache is supposed to prevent.
+    """
+    original = scanner.RETRY_ATTEMPTS
+    try:
+        scanner.RETRY_ATTEMPTS = 1
+        scanner.load_asset_cache({
+            "https://t/app.js": {"etag": '"v1"', "last_modified": None,
+                                 "content_hash": "h", "was_clean": False}
+        })
+        c = _Client(_Resp(304, "", {}), _Resp(200, "SECRET BODY", {"etag": '"v1"'}))
+        url, body = _fetch(c)
+        assert body == "SECRET BODY"
+        assert len(c.requests) == 2
+        assert "If-None-Match" not in c.requests[1]["headers"]
+    finally:
+        scanner.RETRY_ATTEMPTS = original
+
+
+def test_unprompted_304_without_cache_entry_refetches():
+    """A server may answer 304 we never asked for; don't burn a retry on it."""
+    scanner.load_asset_cache({})
+    c = _Client(_Resp(304, "", {}), _Resp(200, "body", {}))
+    url, body = _fetch(c)
+    assert body == "body"
+
+
+def test_server_insisting_on_304_terminates():
+    """Unconditional request still 304 -> give up, never spin."""
+    scanner.load_asset_cache({})
+    c = _Client(_Resp(304, "", {}), _Resp(304, "", {}))
+    url, body = _fetch(c)
+    assert body is None
+    assert len(c.requests) == 2
+
+
+def test_validator_stripping_helper():
+    h = {"User-Agent": "x", "If-None-Match": '"v1"', "If-Modified-Since": "date"}
+    out = scanner.extract_headers_without_validators(h)
+    assert out == {"User-Agent": "x"}
+    assert scanner.extract_headers_without_validators(None) is None
+    assert scanner.extract_headers_without_validators(
+        {"If-None-Match": '"v"'}) is None

@@ -25,6 +25,8 @@ negative plants none):
 
 from __future__ import annotations
 
+import os
+
 from bench.corpus import CORPUS, Sample
 from scanner import extract_secrets
 
@@ -96,5 +98,32 @@ def format_report(m: dict) -> str:
     return "\n".join(lines)
 
 
+# Quality floor enforced in CI. A detector change that drops below either bar
+# fails the build instead of silently shipping: a scanner's whole value is that
+# its findings can be trusted, so precision regressions are release-blocking.
+MIN_PRECISION = float(os.environ.get("BENCH_MIN_PRECISION", "1.0"))
+MIN_RECALL    = float(os.environ.get("BENCH_MIN_RECALL", "1.0"))
+
+
+def main() -> int:
+    m = evaluate()
+    print(format_report(m))
+    failures = []
+    if m["precision"] < MIN_PRECISION:
+        failures.append(f"precision {m['precision']:.3f} < required {MIN_PRECISION:.3f}")
+    if m["recall"] < MIN_RECALL:
+        failures.append(f"recall {m['recall']:.3f} < required {MIN_RECALL:.3f}")
+    if failures:
+        print("\nDETECTION QUALITY GATE FAILED:")
+        for f in failures:
+            print(f"  ✗ {f}")
+        print("\nEither fix the detector, or — if the corpus is wrong — update it "
+              "deliberately in the same commit and say why.")
+        return 1
+    print("\n  quality gate: PASS "
+          f"(precision >= {MIN_PRECISION:.2f}, recall >= {MIN_RECALL:.2f})")
+    return 0
+
+
 if __name__ == "__main__":  # pragma: no cover
-    print(format_report(evaluate()))
+    raise SystemExit(main())

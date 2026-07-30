@@ -3,6 +3,40 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.8] — Pre-release review: three real bugs, and a quality gate that can fail
+
+A deliberate self-review of everything shipped in v2.7.2–v2.7.7 before opening the PR. It found
+three genuine defects — two of them in the very code written to prevent that class of failure —
+and one process gap that mattered more than any of them.
+
+### Fixed
+- **Inline-JSON extraction truncated at the first raw `<`.** `_INLINE_SCRIPT_RE` used a `[^<]`
+  character class, so any blob containing a literal `<` — prose like `"a < b"`, embedded HTML
+  fragments, templates — was cut short and failed to parse, losing every secret after that point.
+  Now lazily matched to the `</script>` terminator (linear-time, still ReDoS-free: verified at
+  0.18s on hostile input).
+- **A previously-dirty asset could be lost on 304 when `RETRY_ATTEMPTS=1`.** The refetch was done
+  via `continue`, which consumed a retry attempt; with only one attempt configured the request was
+  never re-issued and the asset was dropped — **the exact "a finding silently vanishes" failure
+  the cache was designed to prevent.** The unconditional refetch now happens inline.
+- **An unprompted `304` with no cache entry burned a retry.** Now refetched immediately, and a
+  server that answers 304 even unconditionally terminates instead of spinning.
+
+### Added — the detection quality gate is now real
+- **The benchmark corpus covers this session's work.** 27 → **45 samples**. All nine v2.7.2 AI/ML
+  detectors, the v2.7.6 inline-SSR path, and **eight hard negatives** chosen to be structurally
+  confusable with the new patterns: `sk_` + wrong-length hex, a 64-hex SHA digest that resembles an
+  OpenRouter key, provider-shaped placeholders, benign inline JSON. Shipping nine detectors with
+  zero corpus coverage meant the "measured precision" claim did not cover them.
+- **`make bench` can fail.** It previously printed a report and always exited 0, so it could not
+  block anything. It now enforces `BENCH_MIN_PRECISION` / `BENCH_MIN_RECALL` (default 1.0), prints
+  the offending samples, and exits non-zero.
+- **CI runs it.** A precision regression is now release-blocking. Verified end to end by
+  deliberately loosening the ElevenLabs regex: precision falls 1.000 → 0.917, the two false
+  positives are named, and the build fails.
+
+Suite **337 → 349**, all green; ruff clean; bench 1.000/1.000 on the larger corpus.
+
 ## [2.7.7] — R10: asset caching for re-scans
 
 Closes roadmap item **R10**. Re-scanning a target refetched every asset from scratch — wasted

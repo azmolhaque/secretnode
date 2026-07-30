@@ -855,6 +855,15 @@ def drain_asset_cache() -> dict[str, dict[str, Any]]:
     return dict(_asset_cache_out)
 
 
+def extract_headers_without_validators(headers: dict[str, str] | None) -> dict[str, str] | None:
+    """Strip conditional-request headers so a refetch actually returns a body."""
+    if not headers:
+        return None
+    stripped = {k: v for k, v in headers.items()
+                if k.lower() not in ("if-none-match", "if-modified-since")}
+    return stripped or None
+
+
 def _usable_body(body: str | None) -> bool:
     """A real, scannable body — not a failure and not a cache hit."""
     return bool(body) and body != CACHED_CLEAN
@@ -1028,10 +1037,21 @@ async def fetch_url(
                         # Unchanged and previously clean -> nothing to re-scan.
                         _cout[url] = dict(entry)
                         return url, CACHED_CLEAN
-                    # It had a finding last time: we must see the body again so
-                    # the finding is reproduced instead of appearing resolved.
+                    # Either the asset yielded a finding last time, or the server
+                    # sent 304 unprompted. Both need the body: a finding that
+                    # vanished from a report reads as "resolved", which would be
+                    # a dangerous lie. Re-issue immediately WITHOUT the validators
+                    # rather than looping — consuming a retry here means that with
+                    # RETRY_ATTEMPTS=1 the refetch never happens and the asset is
+                    # silently lost.
                     revalidate = False
-                    continue
+                    response = await client.get(
+                        url, headers=extract_headers_without_validators(extra_headers)
+                    )
+                    if response.status_code == 304:
+                        # Server insists nothing changed even unconditionally —
+                        # treat as unreachable rather than spin.
+                        return url, None
 
                 if response.status_code == 429:
                     retry_after = _parse_retry_after(
@@ -1288,8 +1308,12 @@ MAX_INLINE_JSON_BYTES = _env_int("MAX_INLINE_JSON_BYTES", 2_000_000)
 
 # Inline <script> bodies. Bounded and non-greedy: no nested quantifier, so a
 # hostile page cannot drive catastrophic backtracking.
+# Lazy match to the literal </script> terminator. A [^<] class would truncate at
+# the first raw "<", which JSON blobs contain constantly (prose like "a < b",
+# embedded HTML fragments) — that silently lost the rest of the blob. Lazy
+# matching to a fixed terminator is linear-time, so this stays ReDoS-free.
 _INLINE_SCRIPT_RE = re.compile(
-    r"<script\b[^>]*>([^<]{0,2000000})</script>", re.IGNORECASE
+    r"<script\b[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL
 )
 # A JSON object assigned to a known SSR state global, e.g. window.__NUXT__={…}
 _STATE_ASSIGN_RE = re.compile(
