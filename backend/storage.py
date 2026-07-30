@@ -44,6 +44,24 @@ CREATE TABLE IF NOT EXISTS false_positives (
     marked_at    TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_fp_target ON false_positives (target_url);
+
+-- R10 asset cache. Deliberately stores NO response bodies: a client's
+-- JavaScript can contain live credentials, and caching it would create a
+-- long-lived copy of their secrets on our disk, which the engagement's
+-- confidentiality terms do not allow. We keep only the HTTP validators, a
+-- content hash, and whether that asset produced any finding last time. That is
+-- enough to skip re-downloading and re-scanning an asset that is both unchanged
+-- and previously clean, which is the overwhelming majority of them.
+CREATE TABLE IF NOT EXISTS asset_cache (
+    url           TEXT PRIMARY KEY,
+    target_url    TEXT NOT NULL,
+    etag          TEXT,
+    last_modified TEXT,
+    content_hash  TEXT,
+    was_clean     INTEGER NOT NULL DEFAULT 1,
+    updated_at    TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_asset_cache_target ON asset_cache (target_url);
 """
 
 
@@ -182,3 +200,74 @@ async def load_scan(scan_id: str) -> dict[str, Any] | None:
         cursor = await db.execute("SELECT * FROM scans WHERE scan_id = ?", (scan_id,))
         row = await cursor.fetchone()
         return _row_to_dict(row) if row else None
+
+
+# ── R10 · asset cache (validators only, never bodies) ───────────────────────
+
+CACHE_TTL_HOURS = 24
+
+
+async def get_asset_cache(target_url: str) -> dict[str, dict[str, Any]]:
+    """Cached HTTP validators for a target's assets, keyed by asset URL.
+
+    Entries older than CACHE_TTL_HOURS are ignored so a long-dormant target is
+    always re-read in full rather than trusted indefinitely.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT url, etag, last_modified, content_hash, was_clean
+            FROM asset_cache
+            WHERE target_url = ?
+              AND updated_at > datetime('now', ?)
+            """,
+            (target_url, f"-{CACHE_TTL_HOURS} hours"),
+        )
+        rows = await cursor.fetchall()
+    return {
+        r["url"]: {
+            "etag": r["etag"],
+            "last_modified": r["last_modified"],
+            "content_hash": r["content_hash"],
+            "was_clean": bool(r["was_clean"]),
+        }
+        for r in rows
+    }
+
+
+async def save_asset_cache(target_url: str, entries: dict[str, dict[str, Any]]) -> None:
+    """Upsert validators for the assets seen in a scan."""
+    if not entries:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """
+            INSERT INTO asset_cache (url, target_url, etag, last_modified, content_hash, was_clean, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(url) DO UPDATE SET
+                target_url    = excluded.target_url,
+                etag          = excluded.etag,
+                last_modified = excluded.last_modified,
+                content_hash  = excluded.content_hash,
+                was_clean     = excluded.was_clean,
+                updated_at    = datetime('now')
+            """,
+            [
+                (url, target_url, e.get("etag"), e.get("last_modified"),
+                 e.get("content_hash"), 1 if e.get("was_clean", True) else 0)
+                for url, e in entries.items()
+            ],
+        )
+        await db.commit()
+
+
+async def purge_asset_cache(target_url: str | None = None) -> int:
+    """Drop cached validators — for one target, or all of them. Returns rows removed."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if target_url:
+            cursor = await db.execute("DELETE FROM asset_cache WHERE target_url = ?", (target_url,))
+        else:
+            cursor = await db.execute("DELETE FROM asset_cache")
+        await db.commit()
+        return cursor.rowcount or 0

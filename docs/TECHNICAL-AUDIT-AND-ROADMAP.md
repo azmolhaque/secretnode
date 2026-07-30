@@ -111,7 +111,10 @@ repo scanning; win the *web-surface* niche.
   access"), a "Verified Active" KPI tile, and an honest measured-precision "Detection quality"
   statement (verification-first + CI-gated precision/recall). Turns the engine work into a
   client-ready deliverable. +4 tests.
-- **R10 · Asset caching** (ETag/If-Modified-Since) + per-provider verify concurrency. [LOW]
+- ~~**R10 · Asset caching**~~ ✅ **DONE (v2.7.7)** — conditional GET with a per-target validator
+  cache; a 304 skips an unchanged *and previously clean* asset, but always refetches one that
+  had a finding so nothing silently vanishes from a report. No response bodies cached, by
+  design. *Still open:* per-provider verify concurrency. [LOW]
 - **R11 · Distribution** — PyPI publish, tagged releases, docs. [LOW]
 
 ## Recommended next steps (highest ROI for Cindrasec's stage)

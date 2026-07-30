@@ -3,6 +3,35 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.7] — R10: asset caching for re-scans
+
+Closes roadmap item **R10**. Re-scanning a target refetched every asset from scratch — wasted
+bandwidth on the client's servers and wasted CPU on ours, since most assets neither change between
+engagements nor contain anything.
+
+### Added
+- **Conditional GET on re-scans.** SecretNode now sends `If-None-Match` / `If-Modified-Since` from
+  a per-target cache of HTTP validators (`asset_cache` table, 24h TTL).
+- **Correctness rule for 304s.** A `304 Not Modified` is acted on by history, not blindly:
+  - asset was **clean** last scan → **skipped entirely** (unchanged + previously clean means still
+    clean), and never enters the scan text;
+  - asset previously **yielded a finding** → **refetched unconditionally**, so the finding is
+    reproduced. A finding that disappeared from a report would read as *resolved*, which is a
+    dangerous lie to tell a client.
+- `purge_asset_cache()` for clearing one target's cache or all of it.
+- Config: `ASSET_CACHE` (default on).
+
+### Privacy: no response bodies are cached
+The obvious implementation stores bodies so a 304 can still be scanned. We deliberately do not: a
+client's JavaScript can contain live credentials, and caching it would leave a long-lived copy of
+their secrets on our disk — which the engagement's confidentiality terms do not allow. The cache
+holds **only** the validators, a truncated content hash, and a clean/dirty flag. That is enough to
+skip the overwhelming majority of assets, and a test asserts no body content is ever persisted.
+
++10 tests, including a **mutation check** (with `ASSET_CACHE=false`, five cache tests fail, proving
+they exercise the real path) and a real-SQLite round-trip covering upsert, per-target isolation and
+purge. Suite **327 → 337**, all green; ruff clean.
+
 ## [2.7.6] — Inline SSR state decoding
 
 Server-rendered apps embed their bootstrap state in the HTML — Next.js writes

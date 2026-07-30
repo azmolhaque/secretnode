@@ -814,6 +814,59 @@ async def _throttle_wait(host: str) -> None:
         await asyncio.sleep(delay)
 
 
+# ── R10 · conditional fetch (asset caching) ──────────────────────────────────
+#
+# Re-scanning a target refetched every asset from scratch. Most assets do not
+# change between engagements and most contain nothing, so that is wasted
+# bandwidth on the client's servers and wasted CPU on ours.
+#
+# We send If-None-Match / If-Modified-Since and act on a 304 as follows:
+#   • asset was clean last time  -> skip it entirely (unchanged + previously
+#     clean means still clean), returning CACHED_CLEAN.
+#   • asset had a finding        -> refetch unconditionally, so the finding is
+#     reproduced rather than silently vanishing from the report. A finding that
+#     disappears reads as "resolved", which would be a dangerous lie.
+#
+# No response body is ever cached: a client's JavaScript can hold live
+# credentials and we do not keep copies of it. Only validators + a content hash.
+
+ASSET_CACHE_ENABLED = os.environ.get("ASSET_CACHE", "true").lower() == "true"
+
+# Sentinel distinguishing "unchanged, previously clean, skip" from a real body
+# and from a failure (None).
+CACHED_CLEAN = "\x00__SECRETNODE_CACHED_CLEAN__"
+
+# Scan-scoped cache state. Module-level for the same reason _host_delays is:
+# every fetch in a scan shares it without threading a parameter through
+# spider_target and its six call sites.
+_asset_cache_in: dict[str, dict[str, Any]] = {}
+_asset_cache_out: dict[str, dict[str, Any]] = {}
+
+
+def load_asset_cache(entries: dict[str, dict[str, Any]]) -> None:
+    """Prime the conditional-GET cache for a scan."""
+    _asset_cache_in.clear()
+    _asset_cache_in.update(entries or {})
+    _asset_cache_out.clear()
+
+
+def drain_asset_cache() -> dict[str, dict[str, Any]]:
+    """Validators observed during this scan, for persisting afterwards."""
+    return dict(_asset_cache_out)
+
+
+def _usable_body(body: str | None) -> bool:
+    """A real, scannable body — not a failure and not a cache hit."""
+    return bool(body) and body != CACHED_CLEAN
+
+
+def mark_asset_dirty(url: str) -> None:
+    """Record that `url` yielded a finding, so a future 304 refetches it
+    instead of skipping — a finding must never silently vanish."""
+    if url in _asset_cache_out:
+        _asset_cache_out[url]["was_clean"] = False
+
+
 def _backoff_delay(attempt: int) -> float:
     """Exponential backoff with equal jitter, capped.
 
@@ -921,6 +974,8 @@ async def fetch_url(
     url: str,
     semaphore: asyncio.Semaphore,
     broadcast: Broadcaster | None = None,
+    cache: dict[str, dict[str, Any]] | None = None,
+    cache_out: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str, str | None]:
     """
     Fetch a URL with retry + exponential backoff.
@@ -933,6 +988,7 @@ async def fetch_url(
     host = urlparse(url).netloc
     async with semaphore:
         waf_block_status: int | None = None
+        revalidate = True
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
                 # Pace ourselves if this host has recently rate-limited us.
@@ -948,7 +1004,34 @@ async def fetch_url(
                 extra_headers = None
                 if attempt > 1 and waf_block_status and not _UA_OVERRIDE:
                     extra_headers = _browser_headers(_USER_AGENTS[(attempt - 1) % len(_USER_AGENTS)])
+
+                # Conditional GET: only on the first attempt, and only while the
+                # cache is still trusted. `revalidate` flips off once we have
+                # decided we must see the body regardless.
+                _cin = cache if cache is not None else _asset_cache_in
+                _cout = cache_out if cache_out is not None else _asset_cache_out
+                entry = _cin.get(url) if (_cin and ASSET_CACHE_ENABLED) else None
+                if entry and revalidate:
+                    cond = dict(extra_headers or {})
+                    if entry.get("etag"):
+                        cond["If-None-Match"] = entry["etag"]
+                    if entry.get("last_modified"):
+                        cond["If-Modified-Since"] = entry["last_modified"]
+                    if len(cond) > len(extra_headers or {}):
+                        extra_headers = cond
+
                 response = await client.get(url, headers=extra_headers)
+
+                if response.status_code == 304:
+                    _throttle_reward(host)
+                    if entry and entry.get("was_clean", True):
+                        # Unchanged and previously clean -> nothing to re-scan.
+                        _cout[url] = dict(entry)
+                        return url, CACHED_CLEAN
+                    # It had a finding last time: we must see the body again so
+                    # the finding is reproduced instead of appearing resolved.
+                    revalidate = False
+                    continue
 
                 if response.status_code == 429:
                     retry_after = _parse_retry_after(
@@ -1020,7 +1103,21 @@ async def fetch_url(
                 # Guard against a chunked/undeclared body that exceeds the cap.
                 text = response.text
                 if len(text) > MAX_ASSET_BYTES:
-                    return url, text[:MAX_ASSET_BYTES]
+                    text = text[:MAX_ASSET_BYTES]
+                if ASSET_CACHE_ENABLED:
+                    et = response.headers.get("etag")
+                    lm = response.headers.get("last-modified")
+                    if et or lm:
+                        _cout[url] = {
+                            "etag": et,
+                            "last_modified": lm,
+                            "content_hash": hashlib.sha256(
+                                text.encode("utf-8", "replace")
+                            ).hexdigest()[:32],
+                            # Findings are unknown at fetch time; the scan loop
+                            # corrects this once the asset has been scanned.
+                            "was_clean": True,
+                        }
                 return url, text
 
             except httpx.TimeoutException:
@@ -1396,7 +1493,9 @@ async def spider_target(
             })
         return []
 
-    assets: list[tuple[str, str]] = [(root_url, html_body)]
+    assets: list[tuple[str, str]] = (
+        [(root_url, html_body)] if _usable_body(html_body) else []
+    )
     html_pages: list[tuple[str, str]] = [(root_url, html_body)]
     visited_pages: set[str] = {root_url}
     all_js_urls: set[str] = set(extract_js_urls(html_body, target_url))
@@ -1411,7 +1510,7 @@ async def spider_target(
             fetched_pages = await asyncio.gather(*fetch_tasks, return_exceptions=False)
             for page_url, page_body in fetched_pages:
                 visited_pages.add(page_url)
-                if not page_body:
+                if not _usable_body(page_body):
                     continue
                 html_pages.append((page_url, page_body))
                 assets.append((page_url, page_body))
@@ -1436,7 +1535,7 @@ async def spider_target(
         tasks = [fetch_url(client, u, semaphore, broadcast) for u in js_urls]
         fetched = await asyncio.gather(*tasks, return_exceptions=False)
         for js_url, js_body in fetched:
-            if js_body:
+            if _usable_body(js_body):
                 assets.append((js_url, js_body))
                 js_bodies.append((js_url, js_body))
 
@@ -1459,7 +1558,7 @@ async def spider_target(
             map_tasks = [fetch_url(client, u, semaphore, broadcast) for u in map_urls]
             fetched_maps = await asyncio.gather(*map_tasks, return_exceptions=False)
             for map_url, map_body in fetched_maps:
-                if map_body:
+                if _usable_body(map_body):
                     assets.append((map_url, map_body))
 
     # Broadcast every non-HTML asset we actually collected (JS + source maps),
@@ -2181,7 +2280,7 @@ async def run_scan(
                 )
                 added = 0
                 for u, body in fetched:
-                    if body:
+                    if _usable_body(body):
                         assets.append((u, body))
                         added += 1
                 await emit({
@@ -2218,7 +2317,7 @@ async def run_scan(
                     *(fetch_url(client, u, semaphore, broadcast) for u in js_eps)
                 )
                 for u, body in fetched:
-                    if body:
+                    if _usable_body(body):
                         assets.append((u, body))
 
             result["discovered_endpoints"] = same_eps[:MAX_DISCOVERED_ENDPOINTS]
@@ -2276,6 +2375,9 @@ async def run_scan(
 
             found = extract_secrets(scan_id, target_url, source_url, body)
             if found:
+                # This asset yielded something: a future 304 must refetch it
+                # rather than skip, so the finding cannot silently disappear.
+                mark_asset_dirty(source_url)
                 await emit({
                     "type": "log", "level": "WARN",
                     "message": f"Found {len(found)} potential match(es) in {source_url}",
