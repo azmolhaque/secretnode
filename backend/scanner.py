@@ -1169,6 +1169,103 @@ def looks_like_sourcemap(url: str, body: str) -> bool:
     return '"sourcesContent"' in head or ('"mappings"' in head and '"version"' in head)
 
 
+# ── Inline SSR state blobs (v2.7.6) ──────────────────────────────────────────
+#
+# Server-rendered apps embed their bootstrap state in the HTML: Next.js writes
+# <script id="__NEXT_DATA__" type="application/json">, Nuxt writes
+# window.__NUXT__, Redux-style apps write window.__INITIAL_STATE__. That blob is
+# built server-side and regularly carries config a developer never meant to ship.
+#
+# The raw HTML is already scanned as text, so a plainly-embedded secret is caught
+# today. What is missed is a value whose JSON *escaping* breaks the secret's
+# shape — a \uXXXX-escaped character mid-token, or the < /   escaping
+# that XSS-safe serializers (Next.js's htmlEscapeJsonString) apply. The regex
+# sees "sk-ant-A1b2-C3d4" and no longer recognises the credential.
+#
+# The fix is the same one already used for source maps: decode the JSON and scan
+# the *decoded* string values as real text. Purely local — no new requests, so
+# the scan stays passive.
+
+SCAN_INLINE_JSON = os.environ.get("SCAN_INLINE_JSON", "true").lower() == "true"
+MAX_INLINE_JSON_BYTES = _env_int("MAX_INLINE_JSON_BYTES", 2_000_000)
+
+# Inline <script> bodies. Bounded and non-greedy: no nested quantifier, so a
+# hostile page cannot drive catastrophic backtracking.
+_INLINE_SCRIPT_RE = re.compile(
+    r"<script\b[^>]*>([^<]{0,2000000})</script>", re.IGNORECASE
+)
+# A JSON object assigned to a known SSR state global, e.g. window.__NUXT__={…}
+_STATE_ASSIGN_RE = re.compile(
+    r"(?:window\.)?(?:__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|__APOLLO_STATE__"
+    r"|__PRELOADED_STATE__|__remixContext)\s*=\s*(\{[^\0]{0,2000000})",
+)
+
+
+def _json_string_values(node: Any, out: list[str], budget: list[int]) -> None:
+    """Walk a decoded JSON document, collecting string values (and keys, which
+    sometimes hold the credential). Bounded by a shared byte budget."""
+    if budget[0] <= 0:
+        return
+    if isinstance(node, str):
+        budget[0] -= len(node)
+        out.append(node)
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            if budget[0] <= 0:
+                return
+            if isinstance(k, str):
+                out.append(k)
+            _json_string_values(v, out, budget)
+    elif isinstance(node, list):
+        for v in node:
+            if budget[0] <= 0:
+                return
+            _json_string_values(v, out, budget)
+
+
+def extract_inline_json_strings(html: str) -> str:
+    """Decode inline SSR/JSON script blobs and return their string values as
+    scannable text, one per line.
+
+    Returns "" when nothing parses. Fully defensive: any malformed blob is
+    skipped rather than failing the scan.
+    """
+    if not SCAN_INLINE_JSON or not html:
+        return ""
+    candidates: list[str] = []
+    for m in _INLINE_SCRIPT_RE.finditer(html):
+        body = m.group(1).strip()
+        if not body:
+            continue
+        if body.startswith(("{", "[")):
+            candidates.append(body)
+            continue
+        assign = _STATE_ASSIGN_RE.search(body)
+        if assign:
+            candidates.append(assign.group(1))
+
+    values: list[str] = []
+    budget = [MAX_INLINE_JSON_BYTES]
+    for blob in candidates:
+        if budget[0] <= 0:
+            break
+        # A state assignment often ends in ";" or trailing JS — walk back to the
+        # last closing brace so json.loads gets a complete document.
+        text = blob
+        if not text.endswith(("}", "]")):
+            cut = max(text.rfind("}"), text.rfind("]"))
+            if cut == -1:
+                continue
+            text = text[: cut + 1]
+        try:
+            doc = json.loads(text)
+        except Exception:  # noqa: BLE001 — a non-JSON blob is simply not our business
+            continue
+        _json_string_values(doc, values, budget)
+
+    return "\n".join(values)
+
+
 def extract_sourcemap_sources(map_body: str, map_url: str) -> list[tuple[str, str]]:
     """R5 surface expansion: decode a source map's `sourcesContent` (the original,
     un-minified source, JSON-escaped inside the .map) into scannable code, paired
@@ -1484,6 +1581,15 @@ def extract_secrets(
     # Also inspect base64-decoded blobs for secrets hidden inside encoded strings.
     for decoded in _decode_base64_blobs(text):
         findings.extend(_scan_text(scan_id, target_url, source_url, decoded, decoded=True))
+    # Inline SSR state (__NEXT_DATA__, __NUXT__, __INITIAL_STATE__ …): decode the
+    # JSON and scan its string values, so a credential mangled by JSON escaping
+    # is still recognised. Only worth doing on markup.
+    if SCAN_INLINE_JSON and "<script" in text[:MAX_INLINE_JSON_BYTES].lower():
+        decoded_json = extract_inline_json_strings(text)
+        if decoded_json:
+            findings.extend(
+                _scan_text(scan_id, target_url, source_url, decoded_json, decoded=True)
+            )
     # De-duplicate by fingerprint (same secret found raw and base64-encoded = one finding).
     seen: set[str] = set()
     unique: list[RawFinding] = []

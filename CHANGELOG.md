@@ -3,6 +3,38 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.7.6] — Inline SSR state decoding
+
+Server-rendered apps embed their bootstrap state in the HTML — Next.js writes
+`<script id="__NEXT_DATA__">`, Nuxt writes `window.__NUXT__`, Redux-style apps write
+`window.__INITIAL_STATE__` — and that blob is built server-side, so it regularly carries config a
+developer never meant to ship.
+
+### Added
+- **Inline JSON/SSR state blobs are decoded before scanning.** New `extract_inline_json_strings()`
+  finds inline `<script>` JSON (typed `application/json`, or assigned to `__NEXT_DATA__`,
+  `__NUXT__`, `__INITIAL_STATE__`, `__APOLLO_STATE__`, `__PRELOADED_STATE__`, `__remixContext`),
+  parses it, and scans the decoded string values.
+- Config: `SCAN_INLINE_JSON`, `MAX_INLINE_JSON_BYTES`.
+
+### Why this is narrower than the roadmap claimed
+The roadmap listed inline JSON *and* HTML comments as uncovered surface. Measured against the
+code, both are already caught — the whole response body goes through the raw-text pass, so a
+plainly-embedded secret in a comment or a JSON blob has always been found. The **only** genuine
+miss was a value whose JSON **escaping** breaks the credential's shape: a `\uXXXX`-escaped
+character mid-token, as emitted by XSS-safe serializers (Next.js's `htmlEscapeJsonString`) or
+light obfuscation. The regex sees `sk\u002Dant\u002D…` and no longer recognises it. Decoding the
+JSON recovers it — the same rationale that already justifies decoding source-map
+`sourcesContent`. The roadmap entry has been corrected rather than left overstating the gap.
+
+Purely local decoding: **no additional requests**, so the scan stays passive. Bounded by a shared
+byte budget, non-greedy bounded regexes (no nested quantifiers), and defensive throughout — a
+malformed blob is skipped, never fatal.
+
++14 tests, including a **mutation check**: with `SCAN_INLINE_JSON=false` the recovery tests fail,
+proving they exercise the decoder rather than passing incidentally via the raw-text pass.
+Suite **313 → 327**, all green; ruff clean.
+
 ## [2.7.5] — Scan politeness & resilience
 
 Being a good guest on a client's infrastructure is part of the engagement, not an afterthought:
