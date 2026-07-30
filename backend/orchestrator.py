@@ -26,6 +26,7 @@ import ipaddress
 import logging
 import os
 import socket
+import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -88,6 +89,7 @@ class DeepScanResult:
     scans: list[dict] = field(default_factory=list)   # raw per-host scan dicts
     historical_urls: int = 0        # historical URLs discovered (0 if not requested)
     takeover_findings: list[dict] = field(default_factory=list)  # dangling-CNAME hijack risks
+    duration_seconds: float = 0.0   # wall-clock for the whole run
     error: str | None = None
 
     @property
@@ -101,6 +103,18 @@ class DeepScanResult:
     @property
     def total_posture(self) -> int:
         return sum(h.posture_issues for h in self.hosts)
+
+    @property
+    def total_assets(self) -> int:
+        return sum(h.assets for h in self.hosts)
+
+    @property
+    def total_assets_scanned(self) -> int:
+        """Coverage across the domain: downloaded plus served-from-cache."""
+        return self._sum_scans("assets_scanned") or self.total_assets
+
+    def _sum_scans(self, key: str) -> int:
+        return sum(int(s.get(key, 0) or 0) for s in self.scans)
 
     def _aggregate(self, key: str) -> list[dict]:
         """Flatten a per-host finding list across all scans, tagging each finding
@@ -122,14 +136,37 @@ class DeepScanResult:
             "historical_urls": self.historical_urls,
             "confirmed_findings": self._aggregate("confirmed_findings"),
             "needs_review_findings": self._aggregate("needs_review_findings"),
+            "posture_findings": self._aggregate("posture_findings"),
             "associated_hosts": sorted({h for s in self.scans
                                         for h in s.get("associated_hosts", [])}),
             "takeover_findings": self.takeover_findings,
+            # Scan-level metrics, rolled up from the per-host scans. These are
+            # top-level (not nested under "totals") because report.py reads them
+            # from the same keys a single-target scan uses — omitting them is
+            # why a deep-scan SARIF reported "assets_fetched: 0" after crawling
+            # 25 hosts, and why the CSV/HTML lost the screening funnel entirely.
+            "assets_fetched": self.total_assets,
+            "assets_cached": self._sum_scans("assets_cached"),
+            "assets_scanned": self.total_assets_scanned,
+            "raw_findings": self._sum_scans("raw_findings"),
+            "validated_findings": self._sum_scans("validated_findings"),
+            "suppressed_count": self._sum_scans("suppressed_count"),
+            "new_findings_count": self._sum_scans("new_findings_count"),
+            "recurring_findings_count": self._sum_scans("recurring_findings_count"),
+            "verified_count": self._sum_scans("verified_count"),
+            "unverified_count": self._sum_scans("unverified_count"),
+            "filtered_unverified_count": self._sum_scans("filtered_unverified_count"),
+            # Wall-clock, not the sum of per-host durations: hosts are scanned
+            # concurrently, so summing them would overstate the run by the
+            # concurrency factor.
+            "duration_seconds": round(self.duration_seconds, 2),
             "totals": {
                 "subdomains": len(self.subdomains),
                 "live_hosts": len(self.live_hosts),
                 "hosts_scanned": len(self.hosts),
                 "historical_urls": self.historical_urls,
+                "assets_fetched": self.total_assets,
+                "assets_scanned": self.total_assets_scanned,
                 "confirmed": self.total_confirmed,
                 "needs_review": self.total_needs_review,
                 "posture_issues": self.total_posture,
@@ -216,6 +253,15 @@ async def run_deep_scan(
 
     Falls back to scanning the bare target itself when the input is an IP or has
     no enumerable domain, so a deep scan always does *something* useful."""
+    started = time.monotonic()
+
+    # Deep scans do not use the conditional-GET cache yet: it is keyed per
+    # target_url and primed by the single-target endpoint, and hosts here run
+    # concurrently against shared module state. Start from empty so a deep scan
+    # can never inherit a previous single scan's validators and skip an asset it
+    # has never actually fetched.
+    scanner.load_asset_cache({})
+
     domain = recon.extract_registrable_domain(target)
     if domain is None:
         # No enumerable domain (e.g. an IP): degrade to a single passive scan of
@@ -228,6 +274,7 @@ async def run_deep_scan(
         result.live_hosts = [url]
         result.hosts = [_summarise_scan(host, url, scan)]
         result.scans = [scan]
+        result.duration_seconds = time.monotonic() - started
         return result
 
     async def emit(event: dict) -> None:
@@ -309,6 +356,7 @@ async def run_deep_scan(
 
         if not result.live_hosts:
             result.error = enum.error or "no live hosts found"
+            result.duration_seconds = time.monotonic() - started
             await emit(log("No live hosts to scan.", "WARN"))
             await emit({"type": "deep_scan_complete", "totals": result.to_dict()["totals"]})
             return result
@@ -348,5 +396,6 @@ async def run_deep_scan(
             if scan is not None:
                 result.scans.append(scan)
 
+    result.duration_seconds = time.monotonic() - started
     await emit({"type": "deep_scan_complete", "totals": result.to_dict()["totals"]})
     return result

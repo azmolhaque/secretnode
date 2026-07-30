@@ -3,6 +3,82 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.8.0] — Artifact review: the credential stops at the API boundary
+
+Driven by a side-by-side read of the artifacts from a real v2.7.9 deep scan — the dashboard modal,
+the Discord alert, and the SARIF/CSV/HTML exports of the same three findings. v2.7.9 had fixed
+redaction in the *reports*; comparing the surfaces showed how much of the same job was left undone
+everywhere else, and turned up two correctness bugs that had nothing to do with display.
+
+### Fixed
+
+- **A re-scan of an unchanged site reported CLEAN while the credential was still exposed.** The
+  worst bug in this release, and the only one that produces a wrong *answer* rather than a wrong
+  *presentation*. The asset cache treated a `304 Not Modified` on the root page as "unchanged and
+  previously clean, skip" — but an HTML page is a link graph, not just something to grep. Skipping
+  its body meant never parsing its `<script>` tags, so every JS bundle it referenced dropped out of
+  the scan. Reproduced on a lab target: scan 1 found a planted key, scan 2 never requested the file
+  holding it and reported no findings. Crawled pages now always come back with a body
+  (`allow_cache_skip=False`) — the conditional GET is still sent, so the bandwidth saving on
+  unchanged terminal assets (JS bundles, source maps) is untouched.
+- **The dashboard rendered the full credential.** `redact_secret()` was added to `report.py` in
+  v2.7.9 and nowhere else, so `/api/scans/{id}` and the WebSocket stream shipped `raw_match`
+  verbatim and the finding-detail modal displayed it — under a heading reading "MATCHED VALUE
+  (PARTIAL)" that a 51-character key comfortably fit inside. Redaction now happens at the API
+  boundary (`public_scan` / `public_event` in `main.py`) using a `mask_secret()` that has no
+  opt-out; `REPORT_FULL_SECRETS` remains available for a report an operator deliberately generates,
+  but no longer unmasks every dashboard session and WebSocket subscriber.
+- **The `scan_complete` event carried both unmasked finding lists.** Found by capturing a live
+  WebSocket stream rather than by reading the code: per-finding events were being scrubbed, but the
+  final frame of every scan ships the entire result dict, and it was going out untouched.
+- **The code snippet leaked the secret the matched-value field was hiding.** `context_snippet` was
+  stored and served verbatim, so the modal and the JSON export both contained the credential in
+  full even once `raw_match` was masked. Now masked in `ValidatedFinding.to_dict()`, where the
+  complete value is still available to match against — masking it downstream from the 80-character
+  `raw_match` cap would have left the tail of a longer secret exposed.
+- **The JSON export was the one deliverable format still containing live keys.** HTML, CSV and
+  SARIF all redacted; `format=json` returned the stored record as-is.
+- **The dashboard showed MEDIUM for findings the reports called HIGH.** The frontend re-derived
+  severity from a hardcoded list of 14 secret type names. Every detector added since that list was
+  written — the entire AI/ML provider family — fell through to the MEDIUM default. It now reads the
+  `severity` field the backend already computes from the pattern registry. A missing `.badge-low`
+  style meant LOW findings rendered unstyled; added.
+- **Discord alerts announced "SecretNode v2.4.0"** for five releases, and coloured every embed with
+  a per-type table covering 16 of 60+ detectors — so an ElevenLabs key and an AWS root key arrived
+  looking identical. Version now comes from the shared `version.py`; embed colour is keyed on
+  effective severity, and the severity is stated as a field.
+- **Deep-scan reports lost every scan-level metric.** `DeepScanResult.to_dict()` never emitted
+  `assets_fetched`, so a SARIF from a 25-host run claimed `assets_fetched: 0`; the same omission
+  dropped `raw_findings`, `duration_seconds`, posture findings and the verification counts. All are
+  now rolled up, with duration measured as wall-clock rather than summed across concurrently
+  scanned hosts.
+- **A fully-cached re-scan reported "0 assets analysed".** True as a download count, wrong as
+  coverage — it reads as "nothing was scanned". Split into `assets_fetched` (downloaded),
+  `assets_cached` (unchanged and clean, skipped) and `assets_scanned` (coverage); reports lead with
+  coverage and name the cached portion.
+- **Deep scans inherited asset-cache state from whatever ran before them in the same process.** The
+  cache is module-level and only the single-target endpoint primes it, so a deep scan could report
+  a previous scan's cache hits as its own coverage — and, worse, act on a stale validator. Deep
+  scans now start from an empty cache, and `run_scan` resets the hit tally alongside the throttle.
+
+### Changed
+
+- Deep-scan HTML gains the redacted matched value, verification status and impact per finding, plus
+  an asset-coverage stat — the format a client actually reads was the one carrying the least
+  evidence. It also notes that one value appearing on several hosts is a single credential shared
+  across environments, which is what a fanned-out dev/QA/preprod exposure actually looks like.
+- SARIF results carry `matched_value_partial`, `found_at` and (on deep scans) the originating
+  `host`, so a triager can correlate a result against the CSV row and the Discord alert. Run
+  properties gained coverage and duration.
+- Version is single-sourced in `backend/version.py`; a test now fails the build on any hardcoded
+  `SecretNode vX.Y.Z` literal in the backend.
+
+### Tests
+
+- `test_v280.py`: 35 tests covering each fix, including a mutation check that the leak guards can
+  actually fail, and a reproduction of the false all-clear. Suite: 347 → 382.
+
+
 ## [2.7.9] — Deep QA before release: reports no longer leak the credential
 
 A full pre-PR QA pass: booted the application, ran real end-to-end scans against a local target

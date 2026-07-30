@@ -384,6 +384,7 @@
     .badge-critical { background: rgba(255,59,59,0.15);  color: #ff3b3b;  border: 1px solid rgba(255,59,59,0.3); }
     .badge-high     { background: rgba(255,123,0,0.15); color: #ff7b00;  border: 1px solid rgba(255,123,0,0.3); }
     .badge-medium   { background: rgba(255,215,0,0.12); color: #ffd700;  border: 1px solid rgba(255,215,0,0.3); }
+    .badge-low      { background: rgba(49,130,206,0.12);color: #63b3ed;  border: 1px solid rgba(49,130,206,0.3);}
     .badge-info     { background: rgba(99,179,237,0.12);color: #63b3ed;  border: 1px solid rgba(99,179,237,0.3);}
 
     /* ── Stats cards ── */
@@ -816,12 +817,29 @@
     }
     const ts = () => new Date().toISOString().replace('T',' ').slice(0,19);
 
-    function severityFromType(type) {
-      const crit = ['AWS Access Key','AWS Secret Access Key','GitHub Personal Access Token','Stripe Secret Key','Private Key Block'];
-      const high = ['Google Cloud API Key','Slack Webhook','GitHub OAuth Token','SendGrid API Key','Twilio Auth Token','Heroku API Key','Shopify Access Token','Mailgun API Key','JWT Token'];
-      if (crit.includes(type)) return 'critical';
-      if (high.includes(type)) return 'high';
-      return 'medium';
+    // Severity comes from the backend, which reads it off the pattern registry
+    // and applies the public-by-design downgrade. This used to be re-derived
+    // here from a hardcoded list of 14 secret types; every detector added since
+    // — the whole AI/ML provider family included — fell through to MEDIUM, so
+    // the dashboard showed MEDIUM for a finding the SARIF and CSV both called
+    // HIGH. Never re-derive a value the server already computed.
+    const VALID_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'];
+
+    function severityOf(finding) {
+      const sev = String(finding?.severity || '').toLowerCase();
+      return VALID_SEVERITIES.includes(sev) ? sev : 'medium';
+    }
+
+    // Defence in depth: the API masks `raw_match` before it leaves the server,
+    // but the dashboard must never render a value that arrived unmasked (an
+    // older scan replayed from SQLite, a stale service behind a new frontend).
+    // If it carries no mask marker, mask it here before it hits the DOM.
+    function maskSecret(value) {
+      const v = String(value || '');
+      if (!v) return '';
+      if (v.includes('*') || v.includes('…')) return v;   // already masked
+      if (v.length <= 12) return '*'.repeat(v.length);
+      return `${v.slice(0, 6)}…${'*'.repeat(6)}…${v.slice(-4)}  (${v.length} chars)`;
     }
 
     function confidenceColor(c) {
@@ -954,7 +972,7 @@
       const tbody = $('findings-tbody');
       $('empty-row')?.remove();
 
-      const sev = severityFromType(finding.secret_type);
+      const sev = severityOf(finding);
       const cc  = confidenceColor(finding.confidence);
       const time = finding.found_at
         ? new Date(finding.found_at).toLocaleTimeString()
@@ -1026,7 +1044,7 @@
       const f = state.allFindings[index];
       if (!f) return;
 
-      const sev = severityFromType(f.secret_type);
+      const sev = severityOf(f);
       const mc  = $('modal-content');
       mc.innerHTML = `
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
@@ -1064,8 +1082,9 @@
           <pre style="font-family:'Share Tech Mono';font-size:10px;color:#68d391;background:rgba(0,0,0,0.4);padding:10px;border-radius:3px;border-left:2px solid #276749;overflow-x:auto;white-space:pre-wrap;word-break:break-all;">${escapeHtml(f.context_snippet||'')}</pre>
         </div>
         <div>
-          <div style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;margin-bottom:5px;">MATCHED VALUE (PARTIAL)</div>
-          <code style="font-family:'Share Tech Mono';font-size:11px;color:#ff3b3b;background:rgba(255,59,59,0.08);padding:4px 8px;border-radius:2px;border:1px solid rgba(255,59,59,0.2);">${escapeHtml((f.raw_match||'').slice(0,60))}…</code>
+          <div style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;margin-bottom:5px;">MATCHED VALUE (REDACTED)</div>
+          <code style="font-family:'Share Tech Mono';font-size:11px;color:#ff3b3b;background:rgba(255,59,59,0.08);padding:4px 8px;border-radius:2px;border:1px solid rgba(255,59,59,0.2);">${escapeHtml(maskSecret(f.raw_match))}</code>
+          <div style="font-family:'Share Tech Mono';font-size:9px;color:#4a7c59;margin-top:6px;">Enough to identify which key to rotate — the full value is never rendered here. Download a report to hand the value to the owner.</div>
         </div>
       `;
       $('modal-overlay').classList.add('show');

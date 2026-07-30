@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, ValidationError
 import posture
 import surface
 import verifier
+import version
 
 logger = logging.getLogger("secretnode.scanner")
 
@@ -205,14 +206,23 @@ class ValidatedFinding:
         return self._meta().severity
 
     def to_dict(self) -> dict[str, Any]:
+        # The surrounding code snippet is masked here, at the point the finding
+        # leaves the dataclass, because every consumer of this dict is a place
+        # the credential must not appear verbatim: the dashboard renders it in
+        # the finding-detail modal, the JSON export writes it to a file the
+        # client keeps, and SQLite persists it. Masking downstream is not
+        # equivalent — only here is the *full* raw value still available to
+        # match against, so a snippet holding a >80-char secret still gets
+        # fully masked rather than partially.
+        raw_value = self.raw.raw_match
         return {
             "fingerprint":    self.raw.fingerprint,
             "scan_id":        self.raw.scan_id,
             "target_url":     self.raw.target_url,
             "source_url":     self.raw.source_url,
             "secret_type":    self.raw.secret_type,
-            "raw_match":      self.raw.raw_match[:80] + "…" if len(self.raw.raw_match) > 80 else self.raw.raw_match,
-            "context_snippet": self.raw.context_snippet[:400],
+            "raw_match":      raw_value[:80] + "…" if len(raw_value) > 80 else raw_value,
+            "context_snippet": redact_snippet(self.raw.context_snippet, raw_value)[:400],
             "entropy":        self.raw.entropy,
             "is_valid":       self.is_valid,
             "confidence":     self.confidence,
@@ -842,12 +852,25 @@ CACHED_CLEAN = "\x00__SECRETNODE_CACHED_CLEAN__"
 _asset_cache_in: dict[str, dict[str, Any]] = {}
 _asset_cache_out: dict[str, dict[str, Any]] = {}
 
+# URLs the server confirmed unchanged and that were clean last time, so no body
+# was re-downloaded. They are still *covered* by the scan — the tool checked
+# them and knows their content has not changed — but they never enter the asset
+# list, so counting only downloads makes a fully-cached re-scan report
+# "0 assets", which reads to a client as "nothing was scanned".
+_asset_cache_hits: set[str] = set()
+
 
 def load_asset_cache(entries: dict[str, dict[str, Any]]) -> None:
     """Prime the conditional-GET cache for a scan."""
     _asset_cache_in.clear()
     _asset_cache_in.update(entries or {})
     _asset_cache_out.clear()
+    _asset_cache_hits.clear()
+
+
+def cached_clean_count() -> int:
+    """How many assets this scan skipped as unchanged-and-previously-clean."""
+    return len(_asset_cache_hits)
 
 
 def drain_asset_cache() -> dict[str, dict[str, Any]]:
@@ -985,6 +1008,7 @@ async def fetch_url(
     broadcast: Broadcaster | None = None,
     cache: dict[str, dict[str, Any]] | None = None,
     cache_out: dict[str, dict[str, Any]] | None = None,
+    allow_cache_skip: bool = True,
 ) -> tuple[str, str | None]:
     """
     Fetch a URL with retry + exponential backoff.
@@ -993,6 +1017,14 @@ async def fetch_url(
     (401/403/406/429/503) we retry with a different browser fingerprint before
     giving up, and emit a diagnostic that names the likely cause instead of a
     bare "failed". Respects 429 Retry-After. Returns (url, body) or (url, None).
+
+    `allow_cache_skip=False` still sends the conditional GET and still records
+    the validators, but never returns CACHED_CLEAN — the caller gets a real
+    body. Crawled HTML pages must use it: a page is a link graph, not just
+    something to grep. Skipping an unchanged page's body means never parsing
+    its <script> tags, so every JS bundle it references drops out of the scan.
+    That turns a re-scan of an unchanged site into a false all-clear, which is
+    a far worse failure than re-downloading a few kilobytes of HTML.
     """
     host = urlparse(url).netloc
     async with semaphore:
@@ -1033,9 +1065,10 @@ async def fetch_url(
 
                 if response.status_code == 304:
                     _throttle_reward(host)
-                    if entry and entry.get("was_clean", True):
+                    if entry and entry.get("was_clean", True) and allow_cache_skip:
                         # Unchanged and previously clean -> nothing to re-scan.
                         _cout[url] = dict(entry)
+                        _asset_cache_hits.add(url)
                         return url, CACHED_CLEAN
                     # Either the asset yielded a finding last time, or the server
                     # sent 304 unprompted. Both need the body: a finding that
@@ -1503,7 +1536,10 @@ async def spider_target(
 
     await check_robots_txt(client, target_url, broadcast)
 
-    root_url, html_body = await fetch_url(client, target_url, semaphore, broadcast)
+    # allow_cache_skip=False: we need the root's body to discover assets, even
+    # when the server says it has not changed.
+    root_url, html_body = await fetch_url(client, target_url, semaphore, broadcast,
+                                          allow_cache_skip=False)
     if html_body is None:
         if broadcast:
             await broadcast({
@@ -1530,7 +1566,8 @@ async def spider_target(
         while queue and len(visited_pages) < max_pages:
             batch = queue[: max_pages - len(visited_pages)]
             queue = queue[len(batch):]
-            fetch_tasks = [fetch_url(client, u, semaphore, broadcast) for u in batch]
+            fetch_tasks = [fetch_url(client, u, semaphore, broadcast,
+                                     allow_cache_skip=False) for u in batch]
             fetched_pages = await asyncio.gather(*fetch_tasks, return_exceptions=False)
             for page_url, page_body in fetched_pages:
                 visited_pages.add(page_url)
@@ -2061,23 +2098,18 @@ async def validate_with_gemini(
 # Discord Webhook Dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Embed accent colour, keyed on the finding's *effective* severity rather than
+# on its type name. The previous per-type table listed 16 of the registry's 60+
+# detectors, so every newer pattern (the whole AI/ML provider family included)
+# silently fell through to the CRITICAL red — an ElevenLabs key and an AWS root
+# key arrived in Discord looking identical. Severity already comes from the
+# pattern registry and accounts for the public-by-design downgrade, so use it.
 _SEVERITY_COLORS: dict[str, int] = {
-    "AWS Access Key":              0xE53E3E,
-    "AWS Secret Access Key":       0xE53E3E,
-    "GitHub Personal Access Token":0xE53E3E,
-    "Stripe Secret Key":           0xE53E3E,
-    "Private Key Block":           0xE53E3E,
-    "Google Cloud API Key":        0xDD6B20,
-    "GitHub OAuth Token":          0xDD6B20,
-    "Slack Webhook":               0xD69E2E,
-    "SendGrid API Key":            0xDD6B20,
-    "Twilio Auth Token":           0xDD6B20,
-    "Heroku API Key":              0xDD6B20,
-    "Shopify Access Token":        0xDD6B20,
-    "Mailgun API Key":             0xDD6B20,
-    "JWT Token":                   0xD69E2E,
-    "Stripe Publishable Key":      0x3182CE,
-    "Generic High-Entropy Secret": 0xD69E2E,
+    "CRITICAL": 0xE53E3E,
+    "HIGH":     0xDD6B20,
+    "MEDIUM":   0xD69E2E,
+    "LOW":      0x3182CE,
+    "INFO":     0x63B3ED,
 }
 
 # secret_type name -> severity, sourced directly from the pattern registry
@@ -2095,7 +2127,7 @@ async def dispatch_discord(
         return False
 
     raw = finding.raw
-    color = _SEVERITY_COLORS.get(raw.secret_type, 0xE53E3E)
+    color = _SEVERITY_COLORS.get(finding.effective_severity(), 0xD69E2E)
     safe_snippet_full = redact_snippet(raw.context_snippet, raw.raw_match)
     snippet = (
         safe_snippet_full[:900] + "…"
@@ -2105,17 +2137,18 @@ async def dispatch_discord(
     redacted = redact_secret(raw.raw_match)
 
     payload = {
-        "username": "SecretNode v2.4.0",
+        "username": f"SecretNode v{version.TOOL_VERSION}",
         "avatar_url": "https://cdn-icons-png.flaticon.com/512/2092/2092757.png",
         "embeds": [{
             "title": f"🚨 Secret Exposed: {raw.secret_type}",
             "color": color,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "footer": {"text": "SecretNode v2.4.0 — ASM Scanner"},
+            "footer": {"text": f"SecretNode v{version.TOOL_VERSION} — ASM Scanner"},
             "fields": [
                 {"name": "🎯 Target",        "value": f"`{raw.target_url}`",      "inline": False},
                 {"name": "📄 Source Asset",  "value": f"`{raw.source_url}`",      "inline": False},
                 {"name": "🔑 Secret Type",   "value": raw.secret_type,            "inline": True},
+                {"name": "⚠️ Severity",      "value": finding.effective_severity(), "inline": True},
                 {"name": "📊 Entropy",       "value": f"`{raw.entropy:.2f} bits`","inline": True},
                 {"name": "🤖 AI Confidence", "value": f"`{finding.confidence}%`", "inline": True},
                 {"name": "💬 AI Reasoning",  "value": finding.reason[:1000],      "inline": False},
@@ -2238,6 +2271,13 @@ async def run_scan(
     # Pacing learned from a previous target must not penalise this one.
     reset_throttle()
 
+    # Likewise the cache-hit tally. It is module state (see _asset_cache_in), so
+    # without this a scan that never primes the cache — every deep-scan host
+    # takes that path — inherits the previous scan's count and reports assets it
+    # never looked at. Only the tally is cleared: `load_asset_cache()` runs
+    # before this and its priming must survive.
+    _asset_cache_hits.clear()
+
     async def emit(event: dict[str, Any]) -> None:
         if broadcast:
             await broadcast(event)
@@ -2250,7 +2290,9 @@ async def run_scan(
         "scan_id":             scan_id,
         "target_url":         target_url,
         "status":             "running",
-        "assets_fetched":     0,
+        "assets_fetched":     0,   # bodies downloaded this run
+        "assets_cached":      0,   # skipped: unchanged since last scan and clean then
+        "assets_scanned":     0,   # total coverage = fetched + cached
         "raw_findings":       0,
         "validated_findings": 0,
         "confirmed_findings": [],
@@ -2353,10 +2395,21 @@ async def run_scan(
                                 f"{len(result['associated_hosts'])} associated host(s)"),
                 })
 
+        # Three distinct numbers, because conflating them misreports coverage:
+        #   assets_fetched — bodies actually downloaded this run
+        #   assets_cached  — unchanged since last scan and clean then, so skipped
+        #   assets_scanned — total coverage, and the number a report should lead
+        #                    with. A fully-cached re-scan downloads nothing; saying
+        #                    "0 assets" would describe that as having scanned
+        #                    nothing, when in fact every asset was accounted for.
+        cached = cached_clean_count()
         result["assets_fetched"] = len(assets)
+        result["assets_cached"] = cached
+        result["assets_scanned"] = len(assets) + cached
         await emit({
             "type": "log", "level": "INFO",
-            "message": f"Asset collection complete — {len(assets)} files to scan",
+            "message": (f"Asset collection complete — {len(assets)} file(s) to scan"
+                        + (f", {cached} unchanged since last scan (cached)" if cached else "")),
         })
 
         # ── 1b. Passive security-posture check (R8) ─────────────────────────

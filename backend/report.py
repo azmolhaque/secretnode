@@ -22,8 +22,9 @@ import io
 import os
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
+
+import version
 
 _SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
@@ -35,21 +36,10 @@ _SARIF_SECURITY_SEVERITY = {"CRITICAL": "9.5", "HIGH": "8.0", "MEDIUM": "5.0", "
 _TOOL_URI = "https://github.com/azmolhaque/secretnode"
 
 
-def _tool_version() -> str:
-    """Single-source the version from pyproject.toml so client reports never stamp
-    a stale version (they used to be pinned at 2.3.0). Falls back if unreadable."""
-    try:
-        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
-        for line in pyproject.read_text(encoding="utf-8").splitlines():
-            s = line.strip()
-            if s.startswith("version") and "=" in s:
-                return s.split("=", 1)[1].strip().strip('"').strip("'")
-    except Exception:
-        pass
-    return "2.7.9"
-
-
-_TOOL_VERSION = _tool_version()
+# Version comes from the shared module so reports, the API banner and the
+# Discord alerter can never disagree about which build produced a finding.
+_tool_version = version.read_version
+_TOOL_VERSION = version.TOOL_VERSION
 
 
 def _severity_of(finding: dict[str, Any]) -> str:
@@ -68,15 +58,27 @@ def _severity_of(finding: dict[str, Any]) -> str:
 REPORT_FULL_SECRETS = os.environ.get("REPORT_FULL_SECRETS", "false").lower() == "true"
 
 
-def redact_secret(value: str) -> str:
-    """Mask the middle of a credential, keeping enough to identify it."""
+def mask_secret(value: str) -> str:
+    """Mask the middle of a credential, keeping enough to identify it.
+
+    Unconditional — no opt-out. Use this for any surface an operator did not
+    deliberately ask for the full value on (the dashboard, WebSocket events,
+    anything that leaves the process without passing through report generation).
+    """
     if not value:
         return ""
-    if REPORT_FULL_SECRETS:
-        return value
     if len(value) <= 12:
         return "*" * len(value)
     return f"{value[:6]}…{'*' * 6}…{value[-4:]}  ({len(value)} chars)"
+
+
+def redact_secret(value: str) -> str:
+    """Report-facing mask. Honours the REPORT_FULL_SECRETS opt-in, which exists
+    so an operator handing a key to the client's engineer for rotation can
+    produce one report containing it — a deliberate, per-deployment decision."""
+    if REPORT_FULL_SECRETS:
+        return value
+    return mask_secret(value)
 
 
 def _sort_key(finding: dict[str, Any]) -> tuple[int, int, str]:
@@ -102,7 +104,13 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     new_count = scan.get("new_findings_count", len(confirmed))
     recurring_count = scan.get("recurring_findings_count", 0)
     duration = scan.get("duration_seconds", 0)
-    assets = scan.get("assets_fetched", 0)
+    # Coverage, not downloads. A re-scan where nothing changed downloads zero
+    # bodies but still accounts for every asset; reporting the download count
+    # would tell the client we scanned nothing. Falls back to assets_fetched for
+    # scan records written before the cache counters existed.
+    fetched = int(scan.get("assets_fetched", 0) or 0)
+    cached = int(scan.get("assets_cached", 0) or 0)
+    assets = int(scan.get("assets_scanned", 0) or 0) or (fetched + cached)
 
     sev_counts: dict[str, int] = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for f in confirmed:
@@ -339,7 +347,7 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     <div><b>Scan started</b> {scanned_at}</div>
     <div><b>Report generated</b> {generated_at}</div>
     <div><b>Scan duration</b> {duration}s</div>
-    <div><b>Assets analysed</b> {assets}</div>
+    <div><b>Assets analysed</b> {assets}{f' ({cached} unchanged since the previous scan)' if cached else ''}</div>
     <div><b>Candidates screened</b> {raw_screened}</div>
   </div>
 
@@ -404,6 +412,30 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
   </footer>
 </body>
 </html>"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JSON
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_json_report(scan: dict[str, Any]) -> dict[str, Any]:
+    """The raw scan record, with credentials masked the same way every other
+    report format masks them.
+
+    The JSON export used to hand back the stored record verbatim, which made it
+    the one deliverable format that still contained live keys — the same file a
+    client is most likely to pipe into another tool or commit to a triage repo.
+    """
+    out = dict(scan)
+    for key in ("confirmed_findings", "needs_review_findings"):
+        findings = out.get(key)
+        if isinstance(findings, list):
+            out[key] = [
+                {**f, "raw_match": redact_secret(str(f.get("raw_match", "")))}
+                if isinstance(f, dict) and f.get("raw_match") else f
+                for f in findings
+            ]
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -554,6 +586,13 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
                 "verified": verified,
                 "verified_detail": verified_detail,
                 "impact": impact,
+                # Same redacted value the CSV carries, so a triager can
+                # correlate a SARIF result with the spreadsheet row and the
+                # Discord alert without going back to the raw scan record.
+                "matched_value_partial": redact_secret(str(f.get("raw_match", "") or "")),
+                "found_at": str(f.get("found_at", "") or ""),
+                # Present only on deep scans: which host in the domain served it.
+                **({"host": str(f["_host"])} if f.get("_host") else {}),
                 "status": "needs_review" if is_review else "confirmed",
             },
         })
@@ -575,6 +614,17 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
                 "target_url": scan.get("target_url", ""),
                 "scan_id": scan.get("scan_id", ""),
                 "assets_fetched": scan.get("assets_fetched", 0),
+                "assets_cached": scan.get("assets_cached", 0),
+                "assets_scanned": (scan.get("assets_scanned", 0)
+                                   or scan.get("assets_fetched", 0)),
+                "raw_findings_screened": scan.get("raw_findings", 0),
+                "duration_seconds": scan.get("duration_seconds", 0),
+                "deep_scan": bool(scan.get("deep_scan")),
+                # Coverage a reader needs to judge what a clean result means.
+                **({"hosts_scanned": scan.get("totals", {}).get("hosts_scanned", 0),
+                    "live_hosts": scan.get("totals", {}).get("live_hosts", 0)}
+                   if scan.get("deep_scan") else {}),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
             },
         }],
     }
@@ -635,13 +685,19 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
         return html.escape(str(f.get("source_url", f.get("target_url", ""))))
 
     def conf_row(f: dict[str, Any]) -> str:
+        verified = str(f.get("verified", "")).lower()
+        vbadge = ('<span class="sev sev-critical">VERIFIED ACTIVE</span>'
+                  if verified == "verified" else html.escape(verified or "—"))
+        impact = str(f.get("impact", "") or "")
         return ("<tr>"
                 f'<td class="mono">{html.escape(str(f.get("_host", "")))}</td>'
                 f"<td>{_sev(f)}</td>"
                 f'<td>{html.escape(str(f.get("secret_type", "")))}</td>'
                 f'<td class="mono small">{_loc(f)}</td>'
+                f'<td class="mono small">{html.escape(redact_secret(str(f.get("raw_match", "") or "")))}</td>'
                 f'<td style="text-align:center;">{int(f.get("confidence", 0) or 0)}%</td>'
-                f'<td class="small">{html.escape(str(f.get("reason", "")))}</td>'
+                f'<td class="small">{vbadge}</td>'
+                f'<td class="small">{html.escape(impact) if impact else html.escape(str(f.get("reason", "")))}</td>'
                 "</tr>")
 
     def review_row(f: dict[str, Any]) -> str:
@@ -654,7 +710,7 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
                 "</tr>")
 
     conf_rows = "\n".join(conf_row(f) for f in confirmed_findings) or \
-        '<tr><td colspan="6" class="empty">No confirmed credential exposures.</td></tr>'
+        '<tr><td colspan="8" class="empty">No confirmed credential exposures.</td></tr>'
     review_rows = "\n".join(review_row(f) for f in review_findings) or \
         '<tr><td colspan="5" class="empty">None.</td></tr>'
     assoc_hosts_html = ", ".join(html.escape(h) for h in deep.get("associated_hosts", [])) or "—"
@@ -719,6 +775,7 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
     <div class="stat"><div class="num">{int(totals.get('subdomains', 0))}</div><div class="label">Subdomains found</div></div>
     <div class="stat"><div class="num">{int(totals.get('live_hosts', 0))}</div><div class="label">Live hosts</div></div>
     <div class="stat"><div class="num">{int(totals.get('hosts_scanned', 0))}</div><div class="label">Hosts scanned</div></div>
+    <div class="stat"><div class="num">{int(totals.get('assets_scanned', deep.get('assets_scanned', 0)) or totals.get('assets_fetched', 0) or 0)}</div><div class="label">Assets analysed</div></div>
     <div class="stat"><div class="num">{int(totals.get('historical_urls', 0))}</div><div class="label">Historical URLs</div></div>
     <div class="stat"><div class="num">{confirmed_total}</div><div class="label">Confirmed exposures</div></div>
     <div class="stat"><div class="num">{int(totals.get('needs_review', 0))}</div><div class="label">Needs review</div></div>
@@ -742,8 +799,12 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
   </table>
 
   <h2>Confirmed Findings (all hosts)</h2>
+  <div class="small" style="margin-bottom:6px;">Matched values are redacted — enough of each
+  credential is shown to identify which key to rotate, never enough to use it. The same value
+  appearing on more than one host is a single credential shared across environments: rotate it once,
+  then remove it from every build config listed.</div>
   <table>
-    <thead><tr><th>Host</th><th>Severity</th><th>Type</th><th>Location</th><th>Confidence</th><th>AI Reasoning</th></tr></thead>
+    <thead><tr><th>Host</th><th>Severity</th><th>Type</th><th>Location</th><th>Matched value (redacted)</th><th>Confidence</th><th>Verified</th><th>Impact</th></tr></thead>
     <tbody>{conf_rows}</tbody>
   </table>
 
