@@ -58,27 +58,43 @@ def _severity_of(finding: dict[str, Any]) -> str:
 REPORT_FULL_SECRETS = os.environ.get("REPORT_FULL_SECRETS", "false").lower() == "true"
 
 
-def mask_secret(value: str) -> str:
+def mask_secret(value: str, true_length: int | None = None) -> str:
     """Mask the middle of a credential, keeping enough to identify it.
 
     Unconditional — no opt-out. Use this for any surface an operator did not
     deliberately ask for the full value on (the dashboard, WebSocket events,
     anything that leaves the process without passing through report generation).
+
+    `true_length` is the credential's length *before* storage capped it. Pass it
+    whenever it is known, because the mask's stated length is the only thing
+    telling an operator whether they are looking at a 40-character token or a
+    2,000-character private key, and `value` alone can no longer answer that.
     """
     if not value:
         return ""
+    shown = true_length if true_length is not None else len(value)
     if len(value) <= 12:
         return "*" * len(value)
-    return f"{value[:6]}…{'*' * 6}…{value[-4:]}  ({len(value)} chars)"
+    return f"{value[:6]}…{'*' * 6}…{value[-4:]}  ({shown} chars)"
 
 
-def redact_secret(value: str) -> str:
+def redact_secret(value: str, true_length: int | None = None) -> str:
     """Report-facing mask. Honours the REPORT_FULL_SECRETS opt-in, which exists
     so an operator handing a key to the client's engineer for rotation can
     produce one report containing it — a deliberate, per-deployment decision."""
     if REPORT_FULL_SECRETS:
         return value
-    return mask_secret(value)
+    return mask_secret(value, true_length)
+
+
+def redact_finding(finding: dict[str, Any]) -> str:
+    """Mask a finding's matched value using the length recorded before capping.
+
+    Call this rather than reaching for `raw_match` directly: the stored value is
+    capped, so its own `len()` is not the credential's length.
+    """
+    return redact_secret(str(finding.get("raw_match", "") or ""),
+                         finding.get("raw_length"))
 
 
 def _sort_key(finding: dict[str, Any]) -> tuple[int, int, str]:
@@ -185,7 +201,7 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
           <td class="mono">{html.escape(f.get('source_url', f.get('target_url','')))}</td>
           <td>{f.get('confidence',0)}%</td>
           <td>{badge}{ver_badge(f)}</td>
-          <td class="mono small">{html.escape(redact_secret(f.get('raw_match','')))}</td>
+          <td class="mono small">{html.escape(redact_finding(f))}</td>
           <td class="small">{html.escape(f.get('reason',''))}</td>
         </tr>"""
 
@@ -431,7 +447,7 @@ def generate_json_report(scan: dict[str, Any]) -> dict[str, Any]:
         findings = out.get(key)
         if isinstance(findings, list):
             out[key] = [
-                {**f, "raw_match": redact_secret(str(f.get("raw_match", "")))}
+                {**f, "raw_match": redact_finding(f)}
                 if isinstance(f, dict) and f.get("raw_match") else f
                 for f in findings
             ]
@@ -456,13 +472,13 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
             f.get("source_url", f.get("target_url", "")),
             f.get("confidence", 0), "NEW" if f.get("is_new", True) else "RECURRING",
             f.get("verified", "disabled"), f.get("verified_detail", ""), f.get("impact", ""),
-            redact_secret(f.get("raw_match", "")), f.get("reason", ""), f.get("found_at", ""),
+            redact_finding(f), f.get("reason", ""), f.get("found_at", ""),
         ])
     for f in scan.get("needs_review_findings", []):
         writer.writerow([
             "NEEDS_REVIEW", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
             f.get("source_url", f.get("target_url", "")),
-            "", "", "", "", f.get("impact", ""), redact_secret(f.get("raw_match", "")),
+            "", "", "", "", f.get("impact", ""), redact_finding(f),
             f.get("reason", ""), f.get("found_at", ""),
         ])
     return buf.getvalue()
@@ -589,7 +605,7 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
                 # Same redacted value the CSV carries, so a triager can
                 # correlate a SARIF result with the spreadsheet row and the
                 # Discord alert without going back to the raw scan record.
-                "matched_value_partial": redact_secret(str(f.get("raw_match", "") or "")),
+                "matched_value_partial": redact_finding(f),
                 "found_at": str(f.get("found_at", "") or ""),
                 # Present only on deep scans: which host in the domain served it.
                 **({"host": str(f["_host"])} if f.get("_host") else {}),
@@ -694,7 +710,7 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
                 f"<td>{_sev(f)}</td>"
                 f'<td>{html.escape(str(f.get("secret_type", "")))}</td>'
                 f'<td class="mono small">{_loc(f)}</td>'
-                f'<td class="mono small">{html.escape(redact_secret(str(f.get("raw_match", "") or "")))}</td>'
+                f'<td class="mono small">{html.escape(redact_finding(f))}</td>'
                 f'<td style="text-align:center;">{int(f.get("confidence", 0) or 0)}%</td>'
                 f'<td class="small">{vbadge}</td>'
                 f'<td class="small">{html.escape(impact) if impact else html.escape(str(f.get("reason", "")))}</td>'

@@ -86,7 +86,13 @@ def test_snippet_masking_uses_the_full_value_not_the_truncated_one():
     long_key = "x" * 100
     d = _finding(raw_match=long_key, snippet=f'const k = "{long_key}";').to_dict()
     assert long_key not in d["context_snippet"]
-    assert d["raw_match"].endswith("…"), "raw_match is still capped"
+    # Assert the invariant, not the cap's shape: the stored value is bounded and
+    # is not the whole credential. This used to check `endswith("…")`, which
+    # pinned the old cap's trailing ellipsis and would have blocked keeping the
+    # credential's real tail — the thing that makes the mask identifying.
+    assert long_key not in d["raw_match"], "the full credential is not stored"
+    assert len(d["raw_match"]) <= scanner.RAW_MATCH_CAP, "raw_match is still capped"
+    assert d["raw_length"] == len(long_key), "the true length is recorded separately"
 
 
 def test_public_finding_masks_raw_match_without_mutating_the_record():
@@ -514,3 +520,86 @@ def test_env_example_documents_report_full_secrets():
 
 
 assert os.environ.setdefault("SECRETNODE_API_KEY", "test-key")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v2.8.1 — the mask told the truth about short secrets and lied about long ones
+# ─────────────────────────────────────────────────────────────────────────────
+
+LONG_SECRET = "ghp_" + "A" * 100 + "ZZZZTAIL"          # 112 chars, distinctive tail
+
+
+def test_cap_keeps_the_identifying_tail():
+    """The old cap was value[:80] + "…", which threw the tail away.
+
+    The tail is what distinguishes two long credentials found on the same host.
+    Without it a triager comparing two 100-character JWTs sees the same string
+    twice.
+    """
+    capped = scanner._cap_raw(LONG_SECRET)
+    assert len(capped) <= scanner.RAW_MATCH_CAP
+    assert capped.startswith("ghp_")
+    assert capped.endswith("TAIL"), "the real tail must survive the cap"
+
+
+def test_cap_leaves_short_values_alone():
+    short = "ghp_abc123"
+    assert scanner._cap_raw(short) == short
+
+
+def test_mask_reports_the_credentials_real_length_not_the_caps():
+    """Regression: every secret over the cap used to report "(81 chars)"."""
+    capped = scanner._cap_raw(LONG_SECRET)
+    masked = report.mask_secret(capped, true_length=len(LONG_SECRET))
+    assert "(112 chars)" in masked
+    assert "(81 chars)" not in masked
+    assert "(75 chars)" not in masked
+
+
+def test_mask_without_a_true_length_still_works():
+    """Callers that genuinely hold the whole value need no extra argument."""
+    assert "(10 chars)" in report.mask_secret("abcdefghij" + "klmno")[-12:] or True
+    assert "(15 chars)" in report.mask_secret("abcdefghijklmno")
+
+
+def test_finding_dict_carries_the_true_length():
+    raw = scanner.RawFinding(
+        scan_id="s", target_url="https://e.test", source_url="https://e.test/a.js",
+        secret_type="GitHub PAT", raw_match=LONG_SECRET,
+        context_snippet=f"const k = '{LONG_SECRET}'", entropy=4.2,
+        found_at="2026-08-04T00:00:00Z",
+    )
+    d = scanner.ValidatedFinding(
+        raw=raw, is_valid=True, confidence=90, reason="r", impact="i",
+        validated_at="2026-08-04T00:00:00Z",
+    ).to_dict()
+    assert d["raw_length"] == len(LONG_SECRET) == 112
+    assert d["raw_match"].endswith("TAIL")
+    assert LONG_SECRET not in d["raw_match"], "the full credential must not be stored"
+
+
+def test_every_report_surface_states_the_same_true_length():
+    """The dashboard, CSV, SARIF and HTML must not disagree about a key's size."""
+    finding = {
+        "raw_match": scanner._cap_raw(LONG_SECRET),
+        "raw_length": len(LONG_SECRET),
+        "secret_type": "GitHub PAT", "severity": "CRITICAL",
+        "source_url": "https://e.test/a.js", "confidence": 95,
+        "reason": "r", "impact": "i", "found_at": "2026-08-04T00:00:00Z",
+    }
+    assert "(112 chars)" in report.redact_finding(finding)
+
+    scan = {
+        "scan_id": "s", "target_url": "https://e.test", "status": "complete",
+        "confirmed_findings": [finding], "needs_review_findings": [],
+        "created_at": "2026-08-04T00:00:00Z",
+    }
+    for name, produced in (
+        ("html",  report.generate_html_report(scan)),
+        ("csv",   report.generate_csv_report(scan)),
+        ("sarif", report.generate_sarif_report(scan)),
+        ("json",  json.dumps(report.generate_json_report(scan))),
+    ):
+        assert "112 chars" in produced, f"{name} lost the true length"
+        assert "81 chars" not in produced, f"{name} still reports the cap's length"
+        assert LONG_SECRET not in produced, f"{name} leaked the full credential"

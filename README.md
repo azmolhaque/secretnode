@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-382%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.8.0-blue)
+![Tests](https://img.shields.io/badge/tests-388%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.8.1-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,7 +14,7 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.8.0 — the credential stops at the API boundary** · [full changelog](CHANGELOG.md) · [releases](https://github.com/azmolhaque/secretnode/releases)
+> **v2.8.1 — the mask now states a credential's real length** · [full changelog](CHANGELOG.md) · [releases](https://github.com/azmolhaque/secretnode/releases)
 >
 > The latest release closed a bug worth stating plainly: **a re-scan of an unchanged site could
 > report CLEAN while the credential was still exposed.** The asset cache treated a `304 Not

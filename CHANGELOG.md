@@ -3,6 +3,45 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.8.1] — The mask told the truth about short secrets and lied about long ones
+
+Found while re-reading the redaction work from v2.8.0. The masking itself was right; what
+reached it was not.
+
+### Fixed
+
+- **Every credential longer than 80 characters masked as `(81 chars)`, with a tail made of
+  padding.** `to_dict()` capped `raw_match` with `value[:80] + "…"`, and the mask applied
+  downstream then reported `len()` and `value[-4:]` of that capped string. So a 112-character
+  token surfaced everywhere as `ghp_AA…******…AAA…  (81 chars)` — a fabricated length, and a
+  "tail" consisting of padding and the ellipsis itself.
+
+  Both halves of the mask exist to identify a credential without exposing it, and both were
+  useless for exactly the secrets where identification matters most: GCP service-account keys,
+  JWTs, PGP blocks, database URIs with long passwords. Two different 100-character tokens found
+  on the same host rendered as the same string, so a triager could not tell them apart, and an
+  engineer told to rotate "the 81-character key" had nothing to search for.
+
+  The cap now keeps the head *and* the real tail inside the same 80-character budget, and the
+  credential's true length travels beside it as `raw_length`. `mask_secret()` and
+  `redact_secret()` take that length; `redact_finding()` is the helper report surfaces should
+  call so the dashboard, CSV, SARIF, HTML and JSON cannot disagree about how big a key is.
+
+### Tests
+
+- Six cases, including a mutation check that reverting the cap fails them. One v2.8.0 test was
+  asserting the cap's trailing ellipsis rather than the invariant underneath it — it now checks
+  that the full credential is absent and the value is bounded, which is what it always meant.
+  Suite: 382 → 388.
+
+### Known limitation, unchanged
+
+`REPORT_FULL_SECRETS` still cannot reveal a credential longer than the cap, because the full
+value is deliberately never persisted. For most secrets the opt-in behaves as documented; for a
+long key it returns the capped value. Lifting that means storing credentials verbatim, which is
+the thing v2.8.0 set out to stop — so it is recorded here as a trade-off rather than quietly
+fixed.
+
 ## [2.8.0] — Artifact review: the credential stops at the API boundary
 
 Driven by a side-by-side read of the artifacts from a real v2.7.9 deep scan — the dashboard modal,

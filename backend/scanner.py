@@ -181,6 +181,26 @@ class RawFinding:
         return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
+RAW_MATCH_CAP = 80
+
+
+def _cap_raw(value: str) -> str:
+    """Bound what gets persisted without destroying what identifies it.
+
+    The old cap was `value[:80] + "…"`, which discarded the credential's tail —
+    the very thing that distinguishes two long secrets found on the same host.
+    Worse, the mask applied downstream then reported `value[-4:]` of the capped
+    string, so a 112-character key surfaced as `ghp_AA…******…AAA…  (81 chars)`:
+    a fabricated length and a tail made of padding and an ellipsis.
+
+    Keeping the head *and* the real tail costs nothing and makes the mask
+    truthful. The true length travels separately, in `raw_length`.
+    """
+    if len(value) <= RAW_MATCH_CAP:
+        return value
+    return f"{value[:RAW_MATCH_CAP - 5]}…{value[-4:]}"
+
+
 @dataclass
 class ValidatedFinding:
     raw: RawFinding
@@ -221,7 +241,10 @@ class ValidatedFinding:
             "target_url":     self.raw.target_url,
             "source_url":     self.raw.source_url,
             "secret_type":    self.raw.secret_type,
-            "raw_match":      raw_value[:80] + "…" if len(raw_value) > 80 else raw_value,
+            "raw_match":      _cap_raw(raw_value),
+            # The credential's real length, captured before the cap above throws
+            # it away. Without this every long secret masks as "(81 chars)".
+            "raw_length":     len(raw_value),
             "context_snippet": redact_snippet(self.raw.context_snippet, raw_value)[:400],
             "entropy":        self.raw.entropy,
             "is_valid":       self.is_valid,
