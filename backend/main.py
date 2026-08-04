@@ -210,7 +210,12 @@ def public_finding(finding: dict[str, Any]) -> dict[str, Any]:
     # mask_secret, not redact_secret: REPORT_FULL_SECRETS is an opt-in for a
     # report the operator generates and controls, not for every dashboard
     # session and WebSocket subscriber.
-    return {**finding, "raw_match": report_gen.mask_secret(str(raw))}
+    #
+    # raw_length is passed because the stored value is capped: without it the
+    # dashboard reports the cap's length rather than the credential's, and every
+    # secret over the cap looks like the same size.
+    return {**finding, "raw_match": report_gen.mask_secret(
+        str(raw), finding.get("raw_length"))}
 
 
 def public_scan(scan: dict[str, Any]) -> dict[str, Any]:
