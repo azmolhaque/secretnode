@@ -3,71 +3,31 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-111%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-382%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.8.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
 Passive Attack Surface Management scanner for detecting credential leaks in public-facing infrastructure.
-Pipeline: **browser-like spider (+ source-map mining) → regex (54 patterns) + base64 decode → entropy filter → AI validation (Gemini) → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV** report export. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
+Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + base64 decode → entropy filter → AI validation (Gemini) → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.0.1 — Security hardening pass**
-> This build fixes several issues found in an agency-readiness review before deployment:
-> - **Path traversal** in the static file server — fixed.
-> - **No authentication** on the API/WebSocket/dashboard — now requires `SECRETNODE_API_KEY` on every request; the server refuses to boot without it.
-> - **Secrets leaking unredacted into Discord** via the code-snippet field — fixed; snippets are now redacted before dispatch.
-> - **Stored/reflected XSS** in the dashboard via unescaped AI-reasoning/source-URL fields — fixed with a proper `escapeHtml()` pass.
-> - **Insecure CORS** (`*` + credentials) — replaced with an explicit `ALLOWED_ORIGINS` allowlist.
-> - **No SSRF guard** — scans against private/loopback/link-local targets (e.g. cloud metadata IPs) are now blocked by default (`ALLOW_PRIVATE_TARGETS=false`).
-> - **No scan-scope restriction** — JS asset discovery now stays on the target's own domain by default (`SCOPE_SAME_DOMAIN=true`).
-> - **No persistence** — scan results are now saved to SQLite (`storage.py`) via the previously-unused `aiosqlite` dependency, so history survives restarts. New endpoint: `GET /api/scans/history`.
+> **v2.8.0 — the credential stops at the API boundary** · [full changelog](CHANGELOG.md) · [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> **Before your first run:** copy `.env.example` to `.env` and set `SECRETNODE_API_KEY` (e.g. `openssl rand -hex 24`). The dashboard will prompt you for this key on first load and remember it for the browser session.
-
-> **v2.0.2 — Industrial-grade reliability pass**
-> - **Fixed a silent data-loss bug**: findings that failed AI validation after all retries used to vanish with no log — now they're returned as a clearly-flagged `needs_review` finding (never dropped), broadcast to the dashboard, persisted, and Discord-alerted if the underlying pattern is CRITICAL severity.
-> - **Concurrent-scan cap** (`MAX_CONCURRENT_SCANS`, default 3) — protects the Pi 5 from resource exhaustion if multiple scans are triggered at once; returns a clear `429` instead of silently degrading.
-> - **Raw-findings safety cap** (`MAX_RAW_FINDINGS_PER_SCAN`, default 500) — a minified/obfuscated bundle full of high-entropy noise can no longer generate unbounded Gemini calls or memory use.
-> - **Audit logging** — every scan request now logs the requesting IP and target URL.
-> - **Input validation** — `target_url` now has a max length; malformed requests fail fast with a clear 400 instead of propagating.
-> - **Richer health check** (`/api/health`) reports Gemini/Discord configuration status and active scan count — useful for uptime monitoring.
-> - **20-test pytest smoke suite** added (`backend/tests/test_scanner.py`) covering entropy scoring, redaction, scope restriction, and the needs-review regression — run with `pytest backend/tests/ -v`.
-
-> **v2.1.0 — New features**
-> - **Scan diffing** — every scan now compares against the most recent prior scan of the same `target_url` and marks each confirmed finding `NEW` or `RECURRING`. Discord only alerts on genuinely new findings, so re-scanning a long-lived target no longer spams the channel.
-> - **False-positive suppression** — mark any finding as a false positive from the dashboard (FP button) or via `POST /api/findings/suppress`. Suppressed fingerprints are silently filtered out of all future scans of that target. Manage the list via `GET /api/findings/suppressed` / `DELETE /api/findings/suppress/{fingerprint}`.
-> - **Client-ready report export** — `GET /api/scans/{scan_id}/report?format=html|csv|json`. The HTML report is self-contained and print-styled (browser "Print → Save as PDF" gives you a PDF deliverable without a heavy PDF-rendering dependency on the Pi). Buttons added to the dashboard.
-> - **Multi-page crawling** — scans can now shallow-crawl same-domain pages linked from the target (`crawl_pages`, default 1 = target page only, capped at `MAX_CRAWL_PAGES_CAP`). Set the "PAGES" field in the dashboard or pass `crawl_pages` in the API body.
-> - **robots.txt awareness** — logs a notice if the target disallows crawling (informational only — this is an authorized security tool, not a generic bot, so it does not block the scan).
-> - **13 new tests** (fingerprinting, page-link extraction, storage diffing/suppression roundtrips) — suite is now 33 tests total.
-
-> **v2.2.0 — Capability & industrial-grade release**
-> - **Detection registry expanded 16 → 37 patterns** — OpenAI, Anthropic, GitLab, GitHub fine-grained PATs, Slack tokens, npm, PyPI, DigitalOcean, HashiCorp Vault, Google OAuth secrets, Square, Postman, Databricks, Telegram, Discord, Datadog, Azure Storage keys, Firebase, bearer tokens, PGP keys, and **database URIs / basic-auth URLs with embedded credentials**.
-> - **Every finding now carries `severity`, a `CWE` id, and a `remediation` string** — flowing into all reports and exports.
-> - **SARIF 2.1.0 export** (`?format=sarif`) — upload findings to GitHub code scanning or any SARIF-aware CI pipeline.
-> - **Severity-aware reports** — HTML/CSV sort critical-first and include per-type remediation guidance.
-> - **Environment-tunable engine** — the tuning constants the docs referenced are now actually read from env vars.
-> - **Industrial-grade scaffolding** — MIT `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `pyproject.toml` (ruff + pytest), **GitHub Actions CI** (lint + tests on 3.11/3.12 + Docker build), `Dockerfile` + `docker-compose.yml`.
-> - **Suite grew 33 → 58 tests.** Run with `pytest`.
-
-> **v2.3.0 — ASM-industry alignment: verification-first & CI-native**
-> Grounded in 2025–2026 ASM / secret-scanning practice (verification-first detection + CI-native gating).
-> - **Optional live verification** (`VERIFY_SECRETS` / `?verify=true`) — read-only "is this key still active?" checks against each secret's own provider (GitHub, GitLab, Stripe, SendGrid, OpenAI, Slack, npm, Mailgun, Telegram, Cloudflare, DigitalOcean, Datadog, Notion, Linear, Figma, Postman, Doppler), à la TruffleHog `--only-verified`. **Off by default**, fails closed, never touches the scan target. Each finding gains a `verified` status, and `only_verified` mode drops dead-key noise.
-> - **Base64 decoding** of encoded blobs + **example/placeholder allowlisting** (e.g. AWS's `AKIAIOSFODNN7EXAMPLE`) — fewer false positives, more real catches.
-> - **CLI (`backend/cli.py`) + GitHub Action (`action.yml`)** — scan and emit SARIF from CI with `--fail-on-findings` as a build gate.
-> - **Registry now 44 patterns** (added Slack app-level, GitHub server/refresh, OpenAI service-account, New Relic, Grafana, HCP Terraform).
-> - **Suite grew 58 → 82 tests.**
-
-> **v2.4.0 — Field-hardening: WAF-resilient fetching, deeper coverage, current-gen detectors**
-> Driven by real Pi-5 dashboard runs against live targets that exposed three gaps.
-> - **Browser-like HTTP client (headline fix)** — a `SecretNode-bot` User-Agent got an instant **HTTP 403** from Cloudflare/WAF-fronted sites, so the scan couldn't even fetch the root. Now presents a current Chrome fingerprint (UA + Client-Hints + `Sec-Fetch-*` + HTTP/2) and, on a WAF challenge, **retries with a rotated fingerprint** and prints a diagnostic naming the likely cause. Resilience for *authorized* testing — scope, SSRF guard, passive-only behaviour and the authorization gate are unchanged (`SECRETNODE_USER_AGENT` to override).
-> - **Source-map mining** — declared `//# sourceMappingURL=` maps (`.js.map`) are fetched and scanned. Source maps carry the **un-minified original source** (comments, endpoints, hard-coded secrets stripped from the shipped bundle). `FOLLOW_SOURCE_MAPS` / `MAX_SOURCE_MAPS`.
-> - **Broader discovery** — `<script type="module">`, `<link rel="modulepreload">` and `preload as="script">` are now discovered; a **content-type gate** skips binary assets early.
-> - **10 current-generation detectors** — Supabase (2), Sentry DSN, Linear, Notion, Doppler, PostHog, Figma, Cloudflare (2026 prefixes), and Google Cloud **service-account JSON** keys. **Registry now 54 patterns.**
-> - **Dashboard** — live-verification `VERIFY` toggle; a clean post-scan WS close shows `WS: IDLE` (not a red error) and a mid-scan drop auto-reconnects once; the assets panel reflects every collected asset.
-> - **Suite grew 82 → 111 tests.** New optional deps `h2` + `brotli` degrade gracefully if absent.
+> The latest release closed a bug worth stating plainly: **a re-scan of an unchanged site could
+> report CLEAN while the credential was still exposed.** The asset cache treated a `304 Not
+> Modified` on the root page as "unchanged, previously clean, skip" — but an HTML page is a link
+> graph, not just something to grep, so skipping its body meant never parsing its `<script>` tags
+> and every JS bundle it referenced dropped out of the scan.
+>
+> It also finished a job v2.7.9 started: redaction now happens at the **API boundary** with no
+> opt-out, rather than in the report writer alone. The dashboard, the WebSocket stream, the stored
+> snippet and the JSON export were each still carrying live credentials.
+>
+> Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
+> README no longer keeps a second copy that can drift out of date.
 
 ---
 
@@ -132,7 +92,7 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (54 patterns) + 
 secretnode/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + WebSocket + static server + auth/SSRF guards
-│   ├── scanner.py           # Async scan engine (54 patterns, source maps, entropy, base64, Gemini, Discord)
+│   ├── scanner.py           # Async scan engine (63 patterns, source maps, entropy, base64, Gemini, Discord)
 │   ├── verifier.py          # Optional live credential verification (off by default)
 │   ├── cli.py               # CLI entrypoint (scan → SARIF/JSON/CSV/HTML; CI gate)
 │   ├── storage.py           # SQLite persistence: scan history + false-positive suppression
@@ -281,6 +241,12 @@ curl -s -X POST localhost:8000/api/scans \
 
 # 3) Stream live events (needs a websocket client, e.g. websocat)
 websocat "ws://localhost:8000/ws/logs/<scan_id>?api_key=$KEY"
+
+# 3b) Or hand it a whole domain — enumerate, probe, then scan every live host
+curl -sX POST localhost:8000/api/deep-scans \
+  -H "X-API-Key: $SECRETNODE_API_KEY" -H 'content-type: application/json' \
+  -d '{"domain":"example.com","crawl_pages":3,"max_targets":25,"include_historical":true}'
+#   -> same {scan_id, ws_url} shape; findings and reports are aggregated across hosts
 
 # 4) Fetch findings once complete
 curl -s localhost:8000/api/scans/<scan_id> -H "X-API-Key: $KEY" | jq '.confirmed_findings'
