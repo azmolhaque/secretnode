@@ -341,6 +341,40 @@ history in a named volume.
 - Scan history is persisted to SQLite (`backend/data/secretnode.db`) — survives restarts
 - The API/WebSocket/dashboard require `SECRETNODE_API_KEY` on every request (the server refuses to boot without one)
 
+### Where the passive line actually falls
+
+Worth stating precisely, because "passive scanner" gets used loosely:
+
+- **By default, SecretNode never contacts a third-party provider with a credential it found.** It
+  reads what the target already serves in public — pages, JavaScript bundles, source maps,
+  configuration — and never authenticates, never writes, never modifies.
+- **Liveness checking is a separate, opt-in step.** `--verify` exists (see
+  [Verification](#verification-opt-in--is-the-secret-actually-live)), it is off unless asked for,
+  and it is the smallest metadata call that establishes whether a key is still valid. It stops
+  there.
+- **The distinction is the point.** A report that says *"exposed, and I have not confirmed it is
+  active"* is weaker copy and a more honest artifact. Choosing when to cross that line belongs to
+  whoever signed the authorization, not to the tool.
+
+---
+
+## Who builds this
+
+SecretNode is written and maintained by **[Md. Azmol Haque Rony](https://github.com/azmolhaque)**
+— Google VRP–credited, Dhaka, Bangladesh. It is MIT-licensed and free to use, and it is also the
+delivery engine behind the continuous-monitoring tier at **[Cindrasec](https://cindrasec.com)**
+(also in [বাংলা](https://cindrasec.com/bn/)), an attack-surface and AI/LLM security studio for
+founders and SMEs.
+
+The code is public for a specific reason: a client evaluating a security vendor can read exactly
+what the scanner does with their credentials instead of taking the vendor's word for it. That is
+harder to fake than a testimonial.
+
+Related published research, in 9 languages each:
+
+- [Anatomy of an Exposed IAM Frontend — Google VRP](https://github.com/azmolhaque/security-writeups/blob/main/2026-05-exposed-iam-frontend-google-vrp.md) — a full authentication bypass on Google-acquisition infrastructure, fixed in 9 days, and why it resolved to credit rather than cash.
+- [The Same Model, 4.6× the Exposure](https://github.com/azmolhaque/security-writeups/blob/main/2026-07-prompt-injection-content-dependent.md) — prompt-injection resistance measured over 256 trials per attack: 46.9% vs 10.2% for the same model, with non-overlapping 95% confidence intervals.
+
 ---
 
 ## Tuning for Raspberry Pi 5
