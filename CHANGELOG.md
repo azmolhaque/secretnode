@@ -3,6 +3,70 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.12.0] — Verified contact lookup
+
+Built for a specific, expensive failure: an outreach email to
+`now@intelligentmachin.es` hard-bounced because the address came from a repeated search
+snippet rather than the company's own page. The correct address was sitting in a
+`mailto:` link on their website the whole time. That cost a full outreach cycle, and it
+is a mechanical failure with a mechanical fix — never accept an address that cannot be
+pointed at on a page that was actually fetched.
+
+`python3 -m ops.contacts acme.com` resolves a contact address and cites the page it came
+from.
+
+### The division of labour is the design
+
+- **A regex extracts; the model only ranks.** A regex finds every address in a document
+  with perfect recall and — the point — *cannot invent one*. Asking a language model to
+  "find the contact email" invites it to produce `contact@` + domain: plausible,
+  frequently wrong, and it does not look wrong in review.
+- **The model is consulted only to break a close tie**, and picks from an enum of
+  addresses that were actually found, so an invented address is not expressible. A clear
+  winner is never sent to the model — spending 15 seconds of Pi inference to confirm the
+  obvious is how an agent becomes slower than doing the job by hand.
+- **It works with Ollama switched off.** The model improves a ranking; it is never
+  load-bearing for correctness. A model failure falls back to deterministic ranking and
+  says so in the result.
+- **Every result is grounded anyway.** Extraction came from the fetched documents, so
+  `guards.assert_grounded` cannot fail — which is precisely why it is checked rather
+  than assumed. "Impossible by construction" is a claim that survives right up until
+  someone edits the constructor.
+
+### Ranking
+
+RFC 9116 `security.txt` outranks everything — a published, machine-readable declaration
+of where security correspondence goes. Below that: `mailto:` links (someone deliberately
+made it clickable), role priority tuned for this use (`security` > `hello`/`contact` >
+`support` > `sales` > `marketing`), the company's own domain over freemail, and
+`noreply@`/`postmaster@` rejected outright regardless of score. Ties break on the address
+itself, so the same input always yields the same recommendation.
+
+### This is browsing, not scanning — and it is enforced
+
+The company's own registrable domain only, a hard page cap, sequential with a delay
+between requests, GET only, and links are *followed* rather than guessed — except a short
+allowlist of conventional public paths and `/.well-known/security.txt`, which exists to
+be read. Deliberately **not** routed through `ops.ledger`: the ledger authorises
+*scanning*, and treating "read a company's public contact page" as a scan would make the
+signed-RoE gate meaningless by inflating it to cover ordinary browsing. If this module
+ever grows a capability that probes rather than reads, that decision must be revisited
+first.
+
+### Verified over real HTTP, not only mocked
+
+The unit tests use a mock transport; a live local server was also used to exercise the
+real path — content-type handling, encoding, redirects. `security.txt` correctly
+outranked the page-level addresses, `noreply@` was dropped, and the chosen address
+grounded to the exact page it came from.
+
+### Tests
+
+- `test_ops_contacts.py`: 28 tests, passing first run. Includes the motivating case
+  encoded directly — an address present only in a search snippet and absent from the
+  company's own site must never be returned, however confident the upstream source was.
+  Suite: 501 → 529.
+
 ## [2.11.0] — The authorization ledger: turning a promise into a check
 
 "No scan without a signed Rules of Engagement" appears on the website, in the FAQ, in
