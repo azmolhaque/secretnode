@@ -3,6 +3,26 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.12.1] — The self-check could not diagnose its own most likely failure
+
+Found on the first real run on the Pi. `python3 -m ops.selfcheck` was invoked with the
+system interpreter rather than the project virtualenv, and a tool whose entire purpose is
+answering "does this work on this machine" answered with a bare `ModuleNotFoundError`
+traceback.
+
+### Fixed
+
+- **A dependency preflight runs before anything third-party is imported.** It names the
+  missing module, prints which interpreter is actually running, detects whether a
+  virtualenv exists alongside, and prints the exact command to fix it. Wrong-interpreter
+  is far and away the most likely failure for this script, since the correct invocation
+  requires activating a venv two directories up from where the command is run — so it is
+  the one failure it must handle well.
+- **Exit code 2 now distinguishes "cannot run" from "ran and failed" (1).** A scheduler
+  or a cron wrapper needs to tell a broken environment apart from a failing check; both
+  collapsing to non-zero would have hidden a misconfigured deployment behind what looked
+  like a service outage.
+
 ## [2.12.0] — Verified contact lookup
 
 Built for a specific, expensive failure: an outreach email to
