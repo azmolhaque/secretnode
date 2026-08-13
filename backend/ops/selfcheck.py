@@ -130,25 +130,60 @@ async def main() -> int:
         "We build warehouse automation. Press enquiries: press@acme-robotics.test\n"
         "For anything security related, email hello@acme-robotics.test.\n"
     )
-    try:
-        t0 = time.monotonic()
-        res = await llm.complete_json(
+    system = "You extract facts that appear verbatim in the text. Never guess."
+
+    async def extract(variant: str):
+        return await llm.complete_json(
             prompt=(
-                "Extract the security contact email and the company name from this page.\n\n"
-                f"---\n{page}\n---"
+                f"Extract the security contact email and the company name from this "
+                f"page.{variant}\n\n---\n{page}\n---"
             ),
             schema=schema,
-            system="You extract facts that appear verbatim in the text. Never guess.",
+            system=system,
         )
-        elapsed = time.monotonic() - t0
+
+    try:
+        # Two calls, because one number conflates two very different costs.
+        #
+        # The first call may include loading the model from disk — on a Pi that
+        # is tens of seconds and dominates everything. The second runs inside
+        # the keep_alive window with weights already resident, so it measures
+        # inference alone. Those have opposite design implications: a slow cold
+        # start is fixed by batching work into one session and keeping the model
+        # warm, whereas slow warm inference means the model is simply too slow
+        # for per-item work and the design has to avoid it.
+        #
+        # Reporting a single figure, as this script originally did, hides which
+        # problem you have.
+        t0 = time.monotonic()
+        res = await extract("")
+        first = time.monotonic() - t0
+
+        t1 = time.monotonic()
+        res2 = await extract(" Answer concisely.")
+        warm = time.monotonic() - t1
+
         line(PASS, "schema-valid response",
-             f"{elapsed:.1f}s, {res.eval_count} tokens, attempt {res.attempts}")
+             f"first {first:.1f}s, warm {warm:.1f}s, "
+             f"{res.eval_count} tokens, attempt {res.attempts}")
         print(f"      → {res.data}")
 
-        if elapsed > SLOW_CALL_SECONDS:
-            line(WARN, f"slow ({elapsed:.1f}s per call)",
+        load_cost = first - warm
+        if load_cost > 3.0:
+            line(PASS, f"model load cost ≈ {load_cost:.1f}s",
+                 f"paid once per {llm.KEEP_ALIVE} idle window, not per call")
+
+        if warm > 0:
+            tps = res2.eval_count / warm
+            print(f"      warm throughput ≈ {tps:.1f} tokens/sec")
+
+        if warm > SLOW_CALL_SECONDS:
+            line(WARN, f"warm inference is slow ({warm:.1f}s per call)",
                  "usable one-at-a-time; too slow to loop over a large list")
             warnings += 1
+        else:
+            line(PASS, f"warm inference is workable ({warm:.1f}s per call)",
+                 "batch work in one session to keep the model resident")
 
         # ── 4. The property that actually matters ───────────────────────────
         # A schema-valid answer can still be invented. Ground it.
