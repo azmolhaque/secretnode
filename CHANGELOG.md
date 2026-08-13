@@ -3,6 +3,51 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.12.3] — Three bugs found by scanning our own site from the Pi
+
+A real deep scan of `cindrasec.com` from the Raspberry Pi, with the dashboard read
+side-by-side against the downloaded HTML report. The scan itself was clean; the tool
+was not.
+
+### Fixed
+
+- **Every preloaded font was downloaded as a candidate JavaScript asset.**
+  `_LINK_IS_SCRIPT_RE` treated a bare `rel="preload"` as script-ish, so
+  `<link rel="preload" href="inter-var.woff2" as="font">` matched. The scan reported
+  "Discovered 4 JS asset(s)" when three of the four were binary font files that cannot
+  contain a credential, and fetched them anyway — six wasted downloads across two hosts
+  on this run alone. Font preloading is close to universal on modern sites, so this was
+  a bandwidth and latency tax on essentially every client scan, paid on a Pi over a
+  domestic connection. A `<link>` now counts as a script only when it says so:
+  `rel=modulepreload`, or `rel=preload` *with* `as=script`, or an `href` ending `.js`.
+- **The dashboard and the report disagreed about the same deep scan.** The report
+  correctly said 6 assets analysed over ~14 seconds; the dashboard's tiles said
+  "Assets Fetched: 1" and "Last Duration: 0s". `deep_scan_complete` never called
+  `updateStats`, so the tiles kept whatever a per-host event had last set. This is the
+  same class of defect as the v2.8.0 severity mismatch — two surfaces describing one
+  scan and not agreeing — and it is corrosive in a client demo, where the operator is
+  reading one number aloud while the deliverable states another.
+- **`duration_seconds` and `raw_findings` were missing from the deep-scan event.**
+  `totals` is the entire payload of `deep_scan_complete`, so a field absent from it is a
+  field the dashboard cannot display, whatever the frontend does. Both are now included,
+  and a test asserts the duration in `totals` matches the top-level duration the report
+  reads — the two surfaces are no longer *able* to disagree.
+
+### Noted, not a code change
+
+The same scan warned that `cindrasec.com`'s robots.txt disallows all crawling. The
+repository's `robots.txt` contains no such directive — verified by running the scanner's
+own regex against the committed file — which means the file served at the edge differs
+from the one in the repository. Recorded here because the tool was right to raise it and
+the discrepancy is real; the cause is for the site's operator to establish, not this
+changelog to guess at.
+
+### Tests
+
+- `test_v2123.py`: 9 tests. Font/JSON/CSS/image preloads excluded, every genuine script
+  form still collected, and the deep-scan totals contract pinned including the
+  cross-surface duration agreement. Suite: 529 → 538.
+
 ## [2.12.2] — The self-check reported one timing figure that hid which problem you had
 
 The first real Pi run reported "33.4s per call" and flagged it as too slow to loop over.

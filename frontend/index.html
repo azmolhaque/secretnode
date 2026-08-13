@@ -1395,6 +1395,11 @@
           state.totalScans++;
           animateNumber('stat-scans', state.totalScans);
           const t = msg.totals || {};
+          // A deep scan must update the stat tiles too. Omitting this left them
+          // showing whatever the last single-host event happened to set — an
+          // asset count of 1 and a duration of 0s for a run the downloaded
+          // report described as 6 assets over 14 seconds.
+          updateStats(t);
           appendLog(`=== Deep scan complete — ${t.hosts_scanned || 0} host(s), `
             + `${t.confirmed || 0} confirmed, ${t.needs_review || 0} needs-review, `
             + `${t.posture_issues || 0} posture ===`, 'SYS');

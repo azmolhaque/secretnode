@@ -171,6 +171,15 @@ class DeepScanResult:
                 "needs_review": self.total_needs_review,
                 "posture_issues": self.total_posture,
                 "takeover_risks": len(self.takeover_findings),
+                # Present here as well as at the top level because `totals` is
+                # the whole payload of the deep_scan_complete WebSocket event —
+                # the dashboard has nothing else to read. Without these two it
+                # showed a stale per-host asset count and a duration of 0s for
+                # a run the report correctly described as 6 assets over 14
+                # seconds, which is the dashboard and the deliverable
+                # disagreeing about the same scan.
+                "raw_findings": self._sum_scans("raw_findings"),
+                "duration_seconds": round(self.duration_seconds, 2),
             },
             "error": self.error,
         }

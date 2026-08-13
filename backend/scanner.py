@@ -1238,8 +1238,21 @@ _LINK_JS_RE = re.compile(
     r'<link\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>',
     re.IGNORECASE,
 )
+# A <link> is script-ish only if it actually points at a script:
+#
+#   rel=modulepreload            — by definition a JavaScript module
+#   rel=preload ... as=script    — the `as` is what names the type
+#   href=….js                    — an explicit script file
+#
+# `rel=preload` on its own is NOT enough, and treating it as enough was a real
+# bug: `<link rel="preload" href="inter-var.woff2" as="font">` matched, so every
+# preloaded font was fetched as a candidate JS asset. Font preloading is close
+# to universal on modern sites, which made this a per-host tax of several
+# hundred KB of binary downloads that can never contain a credential — and it
+# inflated the reported "Discovered N JS asset(s)" with files that are not JS.
+# Found by scanning cindrasec.com, which preloads three woff2 files.
 _LINK_IS_SCRIPT_RE = re.compile(
-    r'\brel=["\']?(?:modulepreload|preload)\b|\bas=["\']?script\b|href=["\'][^"\']+\.js["\']',
+    r'\brel=["\']?modulepreload\b|\bas=["\']?script\b|href=["\'][^"\']+\.js["\']',
     re.IGNORECASE,
 )
 # //# sourceMappingURL=app.js.map  (or the legacy //@ form, or a /*# … */ block)
