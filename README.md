@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-392%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.8.2-blue)
+![Tests](https://img.shields.io/badge/tests-397%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.8.3-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,17 +14,20 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.8.2 — the STOP button now actually stops a scan mid-validation or mid-verification**
-> · [full changelog](CHANGELOG.md) · [releases](https://github.com/azmolhaque/secretnode/releases)
+> **v2.8.3 — a UI/UX and industrial-grade audit: the dashboard is now keyboard- and
+> screen-reader-accessible, a broken low-contrast text color is fixed, and the version string
+> served in the raw HTML can no longer go stale** · [full changelog](CHANGELOG.md) ·
+> [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> The latest release closed a bug worth stating plainly: **cancelling a scan while it was
-> validating findings with Gemini, or live-verifying them against a provider, did nothing.**
-> Both stages check for cancellation inside an `asyncio.gather(..., return_exceptions=True)`,
-> and that combination does not propagate a cancellation the way a plain `await` would — it is
-> captured as an ordinary per-item result instead, so the scan quietly kept running every
-> remaining item at full cost. Fixed at both call sites, and live verification is now also
-> concurrent (it ran one provider API call at a time before) — the change that surfaced the bug
-> in the first place.
+> Same class of finding as v2.8.2, different layer: the dashboard's modal had no focus
+> management (WAI-ARIA "Dialog" pattern — trap Tab inside it, move focus in on open, return
+> focus on close), toasts and the live terminal were never announced to a screen reader, the
+> type filter had no visible keyboard-focus indicator at all, and eighteen places rendered real
+> information (the clock, pipeline stage, table row numbers) in a color that measures ~2:1
+> contrast against the background — roughly half of WCAG AA's 4.5:1 floor. Also: `index.html`
+> shipped with "2.7.1" hardcoded in three places as a static fallback, corrected client-side
+> after a `/api/health` fetch — now patched to the real version at serve time, so view-source,
+> crawlers, and the moment before that fetch resolves never see a stale number either.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.

@@ -3,6 +3,72 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.8.3] — A UI/UX and industrial-grade audit
+
+A deliberate broadening of the v2.8.2 audit to the dashboard itself: is it usable on a phone
+or tablet (already largely yes — verified, not just assumed), is it usable without a mouse or
+with a screen reader (no, in several concrete ways), and does anything else in the served
+frontend or its serving path quietly disagree with the truth. Every fix below was verified
+against the actual rendered markup / a real HTTP response, not inferred from reading code.
+
+### Fixed
+
+- **The finding-detail modal had no focus management.** Opening it left keyboard focus on
+  whatever button triggered it, now hidden behind the overlay; nothing moved focus into the
+  dialog, Tab could leave it entirely into background content still notionally covered by the
+  overlay, and closing it (Escape, click-outside, or the ✕ button) never returned focus
+  anywhere. A keyboard-only user lost their place in the findings table every time they
+  inspected a finding. Implemented the WAI-ARIA "Dialog (Modal)" pattern: `role="dialog"`,
+  `aria-modal="true"`, `aria-labelledby` pointing at the visible "FINDING DETAIL" heading,
+  `aria-label="Close"` on the icon-only ✕ button, focus moved to the dialog on open, a Tab trap
+  that cycles between the dialog's first and last focusable elements, and focus restored to
+  the original trigger element on close.
+- **Toasts, the live scan terminal, and the type filter were invisible to a screen reader or a
+  keyboard user.** `#toast-container` had no live region (`role="status" aria-live="polite"`
+  added — a scan's success/error toasts previously vanished silently for anyone not looking at
+  the screen at that exact moment); `#console-output` had no indication it was a live-updating
+  log (`role="log" aria-live="polite"` added); `#target-input`, `#crawl-pages-input`, and
+  `#filter-type` had no accessible name beyond a placeholder or adjacent visual text, which is
+  not reliably exposed to assistive tech (`aria-label` added to each). `#filter-type` also set
+  `outline:none` inline with nothing replacing it, so tabbing to it showed no focus indicator
+  at all — a hard WCAG 2.4.7 failure, not a judgment call. Added a global
+  `:focus-visible { outline: 2px solid #00ff88 !important }` rule (keyboard-only, not
+  mouse-click, and `!important` specifically because inline `outline:none` otherwise wins
+  regardless of any external stylesheet's specificity) as a safety net for this element and any
+  other interactive control that isn't already handling its own focus state.
+- **Eighteen places rendered real information at roughly 2:1 contrast against the background** —
+  `#2d4a35`, used as `color` (never as `border-color`, which was left alone — that's a
+  decorative button gradient, not text) for the clock, the pipeline-stage label, the
+  `ARM64 / RPI5` badge, table row numbers, the "TIME" column, empty-state copy ("No assets
+  discovered yet," "No confirmed secrets detected yet"), and four toolbar buttons' resting
+  state (COPY / CLR / EXPORT JSON / CLEAR — including their `onmouseout` handlers, which
+  reverted to the same broken color after a hover). WCAG AA's floor for this size of text is
+  4.5:1; measured contrast against both backgrounds this color appears on was 1.91:1 and
+  2.01:1 — not a borderline case. Replaced with `#5a9470` (same muted-green hue, 5.25:1 /
+  5.53:1) everywhere it was used as text color.
+- **`viewport-fit=cover` was missing from the viewport meta tag**, which is the one thing that
+  makes the `env(safe-area-inset-*)` rules already written for `.app-header` and `.app-main`
+  do anything — without it, those variables resolve to `0` on iOS Safari and the dashboard's
+  dark background stopped short of the notch/home-indicator safe area instead of bleeding
+  edge-to-edge under it. The CSS was correct; the one line that activates it was absent.
+- **`index.html` hardcodes "2.7.1" in three places** (`<title>`, `#version-line`,
+  `#footer-version`) as a static fallback that client-side JS corrects after fetching
+  `/api/health` — but that leaves a real, stale version visible in view-source, to crawlers,
+  and as a flash on every load until the fetch resolves, five releases after the same class of
+  bug was fixed for the footer and boot log in v2.7.9. `main.py` now patches all three at
+  import time (the version is fixed for the process's lifetime, so this isn't done per-request)
+  before serving `index.html`, on both the `/` route and the SPA-fallback route — the fallback
+  was the one place a `FileResponse` was still serving the raw, unpatched file.
+
+### Tests
+
+- `test_frontend_serving.py`: 5 tests covering the version-patching fix at both routes, that a
+  real static asset (a font) is still served as itself and not swallowed by the SPA fallback,
+  and the response content-type. Suite: 392 → 397. The accessibility, contrast, and
+  `viewport-fit` fixes are frontend-only (HTML/CSS/inline JS) — this project has no frontend
+  test harness, consistent with how the rest of `frontend/index.html` has always been verified
+  (manual QA against a running instance, per the v2.7.9 entry below), not a gap introduced here.
+
 ## [2.8.2] — The STOP button did nothing during validation or verification
 
 Found during a general audit: the live-verification stage ran its provider checks
