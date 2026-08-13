@@ -2256,6 +2256,60 @@ def classify_validated(v: "ValidatedFinding") -> str:
     return "drop"
 
 
+async def verify_confirmed_findings(
+    confirmed: list["ValidatedFinding"],
+    client: Any,
+    state: "ScanState",
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """Live-verify every confirmed finding, concurrently and bounded by `semaphore`
+    (the same one already used for fetches and Gemini validation). Mutates
+    `vf.verified` / `vf.verified_detail` on each finding in place.
+
+    A deep scan can confirm dozens of findings across many hosts, and each verify
+    call is its own network round-trip to a provider API — running them one at a
+    time, as the original implementation did, was pure added wall-clock with no
+    correctness benefit. Mirrors `_validate_one`/`validation_tasks` in `run_scan`:
+    `state.check()` inside the task (so a stopped scan still cancels promptly) and
+    `gather(return_exceptions=True)` with an explicit fallback so an unexpected
+    failure leaves a finding as "unsupported" rather than ambiguous —
+    `verify_finding_detailed` itself already fails closed to "unverified"/
+    "unsupported" for ordinary provider errors, so anything landing here is a bug,
+    not routine API flakiness.
+
+    One divergence from that mirrored pattern, deliberately: `return_exceptions=True`
+    does not propagate a `CancelledError` raised inside a gathered task — it is
+    captured as a per-task result instead, same as any other exception. Left alone,
+    a stopped scan would silently keep "verifying" (mutating findings from
+    already-in-flight tasks) and return normally with no sign the scan had been
+    cancelled — the STOP button doing nothing during this stage. So cancellation is
+    detected and re-raised explicitly before the ordinary exception handling below
+    ever sees it.
+    """
+    async def _verify_one(vf: "ValidatedFinding") -> None:
+        state.check()
+        async with semaphore:
+            vres = await verifier.verify_finding_detailed(
+                vf.raw.secret_type, vf.raw.raw_match, client
+            )
+        vf.verified = vres.status
+        vf.verified_detail = vres.detail
+
+    results = await asyncio.gather(
+        *(_verify_one(vf) for vf in confirmed), return_exceptions=True
+    )
+    for res in results:
+        if isinstance(res, asyncio.CancelledError):
+            raise res
+    for vf, res in zip(confirmed, results):
+        if isinstance(res, Exception):
+            logger.error(
+                "Unexpected verification failure for %s: %s", vf.raw.secret_type, res
+            )
+            vf.verified = "unsupported"
+            vf.verified_detail = ""
+
+
 async def run_scan(
     target_url: str,
     scan_id: str | None = None,
@@ -2530,6 +2584,16 @@ async def run_scan(
         validation_tasks = [_validate_one(f) for f in all_raw]
         validated_raw = await asyncio.gather(*validation_tasks, return_exceptions=True)
 
+        # gather(return_exceptions=True) does not propagate a CancelledError raised
+        # inside a task — it lands in validated_raw as an ordinary result, same as
+        # any other exception. Left unhandled, the loop below would treat a
+        # user-requested STOP mid-validation as "an unexpected validation error"
+        # for every remaining item and keep going, so the STOP button would do
+        # nothing during this stage. Detect and re-raise it before that loop runs.
+        for v in validated_raw:
+            if isinstance(v, asyncio.CancelledError):
+                raise v
+
         validated: list[ValidatedFinding] = []
         for f, v in zip(all_raw, validated_raw):
             if isinstance(v, ValidatedFinding):
@@ -2598,13 +2662,7 @@ async def run_scan(
                     f"provider APIs (read-only). Authorized use only."
                 ),
             })
-            for vf in confirmed:
-                state.check()
-                _vres = await verifier.verify_finding_detailed(
-                    vf.raw.secret_type, vf.raw.raw_match, client
-                )
-                vf.verified = _vres.status
-                vf.verified_detail = _vres.detail
+            await verify_confirmed_findings(confirmed, client, state, semaphore)
             result["verified_count"]   = sum(1 for v in confirmed if v.verified == "verified")
             result["unverified_count"] = sum(1 for v in confirmed if v.verified == "unverified")
             await emit({

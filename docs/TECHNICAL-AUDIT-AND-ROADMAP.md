@@ -1,6 +1,47 @@
 # SecretNode — Technical Audit & Enhancement Roadmap
 *Prepared 18 Jul 2026 · baseline: v2.5.4 · grounded in 2026 secret-scanning SOTA (TruffleHog, Gitleaks, GitHub Secret Scanning).*
 
+## Update — 13 Aug 2026 (current: v2.8.2)
+
+The body below is kept as written — it was accurate against v2.5.4 — but four
+releases have shipped since, and re-checking each "honest gap" against the current
+code turned up drift worth correcting rather than leaving to mislead the next read:
+
+- **Gap #5 (detector breadth)** named Twilio, GCP service-account JSON, and Supabase
+  `service_role` as missing. All three now exist: Twilio Auth Token
+  (`scanner.py`), Supabase Access Token + Secret Key, and GCP Service Account Key
+  (JSON). Detector count is 63, not the 54 the README's architecture diagram
+  separately (and wrongly) still said until this pass.
+- **R8's follow-up** named CT-log subdomain discovery as the next, higher-risk,
+  not-yet-done step. It's done, and substantially more than the follow-up
+  described: `recon.py` covers crt.sh + Certspotter CT-log enumeration,
+  `takeover.py` covers dangling-CNAME/subdomain-takeover checks, and
+  `historical.py` covers historical-URL mining — all with their own test files.
+  The README's "whole domain" deep-scan section documents this as a current
+  feature, not a roadmap item.
+- **Genuinely still open**, confirmed by checking the code rather than assuming
+  the gap list is current: the composite/proximity rule engine (R7, for
+  generic high-FP patterns), wasm-string scanning (the one remaining R5 item,
+  [LOW]), and PyPI distribution (R11, [LOW]). Per-provider verify concurrency
+  (listed as an R10 follow-up, [LOW]) is now also done — see below.
+- **A correctness bug neither this roadmap nor the gap list anticipated**: while
+  making verification concurrent, a test written to prove the new code still
+  honoured a cancelled scan failed against it — and the same failure mode
+  turned out to already exist in the Gemini-validation stage it was modelled
+  on. `asyncio.gather(..., return_exceptions=True)` does not propagate a
+  `CancelledError` raised inside a gathered task; it is captured as an
+  ordinary per-item result. Both stages had a comment naming "cancellation" as
+  an expected case in that per-item fallback, but the fallback code could not
+  actually tell a cancellation apart from a real per-item bug — so hitting
+  STOP mid-scan silently did nothing during either stage. Fixed in v2.8.2;
+  see `CHANGELOG.md`. Worth naming here because it's the kind of gap that a
+  feature-gap-oriented audit like this one structurally won't catch — it takes
+  writing a test that tries to break the thing, not reading the diff.
+
+The lesson for the next update to this document: verify each "gap" against the
+current code before treating it as still true, the same discipline the rest of
+this project applies to a detector's false-positive rate.
+
 ## Executive summary
 SecretNode is **already an industrial-grade, well-architected tool** — not a rescue case. v2.5.4 ships
 a layered detection pipeline, 147 passing tests, CI, Docker, SARIF/HTML/CSV/JSON, a CLI, a GitHub
@@ -114,7 +155,8 @@ repo scanning; win the *web-surface* niche.
 - ~~**R10 · Asset caching**~~ ✅ **DONE (v2.7.7)** — conditional GET with a per-target validator
   cache; a 304 skips an unchanged *and previously clean* asset, but always refetches one that
   had a finding so nothing silently vanishes from a report. No response bodies cached, by
-  design. *Still open:* per-provider verify concurrency. [LOW]
+  design. *Follow-up (per-provider verify concurrency)* ✅ **DONE (v2.8.2)** — see the
+  13 Aug update at the top of this document.
 - **R11 · Distribution** — PyPI publish, tagged releases, docs. [LOW]
 
 ## Recommended next steps (highest ROI for Cindrasec's stage)

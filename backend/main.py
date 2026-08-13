@@ -778,22 +778,38 @@ INDEX_HTML   = FRONTEND_DIR / "index.html"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-
-@app.get("/", response_class=FileResponse)
-async def serve_index() -> FileResponse:
+# index.html ships with a hardcoded "2.7.1" in three places (<title>,
+# #version-line, #footer-version) as a static fallback — client-side JS
+# corrects all three after fetching /api/health, but that leaves a real,
+# stale version visible in view-source, to crawlers, and as a brief flash on
+# every load until the fetch resolves. Patched once at import time (the
+# version is fixed for the process's lifetime) rather than re-read and
+# re-substituted on every request.
+def _load_patched_index() -> str | None:
     if not INDEX_HTML.exists():
+        return None
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    return html.replace("2.7.1", report_gen._TOOL_VERSION)
+
+
+_INDEX_HTML_PATCHED = _load_patched_index()
+
+
+@app.get("/", response_model=None)
+async def serve_index() -> HTMLResponse | JSONResponse:
+    if _INDEX_HTML_PATCHED is None:
         return JSONResponse(
             {"error": "Frontend not found. Build the frontend first."},
             status_code=404,
         )
-    return FileResponse(str(INDEX_HTML))
+    return HTMLResponse(_INDEX_HTML_PATCHED)
 
 
 _FRONTEND_DIR_RESOLVED = FRONTEND_DIR.resolve()
 
 
-@app.get("/{path:path}", response_class=FileResponse)
-async def serve_spa(path: str) -> FileResponse:
+@app.get("/{path:path}", response_model=None)
+async def serve_spa(path: str) -> FileResponse | HTMLResponse:
     # Resolve symlinks/".." and verify the result is still inside FRONTEND_DIR
     # before serving — prevents path traversal (e.g. path="../../etc/passwd").
     requested = (FRONTEND_DIR / path).resolve()
@@ -803,8 +819,8 @@ async def serve_spa(path: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Not found")
     if requested.exists() and requested.is_file():
         return FileResponse(str(requested))
-    if INDEX_HTML.exists():
-        return FileResponse(str(INDEX_HTML))
+    if _INDEX_HTML_PATCHED is not None:
+        return HTMLResponse(_INDEX_HTML_PATCHED)
     raise HTTPException(status_code=404, detail="Not found")
 
 

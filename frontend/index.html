@@ -2,7 +2,12 @@
 <html lang="en" class="h-full">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- viewport-fit=cover is what makes the env(safe-area-inset-*) rules below
+       (.app-header, .app-main) do anything at all — without it, iOS Safari
+       never populates those variables (they resolve to 0), so this dashboard's
+       dark background stopped short of the notch/home-indicator area on every
+       device instead of bleeding edge-to-edge under it. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>SecretNode v2.7.1 — ASM Scanner</title>
   <meta name="color-scheme" content="dark" />
   <meta name="description" content="SecretNode — passive attack-surface &amp; exposed-secret scanner with a live dashboard. Self-hosted, offline-capable, multi-device." />
@@ -35,6 +40,20 @@
     body { min-height:100vh; }
     .font-display     { font-family:'Orbitron', monospace; }
     .text-phosphor-300{ color:#68d391; }
+
+    /* ── Keyboard focus visibility ──────────────────────────────────────────
+       :focus-visible (not :focus) so this only shows for keyboard/programmatic
+       focus, not a mouse click — no extra ring on every button tap. `!important`
+       on just the outline property is deliberate: #filter-type and .scan-input
+       set `outline:none` inline (to replace it with a nicer :focus-within glow
+       on their parent panel), and inline styles otherwise beat any external
+       stylesheet rule regardless of selector specificity. Without this, tabbing
+       to the type filter dropdown left no visible indicator of focus at all. */
+    button:focus-visible, select:focus-visible, input:focus-visible,
+    a:focus-visible, [tabindex]:focus-visible {
+      outline: 2px solid #00ff88 !important;
+      outline-offset: 2px;
+    }
 
     /* ── Responsive layout — intrinsic (adapts phone → tablet → desktop) ── */
     .app-main    { padding:20px 24px; max-width:1600px; margin:0 auto; }
@@ -537,14 +556,14 @@
   </div>
 
   <!-- Toast Container -->
-  <div id="toast-container"></div>
+  <div id="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
 
   <!-- Detail Modal -->
   <div id="modal-overlay" onclick="closeModal(event)">
-    <div id="modal-box">
+    <div id="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
-        <span class="font-display text-phosphor-300" style="font-size:13px;letter-spacing:0.1em;">FINDING DETAIL</span>
-        <button onclick="closeModal()" style="color:#4a7c59;font-family:monospace;font-size:18px;cursor:pointer;line-height:1;">✕</button>
+        <span id="modal-title" class="font-display text-phosphor-300" style="font-size:13px;letter-spacing:0.1em;">FINDING DETAIL</span>
+        <button onclick="closeModal()" aria-label="Close" style="color:#4a7c59;font-family:monospace;font-size:18px;cursor:pointer;line-height:1;">✕</button>
       </div>
       <div id="modal-content"></div>
     </div>
@@ -560,7 +579,7 @@
       </div>
       <div>
         <div class="header-title">SecretNode</div>
-        <div id="version-line" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.2em;margin-top:1px;">v2.7.1 — ATTACK SURFACE MONITOR</div>
+        <div id="version-line" style="font-family:'Share Tech Mono';font-size:9px;color:#5a9470;letter-spacing:0.2em;margin-top:1px;">v2.7.1 — ATTACK SURFACE MONITOR</div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:24px;">
@@ -568,10 +587,10 @@
         <div id="ws-status" style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;">
           <span class="status-dot idle" id="ws-dot"></span>WS: DISCONNECTED
         </div>
-        <div id="clock" style="font-family:'Orbitron';font-size:11px;color:#2d4a35;margin-top:2px;"></div>
+        <div id="clock" style="font-family:'Orbitron';font-size:11px;color:#5a9470;margin-top:2px;"></div>
       </div>
       <div class="header-sep" style="width:1px;height:36px;background:#1a2e1f;"></div>
-      <div class="header-arch" style="font-family:'Share Tech Mono';font-size:10px;color:#2d4a35;">
+      <div class="header-arch" style="font-family:'Share Tech Mono';font-size:10px;color:#5a9470;">
         ARM64 / RPI5
       </div>
     </div>
@@ -593,12 +612,13 @@
       </div>
       <div class="control-row">
         <div class="ctl-input" style="border:1px solid #1a2e1f;border-radius:3px;padding:10px 14px;display:flex;align-items:center;gap:10px;background:#080c0a;">
-          <span style="color:#2d4a35;font-family:monospace;font-size:14px;">$</span>
+          <span style="color:#5a9470;font-family:monospace;font-size:14px;">$</span>
           <input
             type="text"
             id="target-input"
             class="scan-input"
             placeholder="https://example.com"
+            aria-label="Target URL or domain to scan"
             autocomplete="off"
             spellcheck="false"
           />
@@ -611,6 +631,7 @@
             value="1"
             min="1"
             max="15"
+            aria-label="Number of same-domain pages to crawl"
             style="width:44px;background:transparent;border:none;color:#68d391;font-family:'Share Tech Mono';font-size:12px;text-align:center;"
           />
         </div>
@@ -638,7 +659,7 @@
         <div id="progress-bar-fill" style="width:0%;height:100%;"></div>
       </div>
       <div style="display:flex;justify-content:space-between;margin-top:5px;">
-        <span id="stage-text" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;letter-spacing:0.1em;"></span>
+        <span id="stage-text" style="font-family:'Share Tech Mono';font-size:9px;color:#5a9470;letter-spacing:0.1em;"></span>
         <span id="scan-id-display" style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;"></span>
       </div>
     </div>
@@ -678,11 +699,11 @@
             <div id="terminal-activity" style="width:6px;height:6px;border-radius:50%;background:#1a2e1f;transition:background 0.2s;"></div>
           </div>
           <div style="display:flex;gap:8px;">
-            <button onclick="copyConsole()" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;cursor:pointer;padding:3px 8px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#2d4a35'">COPY</button>
-            <button onclick="clearConsole()" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;cursor:pointer;padding:3px 8px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#2d4a35'">CLR</button>
+            <button onclick="copyConsole()" style="font-family:'Share Tech Mono';font-size:9px;color:#5a9470;cursor:pointer;padding:3px 8px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#5a9470'">COPY</button>
+            <button onclick="clearConsole()" style="font-family:'Share Tech Mono';font-size:9px;color:#5a9470;cursor:pointer;padding:3px 8px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#5a9470'">CLR</button>
           </div>
         </div>
-        <div id="console-output" style="padding:12px 14px;flex:1;">
+        <div id="console-output" role="log" aria-live="polite" aria-label="Live scan terminal output" style="padding:12px 14px;flex:1;">
           <div class="log-SYS">SecretNode initialised. Awaiting target...<span class="cursor"></span></div>
         </div>
       </div>
@@ -691,10 +712,10 @@
       <div class="panel" style="display:flex;flex-direction:column;">
         <div style="padding:10px 14px;border-bottom:1px solid #1a2e1f;display:flex;align-items:center;justify-content:space-between;">
           <span style="font-family:'Orbitron';font-size:9px;letter-spacing:0.2em;color:#4a7c59;">DISCOVERED ASSETS</span>
-          <span id="asset-count-badge" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;padding:2px 8px;border:1px solid #1a2e1f;border-radius:10px;">0 URLs</span>
+          <span id="asset-count-badge" style="font-family:'Share Tech Mono';font-size:9px;color:#5a9470;padding:2px 8px;border:1px solid #1a2e1f;border-radius:10px;">0 URLs</span>
         </div>
         <div id="asset-list" style="padding:10px;flex:1;overflow-y:auto;height:380px;font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;">
-          <div style="color:#2d4a35;text-align:center;margin-top:60px;">No assets discovered yet</div>
+          <div style="color:#5a9470;text-align:center;margin-top:60px;">No assets discovered yet</div>
         </div>
       </div>
     </div>
@@ -726,11 +747,11 @@
             ⬇ SARIF
           </button>
           <!-- Filter -->
-          <select id="filter-type" onchange="filterFindings()" style="font-family:'Share Tech Mono';font-size:9px;color:#4a7c59;background:#080c0a;border:1px solid #1a2e1f;border-radius:2px;padding:3px 8px;outline:none;cursor:pointer;">
+          <select id="filter-type" onchange="filterFindings()" aria-label="Filter findings by secret type" style="font-family:'Share Tech Mono';font-size:9px;color:#4a7c59;background:#080c0a;border:1px solid #1a2e1f;border-radius:2px;padding:3px 8px;outline:none;cursor:pointer;">
             <option value="">ALL TYPES</option>
           </select>
-          <button onclick="exportFindings()" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;cursor:pointer;padding:3px 10px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#2d4a35'">EXPORT JSON</button>
-          <button onclick="clearFindings()" style="font-family:'Share Tech Mono';font-size:9px;color:#2d4a35;cursor:pointer;padding:3px 10px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#2d4a35'">CLEAR</button>
+          <button onclick="exportFindings()" style="font-family:'Share Tech Mono';font-size:9px;color:#5a9470;cursor:pointer;padding:3px 10px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#5a9470'">EXPORT JSON</button>
+          <button onclick="clearFindings()" style="font-family:'Share Tech Mono';font-size:9px;color:#5a9470;cursor:pointer;padding:3px 10px;border:1px solid #1a2e1f;border-radius:2px;background:transparent;letter-spacing:0.1em;" onmouseover="this.style.color='#68d391'" onmouseout="this.style.color='#5a9470'">CLEAR</button>
         </div>
       </div>
 
@@ -751,7 +772,7 @@
           </thead>
           <tbody id="findings-tbody">
             <tr id="empty-row">
-              <td colspan="9" style="text-align:center;padding:40px;color:#2d4a35;font-size:12px;">
+              <td colspan="9" style="text-align:center;padding:40px;color:#5a9470;font-size:12px;">
                 No confirmed secrets detected yet. Start a scan to begin.
               </td>
             </tr>
@@ -761,14 +782,14 @@
     </div>
 
     <!-- ── FOOTER ── -->
-    <div class="app-footer">
+    <footer class="app-footer">
       <span id="footer-version" style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;letter-spacing:0.1em;">
         SECRETNODE v2.7.1 — PASSIVE ASM SCANNER — RASPBERRY PI 5 / ARM64
       </span>
       <span style="font-family:'Share Tech Mono';font-size:9px;color:#1a2e1f;">
         ⚠ FOR AUTHORIZED SECURITY TESTING ONLY
       </span>
-    </div>
+    </footer>
   </main>
 
 
@@ -963,7 +984,7 @@
     }
 
     function clearAssets() {
-      $('asset-list').innerHTML = '<div class="empty-msg" style="color:#2d4a35;text-align:center;margin-top:60px;">No assets discovered yet</div>';
+      $('asset-list').innerHTML = '<div class="empty-msg" style="color:#5a9470;text-align:center;margin-top:60px;">No assets discovered yet</div>';
       $('asset-count-badge').textContent = '0 URLs';
     }
 
@@ -994,7 +1015,7 @@
         : '<span style="background:#742a2a;color:#feb2b2;font-size:8px;padding:1px 6px;border-radius:8px;margin-left:5px;">NEW</span>';
 
       tr.innerHTML = `
-        <td class="col-idx" style="color:#2d4a35;width:40px;">${index + 1}</td>
+        <td class="col-idx" style="color:#5a9470;width:40px;">${index + 1}</td>
         <td data-label="TYPE">
           <span class="badge badge-${sev}">${sev.toUpperCase()}</span>${newBadge}
           <div style="margin-top:5px;color:#9ae6b4;font-size:10px;">${finding.secret_type}</div>
@@ -1005,7 +1026,7 @@
         <td data-label="SNIPPET"><code class="code-snippet" title="${snippet}">${snippet}</code></td>
         <td data-label="ENTROPY" style="white-space:nowrap;">
           <span style="color:#63b3ed;">${finding.entropy.toFixed(2)}</span>
-          <span style="color:#2d4a35;font-size:9px;"> bits</span>
+          <span style="color:#5a9470;font-size:9px;"> bits</span>
         </td>
         <td data-label="CONFIDENCE" class="col-conf" style="width:100px;">
           <div style="color:${cc};font-size:13px;font-weight:700;">${finding.confidence}%</div>
@@ -1014,7 +1035,7 @@
           </div>
         </td>
         <td data-label="AI REASON" class="col-reason" style="color:#68d391;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${reason}">${reason}</td>
-        <td data-label="TIME" style="color:#2d4a35;white-space:nowrap;">${time}</td>
+        <td data-label="TIME" style="color:#5a9470;white-space:nowrap;">${time}</td>
         <td data-label="ACTION" class="col-action" style="white-space:nowrap;">
           <button onclick="showFindingDetail(${index})"
             style="font-family:'Orbitron';font-size:8px;letter-spacing:0.08em;color:#4a7c59;padding:4px 8px;border:1px solid #2d4a35;border-radius:2px;background:transparent;cursor:pointer;transition:all 0.2s;"
@@ -1087,27 +1108,69 @@
           <div style="font-family:'Share Tech Mono';font-size:9px;color:#4a7c59;margin-top:6px;">Enough to identify which key to rotate — the full value is never rendered here. Download a report to hand the value to the owner.</div>
         </div>
       `;
-      $('modal-overlay').classList.add('show');
+      openModal();
     }
 
     window.showFindingDetail = showFindingDetail;
 
+    // Focus handling for the modal: WAI-ARIA "Dialog (Modal)" pattern —
+    // remember what had focus, move focus into the dialog on open, trap Tab
+    // inside it while open, and restore focus to the trigger on close. Without
+    // this, a keyboard user who opens a finding loses their place in the
+    // findings table entirely (focus silently stays on a button now hidden
+    // behind the overlay, or worse, resets to <body>).
+    let _modalTrigger = null;
+
+    function _modalFocusables() {
+      return Array.from(
+        $('modal-box').querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+      ).filter(el => !el.disabled && el.offsetParent !== null);
+    }
+
+    function openModal() {
+      _modalTrigger = document.activeElement;
+      $('modal-overlay').classList.add('show');
+      $('modal-box').focus();
+    }
+
+    function _closeModalAndRestoreFocus() {
+      $('modal-overlay').classList.remove('show');
+      if (_modalTrigger && document.contains(_modalTrigger)) _modalTrigger.focus();
+      _modalTrigger = null;
+    }
+
     window.closeModal = function(e) {
       if (!e || e.target === $('modal-overlay')) {
-        $('modal-overlay').classList.remove('show');
+        _closeModalAndRestoreFocus();
       }
     };
 
-    // Keyboard escape
+    // Keyboard escape + Tab trap
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') $('modal-overlay').classList.remove('show');
+      if (!$('modal-overlay').classList.contains('show')) return;
+      if (e.key === 'Escape') {
+        _closeModalAndRestoreFocus();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const focusables = _modalFocusables();
+      if (focusables.length === 0) { e.preventDefault(); return; }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     });
 
     function clearFindings() {
       state.findings = [];
       state.allFindings = [];
       const tbody = $('findings-tbody');
-      tbody.innerHTML = `<tr id="empty-row"><td colspan="9" style="text-align:center;padding:40px;color:#2d4a35;font-size:12px;">No confirmed secrets detected yet. Start a scan to begin.</td></tr>`;
+      tbody.innerHTML = `<tr id="empty-row"><td colspan="9" style="text-align:center;padding:40px;color:#5a9470;font-size:12px;">No confirmed secrets detected yet. Start a scan to begin.</td></tr>`;
       $('findings-count-badge').textContent = '0 CONFIRMED';
       $('stat-confirmed').textContent = '0';
       toast('Findings cleared', 'info');
