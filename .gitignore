@@ -3,6 +3,10 @@
 *.env
 !.env.example
 
+# Watch roster — names paying clients and their infrastructure. The template
+# (watch-roster.example.json) is committed; the real one never is.
+watch-roster.json
+
 # Python
 __pycache__/
 *.py[cod]
