@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-452%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.10.0-blue)
+![Tests](https://img.shields.io/badge/tests-501%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.11.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,21 +14,22 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.10.0 — an operations layer built for a 3B model on a Raspberry Pi: schema-constrained
-> generation, and a grounding guard that makes an invented value unable to pass through**
-> · [full changelog](CHANGELOG.md) · [releases](https://github.com/azmolhaque/secretnode/releases)
+> **v2.11.0 — the authorization ledger: "no scan without a signed RoE" is now a check,
+> not a thing someone remembers** · [full changelog](CHANGELOG.md) ·
+> [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> First slice of the agent runtime for business operations — the model adapter and the guards
-> that make a small model's output safe to act on. Built for `llama3.2:3b` on Ollama on a Pi 5,
-> and that constraint is the whole design: the deterministic Python does the logic, the model
-> does narrow schema-constrained tasks, never the reverse.
+> `ops/ledger.py` holds scope, exclusions, testing window, permitted techniques and the
+> named recipient per engagement, and nothing in the operations layer may touch a target
+> without `assert_authorized` returning cleanly first.
 >
-> The part worth stating plainly: a JSON schema constrains *shape*, not *truth*.
-> `{"email": "contact@acme.com"}` is schema-perfect and may be pure invention — a plausible
-> one, which is worse, because it does not look wrong in review. So the model never asserts a
-> fact; it points at one, and the value must literally appear in a document that was actually
-> fetched. Verified against a hallucinating stand-in model: the schema check passes and the
-> grounding check catches it anyway.
+> The matcher is deliberately strict and deliberately dumb, because this is the one place
+> where a subtle bug has legal consequences. Nothing is inferred — `acme.test` does not
+> imply `www.acme.test`. Substring matching is never used, so `notacme.test` and
+> `acme.test.evil.net` are both denied where a bare `endswith` would allow one or both. A
+> wildcard never includes the apex. Exclusions beat inclusions across *all* engagements,
+> so a host one client carved out cannot be made scannable by another client's scope over
+> the same shared infrastructure. Everything fails closed: absent database, empty ledger,
+> unparseable target, expired window, revoked engagement — all deny.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
@@ -105,6 +106,7 @@ secretnode/
 │   ├── ops/                 # Operations layer: local-LLM adapter + grounding/prompt guards
 │   │   ├── llm.py           #   Ollama, schema-constrained, Pi-tuned, fails loudly
 │   │   ├── guards.py        #   Grounding (anti-hallucination) + refuse secrets in prompts
+│   │   ├── ledger.py        #   Authorization ledger — the gate every scan passes
 │   │   └── selfcheck.py     #   `python3 -m ops.selfcheck` — verify it works on this Pi
 │   └── tests/               # pytest suite (see badge above for current count)
 ├── frontend/

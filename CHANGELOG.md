@@ -3,6 +3,70 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.11.0] — The authorization ledger: turning a promise into a check
+
+"No scan without a signed Rules of Engagement" appears on the website, in the FAQ, in
+the process diagram and in every client report. Until now it was enforced by one
+careful person remembering. That is adequate for one client and untenable for ten, and
+the failure mode is not a bug — it is scanning an organisation that never agreed.
+
+`ops/ledger.py` makes it a check. Nothing in the operations layer may initiate a request
+against a target without `assert_authorized` returning cleanly first.
+
+### Added
+
+- **Authorization records** — scope, exclusions, testing window, permitted techniques
+  (passive-only / verification / deep scan), the named recipient findings go to, and the
+  RoE reference. Stored in a separate `ops.db`, deliberately: scan data is purged 30 days
+  after delivery, but the authorization that permitted it is the evidence the scan was
+  lawful and must outlive it.
+- **Scope matching, written strict and dumb on purpose.** This is the one place in the
+  codebase where a subtle bug has legal consequences:
+  - *Nothing is inferred.* `acme.test` authorises exactly that host — not `www.acme.test`,
+    not subdomains. If the RoE meant subdomains it says `*.acme.test` and so does the
+    ledger. Inference is how scope creep happens quietly.
+  - *Substring matching is never used.* `notacme.test` ends with `acme.test`;
+    `acme.test.evil.net` contains it. Both are denied, and a matcher built on `in` or a
+    bare `endswith` allows one or both.
+  - *A wildcard does not include the apex.* A host is not a subdomain of itself.
+  - *Exclusions beat inclusions, always* — including across engagements, so a host one
+    client carved out is not made scannable by another client's scope covering the same
+    shared infrastructure.
+  - IP and CIDR scopes are supported via `ipaddress`; a hostname is never inside a CIDR.
+- **Immediate revocation.** The privacy notice promises a client may withdraw in writing
+  at any moment and testing "stops immediately", so status is checked on every decision
+  rather than at scan start — an in-flight campaign stops at the next target, not at the
+  end of the run.
+- **An append-only audit trail.** Every decision, allow or deny, with its reason and the
+  rule that matched. "We only scanned what was authorised" is a claim; this is the
+  evidence for it.
+- **Fails closed everywhere.** Absent database, empty ledger, unparseable target, expired
+  window, revoked engagement, no matching rule — all deny. There is no configuration in
+  which an unknown host is allowed, and an empty scope list is rejected at construction
+  because it is one keystroke from being read as "everything".
+
+### Fixed during development
+
+Two defects the tests surfaced before this shipped, both in how a denial explains itself:
+
+- **A revoked engagement claimed every host in the world.** `evaluate` checked status
+  before scope, so a revoked authorization answered "revoked" for hosts it had never
+  covered. Wrong, and actively misleading in an audit trail, where it reads as a client
+  withdrawing consent for infrastructure that was never theirs. Evaluation is now
+  *relevance first*: parse, exclusions, scope membership, and only then status and
+  window. An engagement gets to explain a denial only for hosts it actually covers.
+- **`evaluate_all` discarded the specific reason.** With several authorizations on
+  record, a denial reported "not covered by any of the 3 authorization(s)" even when one
+  of them said "revoked" or "expired on 2026-01-31". The specific reason now wins, and
+  with several engagements that do not cover the host at all the summary stays generic
+  rather than naming one arbitrarily and implying a relationship that does not exist.
+
+### Tests
+
+- `test_ops_ledger.py`: 49 tests. The scope-confusion cases are pinned explicitly —
+  `notacme.test`, `acme.test.evil.net`, `evil-acme.test`, apex-vs-wildcard in both
+  directions — rather than left to confidence in `endswith`. Suite: 452 → 501.
+
 ## [2.10.0] — An operations layer built for a 3B model on a Raspberry Pi
 
 First slice of the agent runtime that will carry Cindrasec's business operations. This
