@@ -3,6 +3,83 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.10.0] — An operations layer built for a 3B model on a Raspberry Pi
+
+First slice of the agent runtime that will carry Cindrasec's business operations. This
+release is the foundation only: the model adapter and the guards that make a small
+model's output safe to act on. No business agents yet — those sit on top of this.
+
+The design constraint is the whole story. The target is `llama3.2:3b` on Ollama on a
+Pi 5. A 3B model cannot be trusted to reason; it can classify into a few options and
+extract a value it can see. So the deterministic Python does the logic and the model
+does narrow, bounded, schema-constrained tasks — never the reverse.
+
+"Error-free" is not achieved by making a small model reliable. It is achieved by never
+trusting it.
+
+### Added
+
+- **`ops/llm.py` — Ollama adapter.** Uses Ollama's JSON-Schema `format` parameter, so
+  generation is grammar-constrained and structurally invalid output cannot be produced
+  rather than merely being rejected. The response is nevertheless re-parsed and
+  re-validated locally, because a schema can be satisfied by a stream truncated at
+  `num_predict`, and because relying on a remote guarantee for a local invariant is how
+  silent breakage happens. Pi-tuned throughout: `keep_alive=10m` (loading a 3B model on
+  a Pi costs seconds and would otherwise dominate inference), bounded `num_ctx`,
+  generous timeouts, `temperature=0` with a fixed seed for reproducibility. Retries vary
+  the seed — retrying a deterministic failure with identical inputs reproduces it
+  exactly, which on a Pi is an expensively slower way to fail.
+- **`ops/guards.py` — grounding.** The layer that matters. A schema constrains shape,
+  not truth: `{"email": "contact@acme.com"}` is schema-perfect and may be pure
+  invention — and a *plausible* invention, which is worse, because it will not look
+  wrong in review. `assert_grounded` inverts the trust: the model does not assert a
+  fact, it points at one, and the value must literally appear in a source document that
+  was actually fetched. Hallucination becomes structurally unable to pass through rather
+  than something a reviewer is asked to catch. Common obfuscations (`[at]`, HTML
+  entities, zero-width spaces) are folded so a genuine address written defensively is
+  not rejected; nothing requiring a guess about intent is folded, because a false accept
+  means outreach to an address nobody reads.
+- **`ops/guards.py` — prompt hygiene.** This layer sits next to a scanner whose job is
+  finding live credentials. Prompts are scanned before transmission using SecretNode's
+  own 63 detectors, and credential-bearing text is refused. Locally that is merely
+  correct; the day any of this points at a hosted model it is the difference between
+  a working guard and a client-credential disclosure by the security vendor. The
+  exception names the credential *types* found and never the values — the message goes
+  to logs, and logging a secret to explain that it must not be transmitted would defeat
+  the guard.
+- **`ops/selfcheck.py` — Pi verification.** The unit tests mock Ollama so they run
+  anywhere, which means a green suite says nothing about whether a Pi can actually serve
+  this model at a workable speed. `python3 -m ops.selfcheck` talks to the real daemon,
+  runs real inference, grounds the result, and reports honest timings. A call slower
+  than 20s is flagged: usable one-at-a-time, too slow to loop over a large list, and
+  better learned here than from an overnight run.
+
+### Failure philosophy
+
+This layer raises. It never returns a plausible default, never retries into a
+fabrication, and never degrades quietly. A caller that cannot reach the model must find
+out and decide — queue, fall back to deterministic logic, or stop. A business process
+that continues on an invented value is worse than one that halts.
+
+### Verified end to end, not only unit-tested
+
+Run against a stand-in Ollama implementing the real API contract, in three states:
+
+- **Daemon absent** — fails with the actionable message and a non-zero exit.
+- **Well-behaved model** — all four stages pass.
+- **Hallucinating model** — stage 3 passes (the response *is* schema-valid) and stage 4
+  catches it, because the invented address appears nowhere in the source. That single
+  run is the entire design argument: schema-validity is not truth.
+
+### Tests
+
+- `test_ops_llm.py` (15) and `test_ops_guards.py` (17). Suite: 420 → 452.
+- One bad fixture found and corrected during the run: `AKIAIOSFODNN7EXAMPLE` is AWS's
+  own documentation key and is correctly filtered by the placeholder allowlist, so a
+  test using it would have exercised the allowlist rather than the guard. A regression
+  test now pins that behaviour deliberately — if published example keys ever raised,
+  every prompt quoting AWS docs would be refused.
+
 ## [2.9.0] — Watch: continuous-monitoring delivery, and the resolution trap
 
 A scan answers "what is exposed right now?". A monitoring subscription has to answer a

@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-420%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.9.0-blue)
+![Tests](https://img.shields.io/badge/tests-452%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.10.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,21 +14,21 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.9.0 — Watch: continuous-monitoring delivery, and a guard against claiming a
-> finding was fixed when it merely wasn't looked at** · [full changelog](CHANGELOG.md) ·
-> [releases](https://github.com/azmolhaque/secretnode/releases)
+> **v2.10.0 — an operations layer built for a 3B model on a Raspberry Pi: schema-constrained
+> generation, and a grounding guard that makes an invented value unable to pass through**
+> · [full changelog](CHANGELOG.md) · [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> A scan answers "what is exposed right now?". Monitoring has to answer "what changed, and
-> does any of it need a human today?" — so `backend/watch.py` adds resolved-finding
-> tracking (previously never stored), URGENT/REVIEW/ROUTINE triage, and a client-facing
-> monthly digest.
+> First slice of the agent runtime for business operations — the model adapter and the guards
+> that make a small model's output safe to act on. Built for `llama3.2:3b` on Ollama on a Pi 5,
+> and that constraint is the whole design: the deterministic Python does the logic, the model
+> does narrow schema-constrained tasks, never the reverse.
 >
-> The part worth stating plainly: a finding disappears from a scan for two reasons that look
-> **identical** in the findings list — someone fixed it, or this run simply saw less than the
-> last one. Only the first is "fixed", and reporting the second to a paying client as
-> resolved would put a false statement in a deliverable. Resolution is therefore asserted
-> only when the scan completed *and* coverage is comparable to the previous run; otherwise
-> the digest says, in as many words, that it could not tell.
+> The part worth stating plainly: a JSON schema constrains *shape*, not *truth*.
+> `{"email": "contact@acme.com"}` is schema-perfect and may be pure invention — a plausible
+> one, which is worse, because it does not look wrong in review. So the model never asserts a
+> fact; it points at one, and the value must literally appear in a document that was actually
+> fetched. Verified against a hallucinating stand-in model: the schema check passes and the
+> grounding check catches it anyway.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
@@ -102,6 +102,10 @@ secretnode/
 │   ├── storage.py           # SQLite persistence: scan history + false-positive suppression
 │   ├── report.py            # HTML / CSV / SARIF report generation (+ verified status)
 │   ├── watch.py             # Continuous monitoring: scan-to-scan delta, triage, client digest
+│   ├── ops/                 # Operations layer: local-LLM adapter + grounding/prompt guards
+│   │   ├── llm.py           #   Ollama, schema-constrained, Pi-tuned, fails loudly
+│   │   ├── guards.py        #   Grounding (anti-hallucination) + refuse secrets in prompts
+│   │   └── selfcheck.py     #   `python3 -m ops.selfcheck` — verify it works on this Pi
 │   └── tests/               # pytest suite (see badge above for current count)
 ├── frontend/
 │   └── index.html           # Live dashboard SPA (vanilla JS, self-hosted CSS)
