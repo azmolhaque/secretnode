@@ -3,6 +3,78 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.9.0] — Watch: continuous-monitoring delivery, and the resolution trap
+
+A scan answers "what is exposed right now?". A monitoring subscription has to answer a
+different question — **what changed since last time, and does any of it need a human
+today?** `backend/watch.py` adds that layer. Pure functions, no network, no database:
+`compute_delta` → `classify` → `render_digest`.
+
+### Added
+
+- **Resolved-finding tracking.** SecretNode has always counted `new_findings_count` and
+  `recurring_findings_count`; nothing tracked the opposite direction — findings present
+  last period and gone now. That omission matters commercially as much as technically,
+  because a monitoring subscription proves its worth by showing what got fixed, and the
+  data to say so was being discarded.
+- **A guard against the resolution trap.** A finding disappears from a scan for two
+  reasons that look *identical* in the findings list: someone fixed it, or this run
+  simply saw less than the last one (asset 404'd, WAF blocked the fetch, crawl budget
+  ran out, scan errored halfway). Only the first is "fixed". Reporting the second to a
+  paying client as resolved is a false statement in a deliverable, so resolution is now
+  asserted only when the current scan completed *and* its coverage is comparable to the
+  previous run (≥50%). Otherwise the disappearances surface as
+  `unverified_disappearances` and the digest says plainly that it could not tell. Older
+  scan rows predating v2.8.0's `assets_scanned` fall back to `assets_fetched` rather
+  than being read as zero coverage, which would have flagged every such comparison as
+  an anomaly.
+- **Triage that treats a verified credential as urgent regardless of severity.** A
+  MEDIUM secret *proven to be an active credential* is a working way in; waiting a month
+  to mention it is indefensible. `classify()` returns URGENT / REVIEW / ROUTINE, and a
+  coverage anomaly forces REVIEW even when nothing new was found.
+- **A client-facing monthly digest** (`render_digest`), deterministic by design — the
+  numbers in a paid deliverable come from the data, not from a model's paraphrase of it.
+  A clean period is stated plainly rather than left as silence, and every digest carries
+  an explicit scope-and-limits section naming what was *not* covered.
+- **Persistent high-severity findings get their own section.** A CRITICAL key that has
+  survived several monitoring periods is the most important fact in the report and the
+  one a client is most likely to have stopped noticing. Rendering it inside a "still
+  present: N" count is how it gets ignored for another month.
+- **`watch-roster.json`** (gitignored; `watch-roster.example.json` is the committed
+  template) lists monitored targets. A missing roster raises rather than running zero
+  targets — "monitoring completed, zero targets" is the most dangerous silent failure a
+  paid subscription can have. Roster membership is scheduling, not authorization: every
+  target still requires a signed RoE.
+
+### Deliberately not done
+
+- **Nothing is sent to a client automatically.** `render_digest` produces a draft for
+  human review. Two checkpoints are never automated in this business — the authorization
+  to scan at all, and the final severity call on anything critical — and a monitoring
+  loop that emailed clients on its own would quietly erase the second one.
+- **No LLM in the delta path.** A model may later improve the prose *around* these facts;
+  it will not produce the facts.
+
+### Fixed during review
+
+Two defects caught by rendering a realistic digest and reading it as a client would,
+which the substring assertions had not caught:
+
+- **Internal triage leaked into the client-facing body.** The header printed
+  `**Internal triage:** URGENT` as visible markdown while the triage *reasons* sat in an
+  HTML comment marked "remove before sending" — so a reviewer who removed the comment
+  still shipped the studio's internal vocabulary to a client. All internal content now
+  lives in exactly one block, making its deletion the complete and only step.
+- **A persistent CRITICAL finding was rendered as the number `1`.** See above.
+
+### Tests
+
+- `test_watch.py`: 23 tests. The coverage-anomaly cases are the ones that matter — they
+  pin the behaviour that stops a false "resolved" claim reaching a deliverable. Also
+  covers rotated credentials reading as resolved+new, findings without fingerprints,
+  pre-v2.8.0 scan rows, and that internal triage never appears in the visible body.
+  Suite: 397 → 420.
+
 ## [2.8.3] — A UI/UX and industrial-grade audit
 
 A deliberate broadening of the v2.8.2 audit to the dashboard itself: is it usable on a phone

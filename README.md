@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-397%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.8.3-blue)
+![Tests](https://img.shields.io/badge/tests-420%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.9.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,20 +14,21 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.8.3 — a UI/UX and industrial-grade audit: the dashboard is now keyboard- and
-> screen-reader-accessible, a broken low-contrast text color is fixed, and the version string
-> served in the raw HTML can no longer go stale** · [full changelog](CHANGELOG.md) ·
+> **v2.9.0 — Watch: continuous-monitoring delivery, and a guard against claiming a
+> finding was fixed when it merely wasn't looked at** · [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> Same class of finding as v2.8.2, different layer: the dashboard's modal had no focus
-> management (WAI-ARIA "Dialog" pattern — trap Tab inside it, move focus in on open, return
-> focus on close), toasts and the live terminal were never announced to a screen reader, the
-> type filter had no visible keyboard-focus indicator at all, and eighteen places rendered real
-> information (the clock, pipeline stage, table row numbers) in a color that measures ~2:1
-> contrast against the background — roughly half of WCAG AA's 4.5:1 floor. Also: `index.html`
-> shipped with "2.7.1" hardcoded in three places as a static fallback, corrected client-side
-> after a `/api/health` fetch — now patched to the real version at serve time, so view-source,
-> crawlers, and the moment before that fetch resolves never see a stale number either.
+> A scan answers "what is exposed right now?". Monitoring has to answer "what changed, and
+> does any of it need a human today?" — so `backend/watch.py` adds resolved-finding
+> tracking (previously never stored), URGENT/REVIEW/ROUTINE triage, and a client-facing
+> monthly digest.
+>
+> The part worth stating plainly: a finding disappears from a scan for two reasons that look
+> **identical** in the findings list — someone fixed it, or this run simply saw less than the
+> last one. Only the first is "fixed", and reporting the second to a paying client as
+> resolved would put a false statement in a deliverable. Resolution is therefore asserted
+> only when the scan completed *and* coverage is comparable to the previous run; otherwise
+> the digest says, in as many words, that it could not tell.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
@@ -100,6 +101,7 @@ secretnode/
 │   ├── cli.py               # CLI entrypoint (scan → SARIF/JSON/CSV/HTML; CI gate)
 │   ├── storage.py           # SQLite persistence: scan history + false-positive suppression
 │   ├── report.py            # HTML / CSV / SARIF report generation (+ verified status)
+│   ├── watch.py             # Continuous monitoring: scan-to-scan delta, triage, client digest
 │   └── tests/               # pytest suite (see badge above for current count)
 ├── frontend/
 │   └── index.html           # Live dashboard SPA (vanilla JS, self-hosted CSS)
@@ -107,6 +109,7 @@ secretnode/
 │   ├── workflows/ci.yml     # CI: ruff + pytest (3.11/3.12) + Docker build
 │   ├── ISSUE_TEMPLATE/      # Bug / feature templates
 │   └── pull_request_template.md
+├── watch-roster.example.json # Template for the monitored-target roster (real one is gitignored)
 ├── action.yml               # Composite GitHub Action (SARIF in CI)
 ├── Dockerfile               # Non-root, healthchecked container image
 ├── docker-compose.yml
@@ -269,6 +272,45 @@ curl -s localhost:8000/api/scans/history -H "X-API-Key: $KEY" | jq '.scans[] | {
 
 **CI integration:** run a scan, export SARIF, and upload it to GitHub code scanning with
 `github/codeql-action/upload-sarif`, or feed it to any SARIF-aware pipeline.
+
+---
+
+## Watch — continuous monitoring (v2.9.0)
+
+A single scan says what is exposed now. Monitoring has to say **what changed, and whether
+it needs a human today.** `backend/watch.py` is that layer — pure functions over two scan
+records, no network and no database of its own:
+
+```python
+from watch import compute_delta, classify, render_digest
+
+delta        = compute_delta(current_scan, previous_scan)   # new / resolved / recurring
+tier, why    = classify(delta)                              # URGENT | REVIEW | ROUTINE
+draft        = render_digest(delta, client="Acme Ltd", period="August 2026")
+```
+
+**Triage rules.** A new CRITICAL/HIGH finding is `URGENT`. So is any new finding that
+live-verification confirmed is an *active* credential — a MEDIUM secret that provably
+works is a way in, and holding it for the monthly report is indefensible. Everything else
+new is `REVIEW`; a period with no new findings is `ROUTINE`.
+
+**Resolution is claimed carefully.** A finding vanishes from a scan for two reasons that
+look identical in the data: it was fixed, or this run saw less than the last one (asset
+404'd, WAF blocked it, crawl budget ran out, scan errored). Resolution is asserted only
+when the scan completed *and* coverage is within 50% of the previous run. Otherwise those
+findings are reported as "no longer observed, resolution unconfirmed" and the digest says
+so in plain language. A weaker claim that is true beats a stronger one that might not be.
+
+**Nothing is sent automatically.** `render_digest()` returns a draft for human review, with
+all internal triage notes inside a single HTML comment — delete that block and the document
+is client-ready. Two checkpoints are never automated here: the authorization to scan at
+all, and the final severity call on anything critical.
+
+**Roster.** Copy `watch-roster.example.json` to `watch-roster.json` (gitignored — it names
+clients and their infrastructure) and list the monitored targets. A missing roster raises
+rather than running zero targets, because "monitoring completed, nothing to do" is the most
+dangerous way for a paid subscription to fail. Listing a host schedules a scan; it does not
+authorize one — that still comes from a signed RoE.
 
 ---
 

@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Template for the Watch monitoring roster. Copy to watch-roster.json and edit.",
+    "watch-roster.json is gitignored on purpose: it names paying clients and their",
+    "infrastructure, and that belongs in an engagement record, not in a public repo.",
+    "",
+    "Every target listed here must be covered by a signed Rules of Engagement and",
+    "Authorization Letter. Adding a host to this file does not create authorization",
+    "to scan it — it only schedules a scan that the authorization already permits."
+  ],
+  "targets": [
+    {
+      "client": "Example Ltd",
+      "target_url": "https://example.com",
+      "crawl_pages": 3,
+      "deep": false,
+      "verify": false,
+      "notes": "RoE signed 2026-01-15, renews annually. Findings go to security@example.com only."
+    },
+    {
+      "client": "Example Ltd",
+      "target_url": "https://app.example.com",
+      "crawl_pages": 5,
+      "deep": false,
+      "verify": true,
+      "notes": "verify=true is opt-in live credential checking — only enabled where the RoE explicitly permits it."
+    }
+  ]
+}
