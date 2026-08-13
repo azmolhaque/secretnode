@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""
+Pi self-check — verify the operations layer actually works on this machine.
+
+The unit tests mock Ollama so they run anywhere, which means a green suite says
+nothing about whether a Raspberry Pi can really serve this model at a workable
+speed. This does the other half: it talks to the real daemon, runs real
+inference, and reports honest numbers.
+
+    cd ~/secretnode/backend && python3 -m ops.selfcheck
+
+Exit code 0 means the layer is usable on this machine. Non-zero means it is not,
+and the output says which part failed and what to do about it.
+
+The timing numbers matter as much as the pass/fail. A 3B model on a Pi 5 that
+takes 90 seconds for a two-field extraction is technically working and
+practically useless for anything with more than a handful of items, and it is
+better to learn that from this script than from a monitoring run that quietly
+takes all night.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import time
+
+import httpx
+
+from ops import guards, llm
+
+PASS = "\033[92m✓\033[0m"
+FAIL = "\033[91m✗\033[0m"
+WARN = "\033[93m!\033[0m"
+
+# Above this, a per-item model call is too slow to use in a loop over anything
+# larger than a short list. Not a failure — a warning with a consequence.
+SLOW_CALL_SECONDS = 20.0
+
+
+def line(mark: str, label: str, detail: str = "") -> None:
+    print(f"  {mark} {label}" + (f" — {detail}" if detail else ""))
+
+
+async def main() -> int:
+    failures = 0
+    warnings = 0
+
+    print("\nSecretNode ops — Raspberry Pi self-check")
+    print("=" * 52)
+
+    # ── 1. Guards work with no model at all ─────────────────────────────────
+    # Deliberately first: these are pure functions and must hold even when
+    # Ollama is unavailable, because they are what make model output safe to
+    # use. If they are broken, nothing below matters.
+    print("\n[1/4] Guards (no model required)")
+    try:
+        src = {"https://example.test/": "Contact us at hello@example.test today."}
+        assert guards.assert_grounded("hello@example.test", src) == "https://example.test/"
+        line(PASS, "grounding accepts a value present in the source")
+
+        try:
+            guards.assert_grounded("invented@example.test", src)
+            line(FAIL, "grounding accepted an invented value")
+            failures += 1
+        except guards.Ungrounded:
+            line(PASS, "grounding rejects an invented value")
+
+        try:
+            guards.assert_no_secrets('tok = "ghp_1234567890abcdEFGHijklMNOPqrstUVWX12"')
+            line(FAIL, "prompt guard let a credential through")
+            failures += 1
+        except guards.SecretInPrompt:
+            line(PASS, "prompt guard refuses credential-bearing text")
+    except Exception as exc:  # noqa: BLE001
+        line(FAIL, "guards raised unexpectedly", str(exc))
+        failures += 1
+
+    # ── 2. Is Ollama there, and is the model pulled? ────────────────────────
+    print(f"\n[2/4] Ollama at {llm.OLLAMA_URL}")
+    ok, msg = await llm.health()
+    if not ok:
+        line(FAIL, "not usable", msg)
+        print("\n" + "=" * 52)
+        print(f"{FAIL} Cannot continue without Ollama. Fix the above and re-run.")
+        return 1
+    line(PASS, "reachable", msg)
+
+    # ── 3. Real constrained inference ───────────────────────────────────────
+    print(f"\n[3/4] Constrained inference ({llm.DEFAULT_MODEL})")
+    schema = {
+        "type": "object",
+        "properties": {
+            "email": {"type": "string"},
+            "company": {"type": "string"},
+        },
+        "required": ["email", "company"],
+    }
+    page = (
+        "Acme Robotics Ltd — About\n\n"
+        "We build warehouse automation. Press enquiries: press@acme-robotics.test\n"
+        "For anything security related, email hello@acme-robotics.test.\n"
+    )
+    try:
+        t0 = time.monotonic()
+        res = await llm.complete_json(
+            prompt=(
+                "Extract the security contact email and the company name from this page.\n\n"
+                f"---\n{page}\n---"
+            ),
+            schema=schema,
+            system="You extract facts that appear verbatim in the text. Never guess.",
+        )
+        elapsed = time.monotonic() - t0
+        line(PASS, "schema-valid response",
+             f"{elapsed:.1f}s, {res.eval_count} tokens, attempt {res.attempts}")
+        print(f"      → {res.data}")
+
+        if elapsed > SLOW_CALL_SECONDS:
+            line(WARN, f"slow ({elapsed:.1f}s per call)",
+                 "usable one-at-a-time; too slow to loop over a large list")
+            warnings += 1
+
+        # ── 4. The property that actually matters ───────────────────────────
+        # A schema-valid answer can still be invented. Ground it.
+        print("\n[4/4] Grounding real model output")
+        sources = {"https://acme-robotics.test/about": page}
+        try:
+            cites = guards.ground_all(
+                {"email": res.data["email"], "company": res.data["company"]},
+                sources,
+            )
+            line(PASS, "every extracted field traced to the source", str(cites))
+        except guards.Ungrounded as exc:
+            # Not a bug — this is the guard doing its job on a small model, and
+            # seeing it fire here is more informative than seeing it pass.
+            line(WARN, "model produced an ungrounded field; correctly rejected")
+            print(f"      → {exc}")
+            warnings += 1
+
+    except llm.OllamaUnavailable as exc:
+        line(FAIL, "inference unavailable", str(exc))
+        failures += 1
+    except llm.SchemaViolation as exc:
+        line(FAIL, "no schema-valid response after retries", str(exc))
+        failures += 1
+    except Exception as exc:  # noqa: BLE001
+        line(FAIL, "unexpected error", f"{type(exc).__name__}: {exc}")
+        failures += 1
+
+    # ── Verdict ─────────────────────────────────────────────────────────────
+    print("\n" + "=" * 52)
+    if failures:
+        print(f"{FAIL} {failures} check(s) failed — the ops layer is not usable here yet.")
+        return 1
+    if warnings:
+        print(f"{WARN} Usable, with {warnings} caveat(s) above. Read them before "
+              f"scheduling unattended work.")
+        return 0
+    print(f"{PASS} All checks passed. The ops layer is usable on this machine.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(asyncio.run(main()))
+    except KeyboardInterrupt:
+        print("\ninterrupted")
+        sys.exit(130)
+    except httpx.HTTPError as exc:
+        print(f"\n{FAIL} transport error: {exc}")
+        sys.exit(1)
