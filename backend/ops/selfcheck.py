@@ -22,12 +22,41 @@ takes all night.
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import sys
 import time
 
-import httpx
+# Dependency preflight, before anything third-party is imported.
+#
+# The first real run of this script on the Pi failed with a bare
+# ModuleNotFoundError traceback because it was invoked with the system
+# interpreter rather than the project's virtualenv. A diagnostic tool that
+# cannot diagnose its own most likely failure is not doing its job — and
+# "wrong interpreter" is far and away the most likely one, since the correct
+# invocation requires activating a venv two directories up.
+def _preflight() -> None:
+    try:
+        import httpx  # noqa: F401
+        from ops import guards, llm  # noqa: F401
+    except ModuleNotFoundError as exc:
+        here = pathlib.Path(__file__).resolve()
+        venv = here.parent.parent.parent / ".venv"
+        print(f"\n\033[91m✗\033[0m Missing dependency: {exc.name}")
+        print(f"  Running under: {sys.executable}")
+        if venv.exists():
+            print("\n  A virtualenv exists but is not active. Run:\n")
+            print(f"    cd {venv.parent} && source .venv/bin/activate && "
+                  f"cd backend && python3 -m ops.selfcheck\n")
+        else:
+            print(f"\n  No virtualenv found at {venv}. Create one:\n")
+            print(f"    cd {venv.parent} && python3 -m venv .venv && "
+                  f"source .venv/bin/activate && pip install -r requirements.txt\n")
+        sys.exit(2)
 
-from ops import guards, llm
+
+_preflight()
+
+from ops import guards, llm  # noqa: E402 — must follow the preflight above
 
 PASS = "\033[92m✓\033[0m"
 FAIL = "\033[91m✗\033[0m"
@@ -162,6 +191,8 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    import httpx      # safe here: the preflight above proved it is importable
+
     try:
         sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
