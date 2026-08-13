@@ -3,6 +3,57 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.8.2] — The STOP button did nothing during validation or verification
+
+Found during a general audit: the live-verification stage ran its provider checks
+one finding at a time, and while making it concurrent, a test written to prove the
+new code still honoured a cancelled scan failed — which led to finding the same,
+older bug already sitting in the Gemini-validation stage it was modelled on.
+
+### Fixed
+- **Cancelling a scan mid-validation or mid-verification did not stop it.** Both
+  stages run each finding's work inside `asyncio.gather(..., return_exceptions=True)`,
+  and `state.check()` inside each task raises `asyncio.CancelledError` when the
+  user has hit STOP. `return_exceptions=True` does not propagate that
+  `CancelledError` out of `gather()` the way it would for `await` used directly —
+  it is captured as an ordinary per-task result, same as any other exception.
+  Both call sites had a comment naming "cancellation" as a case the fallback
+  branch expected to handle, but that branch only checked `isinstance(v,
+  ValidatedFinding)` / built a "manual review" placeholder — it could not
+  distinguish a cancellation from a real per-item bug, so a STOP request during
+  either stage was silently absorbed: the scan kept validating or verifying every
+  remaining finding at full cost (Gemini calls, provider API calls) and returned
+  a normal result with no indication the user had asked it to stop. Both sites
+  now scan their gathered results for `CancelledError` and re-raise it before the
+  ordinary per-item fallback logic runs.
+- **Live verification of confirmed findings was sequential — one provider API
+  round-trip at a time.** A deep scan can confirm findings across dozens of
+  hosts; each `--verify` check is an independent network call to that secret's
+  own provider (GitHub, Stripe, Slack, …), so there was no reason for the second
+  one to wait on the first. Extracted into `verify_confirmed_findings()`,
+  concurrent and bounded by the same `semaphore` (`CONCURRENCY_LIMIT`, default
+  20) already used for fetches and Gemini validation — the identical pattern
+  `_validate_one`/`validation_tasks` already used, which is what surfaced the
+  cancellation bug above in the first place.
+
+### Changed
+- README's architecture diagram and "Key Design Decisions" table disagreed with
+  each other and with the code in four places: the diagram said 54 secret
+  patterns, the table implied Gemini 3.1-flash-lite → 3.5-flash, both said the
+  frontend used a Tailwind CDN, and the file-structure table said "82-test
+  pytest suite." The code says 63 patterns, `gemini-3.5-flash-lite` →
+  `gemini-3.6-flash`, no Tailwind (removed — self-hosted CSS, see
+  `frontend/index.html`'s own comment), and the test count is now whatever the
+  badge at the top of this file says — worded that way specifically so this
+  number can't go stale the same way again.
+
+### Tests
+- `test_verify_concurrency.py`: 4 tests — concurrent execution actually happens
+  (wall-clock bound, not just "doesn't crash"), concurrency is bounded by the
+  semaphore, one finding's unexpected verify failure doesn't affect the others,
+  and cancellation propagates correctly. The last of these is what caught the
+  bug above; it failed against the first implementation. Suite: 388 → 392.
+
 ## [2.8.1] — The mask told the truth about short secrets and lied about long ones
 
 Found while re-reading the redaction work from v2.8.0. The masking itself was right; what

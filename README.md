@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-388%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.8.1-blue)
+![Tests](https://img.shields.io/badge/tests-392%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.8.2-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,17 +14,17 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.8.1 — the mask now states a credential's real length** · [full changelog](CHANGELOG.md) · [releases](https://github.com/azmolhaque/secretnode/releases)
+> **v2.8.2 — the STOP button now actually stops a scan mid-validation or mid-verification**
+> · [full changelog](CHANGELOG.md) · [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> The latest release closed a bug worth stating plainly: **a re-scan of an unchanged site could
-> report CLEAN while the credential was still exposed.** The asset cache treated a `304 Not
-> Modified` on the root page as "unchanged, previously clean, skip" — but an HTML page is a link
-> graph, not just something to grep, so skipping its body meant never parsing its `<script>` tags
-> and every JS bundle it referenced dropped out of the scan.
->
-> It also finished a job v2.7.9 started: redaction now happens at the **API boundary** with no
-> opt-out, rather than in the report writer alone. The dashboard, the WebSocket stream, the stored
-> snippet and the JSON export were each still carrying live credentials.
+> The latest release closed a bug worth stating plainly: **cancelling a scan while it was
+> validating findings with Gemini, or live-verifying them against a provider, did nothing.**
+> Both stages check for cancellation inside an `asyncio.gather(..., return_exceptions=True)`,
+> and that combination does not propagate a cancellation the way a plain `await` would — it is
+> captured as an ordinary per-item result instead, so the scan quietly kept running every
+> remaining item at full cost. Fixed at both call sites, and live verification is now also
+> concurrent (it ran one provider API call at a time before) — the change that surfaced the bug
+> in the first place.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
@@ -35,7 +35,7 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Browser Dashboard (Vanilla JS + Tailwind CSS)                   │
+│  Browser Dashboard (Vanilla JS, self-hosted CSS — no CDN)        │
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
 │  │ Scan Control│  │ Live Terminal│  │ Verified Findings Table│  │
 │  └──────┬──────┘  └──────┬───────┘  └────────────┬───────────┘  │
@@ -58,7 +58,7 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 │    └─ extract_js_urls()  (regex HTML parse)                      │
 │                                                                  │
 │  extract_secrets()                                               │
-│    └─ 54 SECRET_PATTERNS  (AWS, GCP, Slack, JWT, GitHub…)       │
+│    └─ 63 SECRET_PATTERNS  (AWS, GCP, Slack, JWT, GitHub…)       │
 │    └─ shannon_entropy()   (filter < 3.5 bits)                   │
 │                                                                  │
 │  validate_with_gemini()  — two-tier engine (google-genai SDK)   │
@@ -80,9 +80,9 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 | Event loop | `uvloop` | 2–4× faster than default asyncio on ARM64 |
 | HTTP | `httpx.AsyncClient` | Native async, connection pooling, retries |
 | Concurrency | `asyncio.Semaphore(20)` | Bounds RAM on Pi 5 during deep JS analysis |
-| AI | Two-tier Gemini (`google-genai`): 3.1-flash-lite → 3.5-flash | Cheap pre-filter kills noise; strong tier deep-validates real/critical findings with structured output |
+| AI | Two-tier Gemini (`google-genai`): 3.5-flash-lite → 3.6-flash | Cheap pre-filter kills noise; strong tier deep-validates real/critical findings with structured output |
 | Transport | WebSocket fan-out | Browser gets live logs without polling |
-| Frontend | Vanilla JS + Tailwind CDN | Zero build step, deployable immediately |
+| Frontend | Vanilla JS, self-hosted CSS + fonts | Zero build step, deployable immediately, fully offline-capable (no Tailwind CDN — removed; see `frontend/index.html`) |
 
 ---
 
@@ -97,9 +97,9 @@ secretnode/
 │   ├── cli.py               # CLI entrypoint (scan → SARIF/JSON/CSV/HTML; CI gate)
 │   ├── storage.py           # SQLite persistence: scan history + false-positive suppression
 │   ├── report.py            # HTML / CSV / SARIF report generation (+ verified status)
-│   └── tests/               # 82-test pytest suite
+│   └── tests/               # pytest suite (see badge above for current count)
 ├── frontend/
-│   └── index.html           # Live dashboard SPA (vanilla JS + Tailwind)
+│   └── index.html           # Live dashboard SPA (vanilla JS, self-hosted CSS)
 ├── .github/
 │   ├── workflows/ci.yml     # CI: ruff + pytest (3.11/3.12) + Docker build
 │   ├── ISSUE_TEMPLATE/      # Bug / feature templates
