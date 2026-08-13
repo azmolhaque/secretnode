@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 ![Tests](https://img.shields.io/badge/tests-529%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.12.1-blue)
+![Version](https://img.shields.io/badge/version-2.12.2-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 

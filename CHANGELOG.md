@@ -3,6 +3,30 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.12.2] — The self-check reported one timing figure that hid which problem you had
+
+The first real Pi run reported "33.4s per call" and flagged it as too slow to loop over.
+A second run moments later, with the model still resident, took 4.8s. The single figure
+was conflating two costs with opposite remedies, and the conclusion drawn from it was
+wrong.
+
+### Fixed
+
+- **Step 3 now makes two calls and reports both.** The first may include loading the
+  model from disk — on a Pi that is tens of seconds and dominates everything. The second
+  runs inside the `keep_alive` window with weights already resident, so it measures
+  inference alone.
+
+  The distinction decides the architecture. A slow *cold start* is fixed by batching work
+  into one session and keeping the model warm. Slow *warm inference* means the model is
+  simply too slow for per-item work and the design must avoid it. Measured on a Pi 5 with
+  `llama3.2:3b`: ~28.6s load, 4.8s warm, ≈5.2 tokens/sec — the first problem, not the
+  second, and the "too slow to loop" warning the original figure produced was a false
+  alarm.
+- The load cost is now reported explicitly as paid once per idle window, and the
+  slow-inference warning is assessed against the warm figure rather than a number that
+  includes a one-off cost.
+
 ## [2.12.1] — The self-check could not diagnose its own most likely failure
 
 Found on the first real run on the Pi. `python3 -m ops.selfcheck` was invoked with the
