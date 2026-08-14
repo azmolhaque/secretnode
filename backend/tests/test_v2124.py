@@ -12,6 +12,7 @@ import asyncio
 import os
 import sys
 import urllib.robotparser
+from urllib.parse import urlparse
 
 import pytest
 
@@ -329,6 +330,105 @@ class TestRobotsBroadcast:
 
     def test_missing_robots_is_not_an_error(self):
         assert self._messages("", status_code=404) == []
+
+
+# ── 6. Fail loud: a scan with nothing to read must say so ────────────────────
+
+class TestSilentScopeStarvationIsNowLoud:
+    """The scope bug was survivable-looking because nothing announced it. The
+    scope check turning away a script served by the target's own host cannot be
+    right under any policy, so it now raises an ERROR — the guard that would
+    have caught the lstrip bug on its first run rather than on its Nth report.
+
+    Deliberately narrower than "everything was rejected": a page loading only
+    third-party analytics is ordinary and must stay quiet."""
+
+    HTML = (
+        '<script src="/app.js"></script>'
+        '<script src="https://cdn.acme.test/vendor.js"></script>'
+    )
+
+    @staticmethod
+    def _self_rejected(html: str, target: str) -> list[str]:
+        """The condition spider_target evaluates, without any network."""
+        rejected: list[str] = []
+        scanner.extract_js_urls(html, target, rejected)
+        own = (urlparse(target).hostname or "").lower()
+        return [u for u in rejected if (urlparse(u).hostname or "").lower() == own]
+
+    def test_rejected_urls_are_reported_to_the_caller(self):
+        rejected: list[str] = []
+        scanner.extract_js_urls(
+            self.HTML + '<script src="https://evil.test/x.js"></script>',
+            "https://acme.test/", rejected,
+        )
+        assert rejected == ["https://evil.test/x.js"]
+
+    def test_in_scope_assets_are_not_reported_as_rejected(self):
+        rejected: list[str] = []
+        kept = scanner.extract_js_urls(self.HTML, "https://acme.test/", rejected)
+        assert len(kept) == 2
+        assert rejected == []
+
+    def test_non_http_and_duplicate_skips_are_not_counted_as_scope_rejections(self):
+        """Only the scope check populates `rejected` — a data: URI or a repeat
+        is not evidence that the scope rule is wrong."""
+        rejected: list[str] = []
+        scanner.extract_js_urls(
+            '<script src="data:text/javascript,1"></script>'
+            '<script src="/a.js"></script><script src="/a.js"></script>',
+            "https://acme.test/", rejected,
+        )
+        assert rejected == []
+
+    def test_self_rejection_is_detected(self, monkeypatch):
+        """The v2.12.3 signature, reproduced by restoring the broken rule: the
+        target's own scripts turned away by its own scope check."""
+        def broken(base, cand):
+            base = base.lower().lstrip("www.")
+            return cand.lower() == base or cand.lower().endswith("." + base)
+
+        monkeypatch.setattr(scanner, "_same_scope", broken)
+        hits = self._self_rejected(
+            '<script src="/app.js"></script>', "https://web3forms.com/"
+        )
+        assert hits == ["https://web3forms.com/app.js"]
+
+    def test_current_code_never_self_rejects(self):
+        assert self._self_rejected('<script src="/app.js"></script>',
+                                   "https://web3forms.com/") == []
+
+    def test_third_party_only_page_stays_quiet(self):
+        """An analytics-only page rejects every script it has. That is ordinary
+        and must not raise an alarm — the old, broader condition would have."""
+        html = ('<script src="https://cdn.jsdelivr.net/a.js"></script>'
+                '<script src="https://www.googletagmanager.com/gtm.js"></script>')
+        rejected: list[str] = []
+        assert scanner.extract_js_urls(html, "https://acme.test/", rejected) == []
+        assert len(rejected) == 2
+        assert self._self_rejected(html, "https://acme.test/") == []
+
+    def test_a_page_with_no_scripts_stays_quiet(self):
+        assert self._self_rejected("<html><body>hi</body></html>",
+                                   "https://acme.test/") == []
+
+
+# ── 7. Log legibility and error-string handling ──────────────────────────────
+
+class TestLogLegibility:
+    def test_error_string_keeps_a_trailing_colon(self):
+        """`f"...: {exc}".strip(": ")` stripped a character set from both ends,
+        so a message ending in a colon lost it. Same family as the scope bug."""
+        exc = ValueError("could not parse header:")
+        detail = str(exc).strip()
+        built = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+        assert built == "ValueError: could not parse header:"
+
+    def test_empty_exception_message_yields_bare_type_name(self):
+        exc = TimeoutError()
+        detail = str(exc).strip()
+        built = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+        assert built == "TimeoutError"
 
 
 # ── 5. The target's own hosts are not third-party infrastructure ─────────────

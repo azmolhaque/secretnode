@@ -400,8 +400,15 @@ async def run_deep_scan(
                     logger.debug("deep scan: host %s failed: %s", url, exc)
                     done["n"] += 1
                     await emit(log(f"[{done['n']}/{n}] {host} — error: {type(exc).__name__}", "WARN"))
-                    return HostScan(host=host, url=url,
-                                    error=f"{type(exc).__name__}: {exc}".strip(": ")), None
+                    # Not `f"...: {exc}".strip(": ")` — that strips a character
+                    # SET from both ends, so an exception message ending in a
+                    # colon lost it. Same family as the scope bug in v2.12.4.
+                    detail = str(exc).strip()
+                    return HostScan(
+                        host=host, url=url,
+                        error=f"{type(exc).__name__}: {detail}" if detail
+                              else type(exc).__name__,
+                    ), None
                 done["n"] += 1
                 await emit(log(f"[{done['n']}/{n}] {host} — done "
                                f"({len(scan.get('confirmed_findings', []))} confirmed)"))

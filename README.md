@@ -3,7 +3,7 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-582%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-591%20passing-brightgreen)
 ![Version](https://img.shields.io/badge/version-2.12.4-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
@@ -33,7 +33,9 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > `eb3forms.com` was accepted as in scope for a scan of `web3forms.com`, so a domain
 > nobody authorized could receive traffic from an authorized scan. All four existing
 > scope tests used `example.com`, where the `lstrip` is a no-op and the bug is
-> invisible.
+> invisible. The scanner now raises an ERROR when the scope check rejects a script
+> served by the target's own host — the one condition that cannot be correct under
+> any scope policy, and the signal that was missing the whole time this bug ran.
 >
 > Alongside it: robots.txt is now parsed into RFC 9309 groups, so one
 > Cloudflare-managed `User-agent: GPTBot / Disallow: /` no longer makes the scanner
