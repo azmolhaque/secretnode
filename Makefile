@@ -16,6 +16,15 @@ test: ## Run the full test suite
 lint: ## Run the ruff correctness lint
 	ruff check backend/
 
+auth-list: ## Show every recorded scanning authorization
+	cd backend && python -m ops.ledger list
+
+auth-check: ## Would TARGET be allowed? e.g. make auth-check TARGET=acme.com
+	cd backend && python -m ops.ledger check $(TARGET) $(ARGS)
+
+auth-decisions: ## Audit trail of allow/deny decisions
+	cd backend && python -m ops.ledger decisions
+
 bench: ## Measure detection-layer precision/recall on the labelled corpus (R2)
 	cd backend && SECRETNODE_API_KEY=bench python -m bench.run_bench
 
