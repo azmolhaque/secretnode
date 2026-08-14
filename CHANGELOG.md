@@ -3,6 +3,65 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.12.6] — The ledger existed. Nothing called it.
+
+A whole-domain deep scan ran from the dashboard against a company with no Rules of
+Engagement on file: 123 subdomains enumerated, 80 hosts probed for liveness, 25
+crawled, 129 assets fetched, 383 seconds of traffic — and VERIFY was enabled, so a
+confirmed credential would have been replayed against the provider's API.
+
+`ops/ledger.py` had shipped in v2.12.0 to make exactly this impossible. It was never
+wired into a scan path. An authorization check a caller has to remember to make is
+not a control; it is a comment.
+
+### Fixed — authorization is now in the request path
+
+- **`ledger.enforce()` gates every scan entry point**: `POST /api/scans`,
+  `POST /api/deep-scans`, and the CLI. No live authorization covering the target, no
+  scan — HTTP 403 from the API, exit 2 from the CLI, before any traffic. Fails closed:
+  `REQUIRE_AUTHORIZATION` defaults to true, and an empty ledger denies everything.
+- Two deliberate escape hatches, both narrow. A loopback/private target is exempt when
+  `ALLOW_PRIVATE_TARGETS=true`, so a local lab and `make bench-http` still run — it
+  grants nothing on the public internet, and a test pins that. `REQUIRE_AUTHORIZATION=false`
+  disables the gate entirely and logs a warning naming the target, because every finding
+  from such a run is unattributable to an engagement.
+- Every decision, allow or deny, is written to the ledger's audit trail. "We only
+  scanned what was authorised" is a claim; the trail is the evidence.
+
+### Fixed — comments in bundles were being reported as the client's infrastructure
+
+The same report listed `console.log`, `i.test`, `stackoverflow.com`, `caniuse.com`,
+`pastebin.com`, `raw.githubusercontent.com` and several developers' personal blogs
+under the heading **"Associated hosts (third-party / connected infrastructure)"**.
+
+`_ABS_URL` matches protocol-relative `//host`, and a minified bundle is full of
+`//console.log(…)` and `//i.test(v)` — every commented-out line became a hostname.
+Documentation URLs cited in library comments came through the same way. Handing a
+client a "connected infrastructure" list containing `pastebin.com` is worse than
+handing them nothing: the heading makes a claim the data does not support.
+
+- `surface.strip_js_comments()` removes `//` line comments and `/* … */` blocks before
+  host and endpoint extraction, correctly leaving string literals alone (`"https://…"`
+  contains `//`) and preserving newlines so offsets still line up. A denylist cannot
+  keep up with every blog a bundled library cites; removing comments addresses the cause.
+- **Never applied on the secret-detection path.** Credentials hide in comments, and
+  blanking them there would be a false negative — the failure this scanner treats as
+  unacceptable. Surface intel only.
+- The report section is retitled "External hosts referenced across the domain" and now
+  states what it is: a reference graph extracted from code, not an assertion that every
+  entry is a live dependency.
+
+### Tests
+
+- `test_v2126.py`: 24 tests. The gate is asserted to deny an unauthorized company, an
+  empty ledger, and both lookalike shapes (`notexample.com`, `example.com.evil.net`);
+  to allow an authorized apex and subdomain; and to record denials. Three tests read
+  the scan entry points and fail if the `enforce` call is removed. Comment stripping is
+  pinned against every quote style, escaped quotes, unterminated blocks, and the obvious
+  trap that `https://` contains `//`. Suite: 600 → 624.
+- `test_deep_scan_api.py` now seeds a real authorization rather than stubbing the gate,
+  so it would notice if the gate disappeared.
+
 ## [2.12.5] — Two ways a scan could report clean without having looked
 
 The second deep scan of `cindrasec.com` from the Pi, read the same way: exported

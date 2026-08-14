@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-600%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.12.5-blue)
+![Tests](https://img.shields.io/badge/tests-624%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.12.6-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,40 +14,26 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.12.5 — two ways a scan could report clean without having looked** ·
+> **v2.12.6 — the ledger existed; nothing called it** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> A second deep scan of cindrasec.com from the Raspberry Pi, read the same way: the
-> exported HTML/CSV/SARIF against the dashboard against the source. The scan came back
-> clean again and the v2.12.3 fixes held. The tool did not come out as well.
+> A whole-domain deep scan ran from the dashboard against a company with no Rules of
+> Engagement on file — 123 subdomains enumerated, 80 hosts probed, 25 crawled, and
+> live-verification enabled. `ops/ledger.py` shipped in v2.12.0 to make that
+> impossible, and was never wired into a scan path. An authorization check a caller
+> has to remember to make is not a control; it is a comment.
 >
-> The scope gate removed a `www.` prefix with `str.lstrip("www.")`, which strips a
-> character *set* rather than a prefix: `"walmart.com"` became `"almart.com"`. The
-> mangled base then failed to match the target's **own hostname**, and that gate runs
-> before anything is fetched — so for any domain starting with `w`, the scanner
-> collected zero JavaScript, read the root HTML and nothing else, and called the
-> target clean. It fails the other way too: `eb3forms.com` was accepted as in scope
-> for a scan of `web3forms.com`, so a domain nobody authorized could receive traffic
-> from an authorized scan. All four existing scope tests used `example.com`, where
-> the `lstrip` is a no-op and the bug is invisible.
+> `ledger.enforce()` now gates both scan endpoints and the CLI, fails closed, and
+> writes every allow and deny to an audit trail. Three tests read the entry points and
+> fail if the call is removed.
 >
-> The second one was found by a new ground-truth benchmark, on its first end-to-end
-> run: with no Gemini key configured, every generic `api_key = "…"` finding was
-> silently discarded — the most common shape a hardcoded credential takes in real
-> code, dropped by the documented offline configuration.
->
-> Both share a root cause worth naming: nothing said anything was wrong. The scanner
-> now raises an ERROR when the scope check rejects a script served by the target's own
-> host, and a finding the AI never judged is routed to a human instead of being
-> treated as one the AI dismissed.
->
-> Alongside: robots.txt is parsed into RFC 9309 groups, so one Cloudflare-managed
-> `User-agent: GPTBot / Disallow: /` no longer makes the scanner announce that a site
-> "disallows all crawling" while Googlebot roams it freely; the client report no
-> longer files the target's own apex domain under "third-party / connected
-> infrastructure"; and `make bench-full` measures all 63 detectors against a
-> ground-truth corpus.
+> The same report listed `console.log`, `stackoverflow.com` and several developers'
+> personal blogs as the target's "third-party / connected infrastructure": protocol-
+> relative URL matching turned every `//console.log(…)` in a minified bundle into a
+> hostname. Comments are now stripped before host and endpoint extraction — never on
+> the secret-detection path, where credentials hide in comments — and the section is
+> retitled to describe what it actually is.
 >
 > The three releases before it: **v2.12.0** verified contact lookup — an address is
 > returned only if it literally appears on a page that was actually fetched;

@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -508,3 +510,55 @@ async def recent_decisions(
             (limit,),
         )
         return [dict(r) for r in await cursor.fetchall()]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Policy gate — the call every scan entry point makes before any traffic
+# ─────────────────────────────────────────────────────────────────────────────
+
+logger = logging.getLogger(__name__)
+
+# Fail closed by default. The ledger existed for weeks while a whole-domain deep
+# scan of a company nobody had a Rules of Engagement with ran from the dashboard
+# — 123 subdomains enumerated, 80 hosts probed, 25 crawled — because nothing in
+# the scan path ever called it. An authorization check that a caller has to
+# remember to make is not a control; it is a comment.
+REQUIRE_AUTHORIZATION = os.environ.get("REQUIRE_AUTHORIZATION", "true").lower() == "true"
+ALLOW_PRIVATE_TARGETS = os.environ.get("ALLOW_PRIVATE_TARGETS", "false").lower() == "true"
+
+
+def _is_lab_target(target: str) -> bool:
+    """A loopback/private literal or localhost, and only when the operator has
+    explicitly opted into private targets. Lets the benchmark and a local lab
+    run without a ledger entry; grants nothing on the public internet."""
+    if not ALLOW_PRIVATE_TARGETS:
+        return False
+    host = normalise_host(target) or ""
+    if host in ("localhost", "localhost.localdomain"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+async def enforce(target: str, *, db_path: Path | None = None) -> Authorization | None:
+    """Raise `NotAuthorized` unless `target` is covered by a live authorization.
+
+    Returns the covering Authorization, or None when the check was deliberately
+    bypassed (lab target, or REQUIRE_AUTHORIZATION explicitly turned off). Every
+    decision is written to the ledger's audit trail either way — "we only
+    scanned what was authorised" is a claim; the trail is the evidence.
+    """
+    if _is_lab_target(target):
+        logger.info("authorization: %s is a private lab target, ledger skipped", target)
+        return None
+    if not REQUIRE_AUTHORIZATION:
+        logger.warning(
+            "authorization: REQUIRE_AUTHORIZATION=false — scanning %s WITHOUT a "
+            "ledger check. Every finding from this run is unattributable to an "
+            "engagement.", target,
+        )
+        return None
+    return await assert_authorized(target, db_path=db_path)

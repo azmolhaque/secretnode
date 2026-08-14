@@ -52,9 +52,14 @@ def _valid_host(host: str) -> bool:
 
 def extract_endpoints(text: str, base_url: str) -> list[str]:
     """Extract referenced URLs/paths from `text`, resolved to absolute URLs against
-    `base_url`. Deterministic, deduplicated, sorted. Pure (no I/O)."""
+    `base_url`. Deterministic, deduplicated, sorted. Pure (no I/O).
+
+    Comments are stripped first — a URL in a comment is a citation, not an
+    endpoint, and feeding it to the deeper crawl spends a fetch on someone's
+    blog post."""
     if not text:
         return []
+    text = strip_js_comments(text)
     base = base_url or ""
     found: set[str] = set()
     count = 0
@@ -87,10 +92,68 @@ def extract_endpoints(text: str, base_url: str) -> list[str]:
     return sorted(found)
 
 
+def strip_js_comments(text: str) -> str:
+    """Blank out `//` line comments and `/* … */` blocks, leaving string
+    literals and total length untouched (newlines are preserved, so offsets and
+    line numbers still line up).
+
+    Surface intel only. This must NEVER be applied on the secret-detection path:
+    credentials hide in comments, and blanking them there would be a false
+    negative — the one failure this scanner treats as unacceptable.
+
+    Why it exists: `_ABS_URL` matches protocol-relative `//host`, and a minified
+    bundle is full of `//console.log(…)` and `//i.test(v)`. Those were parsed as
+    hostnames and shipped to clients under the heading "third-party / connected
+    infrastructure", alongside every documentation link a bundled library
+    happens to cite — stackoverflow.com, caniuse.com, pastebin.com, an author's
+    personal blog. A denylist cannot keep up with that; removing comments
+    addresses the cause rather than enumerating the symptoms.
+    """
+    out = list(text)
+    i, n = 0, len(text)
+    quote: str | None = None
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'`":
+            quote = ch
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt == "/":
+                end = text.find("\n", i)
+                end = n if end == -1 else end
+                for k in range(i, end):
+                    out[k] = " "
+                i = end
+                continue
+            if nxt == "*":
+                end = text.find("*/", i + 2)
+                end = n if end == -1 else end + 2
+                for k in range(i, end):
+                    if out[k] != "\n":
+                        out[k] = " "
+                i = end
+                continue
+        i += 1
+    return "".join(out)
+
+
 def extract_referenced_hosts(text: str, base_url: str) -> set[str]:
-    """The set of distinct hostnames referenced by absolute URLs in `text`. Pure."""
+    """The set of distinct hostnames referenced by absolute URLs in `text`. Pure.
+
+    Comments are removed first: a host cited in a code comment is documentation,
+    not infrastructure the target talks to."""
     hosts: set[str] = set()
-    for m in _ABS_URL.finditer(text):
+    for m in _ABS_URL.finditer(strip_js_comments(text)):
         raw = m.group(0)
         absu = urljoin(base_url or "", raw) if raw.startswith("//") else raw
         host = (urlparse(absu).hostname or "").lower()

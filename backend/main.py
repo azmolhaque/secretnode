@@ -44,6 +44,7 @@ load_dotenv()
 
 from scanner import run_scan, ScanState, load_asset_cache, drain_asset_cache
 import orchestrator
+from ops import ledger
 from storage import (
     init_db, save_scan, load_scans, load_scan, get_previous_scan_for_target,
     get_asset_cache, save_asset_cache,
@@ -373,6 +374,16 @@ async def start_scan(request: ScanRequest, http_request: Request) -> dict[str, A
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Authorization before traffic. Fail closed: no live Rules of Engagement
+    # covering this target, no scan. See ops/ledger.py for why this call lives
+    # in the request path rather than in an operator's memory.
+    try:
+        await ledger.enforce(request.target_url)
+    except ledger.NotAuthorized as exc:
+        logger.warning("AUDIT scan_denied client=%s target=%s reason=%s",
+                       client_ip, request.target_url, exc)
+        raise HTTPException(status_code=403, detail=f"Not authorized: {exc}") from exc
+
     active_count = sum(1 for e in _registry.values() if not e["task"].done())
     if active_count >= MAX_CONCURRENT_SCANS:
         raise HTTPException(
@@ -487,6 +498,16 @@ async def start_deep_scan(request: DeepScanRequest, http_request: Request) -> di
     progress. Discovery is passive; authorized-scope use only."""
     client_ip = http_request.client.host if http_request.client else "unknown"
     logger.info("AUDIT deep_scan_request client=%s domain=%s", client_ip, request.domain)
+
+    # A deep scan enumerates every subdomain and crawls each live host, so it is
+    # the single largest volume of traffic this service can emit at one target.
+    # It gets the same gate as everything else, before any of that starts.
+    try:
+        await ledger.enforce(request.domain)
+    except ledger.NotAuthorized as exc:
+        logger.warning("AUDIT deep_scan_denied client=%s domain=%s reason=%s",
+                       client_ip, request.domain, exc)
+        raise HTTPException(status_code=403, detail=f"Not authorized: {exc}") from exc
 
     active_count = sum(1 for e in _registry.values() if not e["task"].done())
     if active_count >= MAX_CONCURRENT_SCANS:
