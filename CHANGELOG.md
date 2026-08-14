@@ -67,6 +67,54 @@ defects in the tool, one of which decides whether a request leaves the machine.
   domain level, and accepts an explicit `scope_hosts` set for targets whose hosts do
   not share a registrable root.
 
+### Found by the new benchmark, and the reason it exists
+
+- **With no Gemini key, every generic `apiKey = "…"` finding was discarded in
+  silence.** `validate_finding` returned `is_valid=True, confidence=50` when
+  `GEMINI_API_KEY` was unset — a fabricated verdict standing in for one that never
+  happened. `classify_validated` read that as an ordinary weak result: structural
+  detectors still went to review, but the entropy-gated generic catch-all fell
+  through to **drop**. Running without a Gemini key is the documented offline mode
+  on the Pi, so the default configuration was losing the single most common shape
+  a hardcoded credential takes in real client code — `password: "…"`,
+  `token = "…"`, `api_key = "…"` — and reporting the scan clean.
+
+  Fixed with an explicit `ai_judged` flag on `ValidatedFinding`. "The AI said this
+  is fake" and "the AI never looked" are different states and must route
+  differently; only the first justifies dropping anything. Both now reach a human.
+
+### Added — measurement
+
+- **`bench/groundtruth.py` + `bench/benchmark.py`**: a ground-truth corpus
+  covering **all 63 detectors** (the existing `bench/corpus.py` covers 22 and
+  stays as the fast `make bench` gate), rendered as a small site — inline script,
+  external bundle, vendor bundle, source map, JSON config — so `--http` mode puts
+  asset *discovery* in scope. A secret in a bundle the spider never fetched is
+  missed exactly as completely as one the regex never matched, and only an
+  end-to-end run tells them apart.
+
+  Three ground-truth classes: `secret` (must be found), `public` (must be found
+  *and* classified public-by-design), `decoy` (must not be found — git SHAs,
+  UUIDs, SRI hashes, inline base64 images, webpack chunk manifests, a CSP nonce).
+
+  The corpus self-validates before it will run, and that has already earned its
+  keep twice: it caught a specimen whose declared and embedded values differed
+  because the RNG was called twice, and the harness caught two bugs *in itself*
+  before either could be reported as a scanner defect — a reimplemented dispatch
+  that skipped source-map decoding, and a comparison against uncapped values that
+  scored every credential over 80 characters as both a miss and a false positive.
+
+  Every reported figure ships with its own caveat: recall against specimens built
+  to satisfy SecretNode's own patterns is **internal validity only**. It proves a
+  detector is wired up, not that it catches credentials in the wild. A defensible
+  external recall number needs a corpus nobody derived from these regexes.
+
+- **`scanner.scan_asset()`**: the per-asset dispatch (source map → decoded
+  originals, anything else → itself) extracted from `run_scan` so the benchmark
+  measures the path production takes instead of a copy that can drift from it.
+
+- `make bench-full` and `make bench-http`.
+
 ### Added — the guard that would have caught all of this
 
 - **A scan that cannot read the target now says so.** The scope bug above was
@@ -105,7 +153,7 @@ the run where the observation was real. The finding was luck, not detection.
 
 ### Tests
 
-- `test_v2124.py`: 53 tests. The `lstrip` regression pinned with hosts that actually
+- `test_v2124.py`: 53 tests, `test_groundtruth_bench.py`: 9 tests. The `lstrip` regression pinned with hosts that actually
   trip it, robots.txt group semantics including the exact cindrasec.com file plus
   Cloudflare-style AI blocks, a differential against `urllib.robotparser` over ten
   real-world robots shapes, a 441-pair scope matrix checked against an independently
@@ -114,7 +162,7 @@ the run where the observation was real. The finding was luck, not detection.
   covering the bug it was built for, and the self-rejection guard pinned in both
   directions — it fires when the broken rule is restored, and stays quiet on an
   analytics-only page that legitimately rejects every script it has.
-  Suite: 538 → 591.
+  Suite: 538 → 600.
 - `tests/qa_dashboard.py`: browser harness, not a pytest, since it needs Chromium.
   Loads the real dashboard with only `fetch` and `WebSocket` stubbed and replays a
   deep scan's event sequence. Run it when touching the WebSocket handling.

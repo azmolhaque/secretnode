@@ -211,6 +211,10 @@ class ValidatedFinding:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     is_new: bool = True   # set False by run_scan if this fingerprint was seen in a prior scan
+    # False when the AI never rendered a verdict on this finding (no key, rejected
+    # key, missing model). Distinct from "the AI said it is fake": there is no
+    # verdict to trust, so routing must not act as though there were one.
+    ai_judged: bool = True
     verified: str = "disabled"  # live-verification status: verified/unverified/unsupported/disabled
     verified_detail: str = ""   # identity/scope of a VERIFIED credential (R1) — never the secret itself
     impact: str = ""            # AI blast-radius statement: what an attacker could actually do
@@ -1951,6 +1955,28 @@ def extract_secrets(
     return _collapse_generic_duplicates(unique)
 
 
+def scan_asset(
+    scan_id: str, target_url: str, source_url: str, body: str,
+) -> list[tuple[str, list[RawFinding]]]:
+    """Per-asset dispatch: a source map is scanned as its DECODED original
+    sources, anything else as itself. Returns (attributed_url, findings) groups
+    so the caller can report per-original-file provenance.
+
+    Extracted so the benchmark harness measures the path production actually
+    takes. Reimplementing this dispatch in the harness produced a "miss" for
+    every quote-delimited detector — `datadog: { apiKey: "…" }` inside a map's
+    JSON-escaped `sourcesContent` reads as `\\"…\\"`, and the closing quote the
+    pattern needs is a backslash. That was the measuring instrument being wrong
+    about the tool, which is the one thing a benchmark must never be.
+    """
+    if SCAN_SOURCEMAP_CONTENT and looks_like_sourcemap(source_url, body):
+        srcs = extract_sourcemap_sources(body, source_url)
+        if srcs:
+            return [(vsrc_url, extract_secrets(scan_id, target_url, vsrc_url, content))
+                    for vsrc_url, content in srcs]
+    return [(source_url, extract_secrets(scan_id, target_url, source_url, body))]
+
+
 def _collapse_generic_duplicates(findings: list[RawFinding]) -> list[RawFinding]:
     """Collapse one credential matched by several detectors into a single finding.
 
@@ -2080,8 +2106,15 @@ def _describe_ai_config_error(code: object, exc: Exception) -> str:
 def _ai_skipped(finding: RawFinding, reason: str) -> ValidatedFinding:
     """AI unavailable for a configuration reason (no key / rejected key / missing
     model). The finding is returned unvalidated (confidence 50) rather than flooding
-    needs-review with one scary item per finding — the root cause is surfaced once."""
-    return ValidatedFinding(raw=finding, is_valid=True, confidence=50, reason=reason)
+    needs-review with one scary item per finding — the root cause is surfaced once.
+
+    `ai_judged=False` is what makes "unvalidated" mean it: without it,
+    classify_validated read confidence 50 as an ordinary weak verdict, sent
+    structural findings to review and *dropped* every entropy-gated one. Running
+    with no Gemini key is the documented offline mode, so the default
+    configuration was silently discarding every `apiKey = "…"` finding."""
+    return ValidatedFinding(raw=finding, is_valid=True, confidence=50,
+                            reason=reason, ai_judged=False)
 
 
 async def _call_tier(
@@ -2231,12 +2264,21 @@ async def validate_with_gemini(
     needs-review (confidence = NEEDS_REVIEW_SENTINEL) rather than silently dropped —
     a scanner must never lose a finding quietly."""
     if not GEMINI_API_KEY:
-        return ValidatedFinding(
-            raw=finding,
-            is_valid=True,
-            confidence=50,
-            reason="AI validation skipped — GEMINI_API_KEY not configured.",
-        )
+        # NEEDS_REVIEW_SENTINEL, not a fabricated confidence. `confidence=50,
+        # is_valid=True` looked harmless — too low to confirm, so everything
+        # lands in review — but classify_validated only sends a finding to
+        # review on that path when it is *structural*. The generic
+        # keyword=value catch-all is entropy-gated, so it fell through to
+        # "drop": with no key configured, every `apiKey = "…"` /
+        # `password: "…"` / `token = "…"` finding was discarded in silence, and
+        # that is the most common shape a hardcoded credential takes in real
+        # client code. Running without a Gemini key is the documented offline
+        # mode on the Pi, so this was the default configuration losing findings.
+        #
+        # The sentinel says what is actually true — the AI did not judge this —
+        # and routes it to a human, which is the rule the rest of the file
+        # already follows: a scanner must never lose a finding quietly.
+        return _ai_skipped(finding, "AI validation skipped — GEMINI_API_KEY not configured.")
 
     # A prior finding already hit a permanent config error this scan — skip the API
     # entirely (don't repeat the futile call) and return the finding unvalidated.
@@ -2410,7 +2452,7 @@ def classify_validated(v: "ValidatedFinding") -> str:
     failure mode for a scanner. The generic keyword=value catch-all keeps the old
     aggressive behaviour (an AI 'no' there is trusted and dropped), preserving the
     'no false positives in Confirmed' promise."""
-    if v.confidence == NEEDS_REVIEW_SENTINEL:
+    if v.confidence == NEEDS_REVIEW_SENTINEL or not v.ai_judged:
         return "review"                                    # AI unavailable — human decides
     if v.is_valid and v.confidence >= GEMINI_CONFIDENCE_MIN:
         return "confirmed"
@@ -2685,11 +2727,10 @@ async def run_scan(
             # high-entropy "mappings" VLQ blob (a false-positive source). Falls
             # back to scanning the raw body if there's no usable sourcesContent.
             if SCAN_SOURCEMAP_CONTENT and looks_like_sourcemap(source_url, body):
-                srcs = extract_sourcemap_sources(body, source_url)
-                if srcs:
-                    for vsrc_url, content in srcs:
+                groups = scan_asset(scan_id, target_url, source_url, body)
+                if not (len(groups) == 1 and groups[0][0] == source_url):
+                    for vsrc_url, sfound in groups:
                         state.check()
-                        sfound = extract_secrets(scan_id, target_url, vsrc_url, content)
                         if sfound:
                             await emit({
                                 "type": "log", "level": "WARN",

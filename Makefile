@@ -19,6 +19,13 @@ lint: ## Run the ruff correctness lint
 bench: ## Measure detection-layer precision/recall on the labelled corpus (R2)
 	cd backend && SECRETNODE_API_KEY=bench python -m bench.run_bench
 
+bench-full: ## Ground-truth benchmark across all 63 detectors (offline)
+	cd backend && SECRETNODE_API_KEY=bench python -m bench.benchmark
+
+bench-http: ## Ground-truth benchmark end-to-end, discovery in scope (local lab)
+	cd backend && SECRETNODE_API_KEY=bench ALLOW_PRIVATE_TARGETS=true \
+		python -m bench.benchmark --http
+
 run: ## Start the server (requires .env with SECRETNODE_API_KEY)
 	# `python -m uvicorn` uses the same interpreter that runs the CLI, so it works
 	# even when the `uvicorn` console script isn't on PATH; --loop auto uses uvloop
