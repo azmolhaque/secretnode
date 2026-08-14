@@ -13,19 +13,29 @@ defects in the tool, one of which decides whether a request leaves the machine.
 
 ### Fixed
 
-- **The scope gate used `str.lstrip("www.")`, which is not prefix removal.** `lstrip`
-  strips any leading character present in the *set* `{'w', '.'}`, so
-  `"web3forms.com"` became `"eb3forms.com"` and `"wwf.org"` became `"f.org"`.
-  `_same_scope` decides whether the scanner issues a request, so the first case is a
-  fetch against a domain that was never in scope — anyone could register
-  `eb3forms.com` and receive traffic from an authorized scan of `web3forms.com`. The
-  second case fails the other way: scanning `wwf.org` rejected `assets.wwf.org`,
-  quietly under-covering a legitimate target. Any host beginning with `w` or `.` is
-  affected, and `web3forms.com` is not hypothetical — it appears in cindrasec.com's
-  own associated-host list. All four pre-existing scope tests used `example.com`,
-  where the `lstrip` is a no-op; the fixture could not fail. Scope now lives in one
-  place, `surface.same_scope`, so the fetch decision and the client report cannot
-  disagree about what "in scope" means.
+- **The scope gate used `str.lstrip("www.")`, which is not prefix removal — every
+  target domain beginning with `w` was scanned with no JavaScript coverage at all.**
+  `lstrip` strips any leading character present in the *set* `{'w', '.'}`, so
+  `"web3forms.com"` became `"eb3forms.com"`, `"walmart.com"` became `"almart.com"`,
+  `"wwf.org"` became `"f.org"`. The mangled base then failed to match the target's
+  **own hostname**: scanning `walmart.com` asked whether `walmart.com` was in scope
+  for `almart.com`, got no, and discarded the asset. Because this gate runs before
+  anything is fetched, `extract_js_urls` returned `[]` for such a target — the scan
+  read the root HTML and nothing else, then reported CLEAN. A false clean in a paid
+  deliverable is the worst failure mode this tool has. Affected: any hostname
+  starting with `w` that is not itself `www.`-prefixed — `wix.com`, `wordpress.com`,
+  `walmart.com`, `wise.com`, `webflow.com`, `w3.org` among them.
+
+  The same bug fails the other way too: `eb3forms.com` was accepted as in scope for
+  a scan of `web3forms.com`, and this gate decides whether a request leaves the
+  machine, so anyone registering that domain would receive traffic from an
+  authorized scan of someone else's. Both directions are one line.
+
+  All four pre-existing scope tests used `example.com`, where the `lstrip` is a
+  no-op; the fixture could not fail. Scope now lives in one place,
+  `surface.same_scope`, so the fetch decision and the client report cannot disagree
+  about what "in scope" means, and a regression test asserts the property that would
+  have caught this immediately: a host is always in its own scope.
 - **The robots.txt notice reported one blocked user-agent as a site-wide block.**
   The check was `re.search(r"^disallow:\s*/\s*$", body)` against the whole file, with
   no notion of RFC 9309 groups. A single `User-agent: GPTBot / Disallow: /` — exactly
@@ -68,19 +78,42 @@ the run where the observation was real. The finding was luck, not detection.
 
 ### Tests
 
-- `test_v2124.py`: 28 tests. The `lstrip` regression pinned with hosts that actually
+- `test_v2124.py`: 44 tests. The `lstrip` regression pinned with hosts that actually
   trip it, robots.txt group semantics including the exact cindrasec.com file plus
-  Cloudflare-style AI blocks, and apex/www classification symmetry asserted rather
-  than described. Suite: 538 → 566.
+  Cloudflare-style AI blocks, a differential against `urllib.robotparser` over ten
+  real-world robots shapes, a 441-pair scope matrix checked against an independently
+  written reference, and apex/www classification symmetry asserted rather than
+  described. One test guards the guard: it fails if the scope matrix ever stops
+  covering the bug it was built for. Suite: 538 → 582.
+- `tests/qa_dashboard.py`: browser harness, not a pytest, since it needs Chromium.
+  Loads the real dashboard with only `fetch` and `WebSocket` stubbed and replays a
+  deep scan's event sequence. Run it when touching the WebSocket handling.
 
-### Not verified here
+### QA
 
-The two dashboard fixes are verified by reading the code and tracing scan-ID
-allocation through `main.py` (single scans pass the queued ID to `run_scan`, so the
-new guard is a no-op there; deep scans allocate per-host IDs that the guard now
-ignores). They were not exercised in a browser — `handleWsEvent` is closure-scoped by
-design, and reproducing the event sequence needs a live target this environment
-cannot reach.
+Each fix was checked against the pre-fix build, because a check that cannot fail on
+the old code proves nothing:
+
+- **Dashboard, in Chromium.** The real page, with only `fetch` and `WebSocket`
+  stubbed, replaying the exact event sequence of the 2026-08-14 16:11 UTC scan. The
+  pre-fix build reproduces `ID: 7c19405d…` — the value in the screenshot that started
+  this release — while the fixed build shows the parent ID that names the exports.
+  Run again at concurrency 1, the pre-fix build also loses the first host's assets
+  (1 URL instead of 2); the live run had escaped that only because both hosts started
+  inside the same second. Single-target scans are unaffected in both builds, which is
+  the point of the guard.
+- **robots.txt over real HTTP**, against a local server serving a Cloudflare-shaped
+  file: three AI agents blocked, wildcard group free. Reported as
+  "blocks 3 named user-agent(s) … general crawling is permitted", no warning.
+- **Differential against `urllib.robotparser`** and the **441-pair scope matrix** are
+  now part of the suite rather than a one-off script: ten agreements with the stdlib,
+  zero divergences; the fixed scope check agrees with the reference on every pair
+  while the pre-fix one disagrees on 11, in both directions.
+- **End-to-end scan** of a local target: SSRF guard refused the private address until
+  explicitly overridden for lab use, the planted AWS key was detected and correctly
+  routed to needs-review with "AI validation skipped — GEMINI_API_KEY not
+  configured", the preloaded font was not fetched as JavaScript (v2.12.3 holding),
+  and `associated_hosts` listed the two genuine third parties and nothing else.
 
 ## [2.12.3] — Three bugs found by scanning our own site from the Pi
 
