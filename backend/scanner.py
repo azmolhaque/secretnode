@@ -1061,7 +1061,14 @@ async def fetch_url(
                     await broadcast({
                         "type": "log",
                         "level": "INFO",
-                        "message": f"Fetching [{attempt}/{RETRY_ATTEMPTS}]: {url}",
+                        # "Fetching [1/3]" was an attempt counter, but printed
+                        # once per asset directly above "3 file(s) to scan" it
+                        # read as "file 1 of 3" — three identical [1/3] lines
+                        # look like a counter that is stuck. Say what it is.
+                        "message": (
+                            f"Fetching: {url}" if attempt == 1
+                            else f"Retry {attempt}/{RETRY_ATTEMPTS}: {url}"
+                        ),
                     })
                 # Rotate the browser fingerprint on retries after a WAF block —
                 # some edges let a different UA through.
@@ -1291,9 +1298,16 @@ def _same_scope(base_host: str, candidate_host: str) -> bool:
     return surface.same_scope(base_host, candidate_host)
 
 
-def _accept_asset(raw: str, base_url: str, base_host: str, seen: set[str]) -> str | None:
+def _accept_asset(raw: str, base_url: str, base_host: str, seen: set[str],
+                  rejected: list[str] | None = None) -> str | None:
     """Absolutise + scope-check a discovered asset URL. Returns the absolute URL
-    to keep, or None to skip (already seen, out of scope, or non-http)."""
+    to keep, or None to skip (already seen, out of scope, or non-http).
+
+    `rejected` collects URLs turned away specifically by the *scope* check —
+    not the already-seen or non-HTTP skips, which are uninteresting. The caller
+    uses it to notice the one failure mode that is otherwise silent: a page full
+    of scripts, none of them kept, and a clean result that means nothing.
+    """
     raw = raw.strip()
     if not raw or raw.startswith(("data:", "blob:")):
         return None
@@ -1302,28 +1316,33 @@ def _accept_asset(raw: str, base_url: str, base_host: str, seen: set[str]) -> st
     if p.scheme not in ("http", "https") or absolute in seen:
         return None
     if SCOPE_SAME_DOMAIN and not _same_scope(base_host, p.hostname or ""):
+        if rejected is not None:
+            rejected.append(absolute)
         return None
     seen.add(absolute)
     return absolute
 
 
-def extract_js_urls(html: str, base_url: str) -> list[str]:
+def extract_js_urls(html: str, base_url: str,
+                    rejected: list[str] | None = None) -> list[str]:
     """Absolutise all JS asset URLs discovered in the HTML: <script src>,
     <script type=module src>, and script-ish <link> tags (modulepreload,
     preload as=script, or an explicit .js href). By default only keeps assets
     on the same domain as base_url (SCOPE_SAME_DOMAIN=true) so the scanner
-    doesn't fan out to unrelated third-party hosts."""
+    doesn't fan out to unrelated third-party hosts.
+
+    Pass `rejected` to also collect what the scope check turned away."""
     seen: set[str] = set()
     result: list[str] = []
     base_host = urlparse(base_url).hostname or ""
     for m in _SCRIPT_SRC_RE.finditer(html):
-        absolute = _accept_asset(m.group(1), base_url, base_host, seen)
+        absolute = _accept_asset(m.group(1), base_url, base_host, seen, rejected)
         if absolute:
             result.append(absolute)
     for m in _LINK_JS_RE.finditer(html):
         if not _LINK_IS_SCRIPT_RE.search(m.group(0)):
             continue
-        absolute = _accept_asset(m.group(1), base_url, base_host, seen)
+        absolute = _accept_asset(m.group(1), base_url, base_host, seen, rejected)
         if absolute:
             result.append(absolute)
     return result
@@ -1700,7 +1719,8 @@ async def spider_target(
     )
     html_pages: list[tuple[str, str]] = [(root_url, html_body)]
     visited_pages: set[str] = {root_url}
-    all_js_urls: set[str] = set(extract_js_urls(html_body, target_url))
+    scope_rejected: list[str] = []
+    all_js_urls: set[str] = set(extract_js_urls(html_body, target_url, scope_rejected))
 
     # ── Shallow same-domain crawl for additional HTML pages ─────────────────
     if max_pages > 1:
@@ -1717,7 +1737,7 @@ async def spider_target(
                     continue
                 html_pages.append((page_url, page_body))
                 assets.append((page_url, page_body))
-                for js in extract_js_urls(page_body, page_url):
+                for js in extract_js_urls(page_body, page_url, scope_rejected):
                     all_js_urls.add(js)
         if broadcast and len(visited_pages) > 1:
             await broadcast({
@@ -1726,6 +1746,33 @@ async def spider_target(
             })
 
     js_urls = sorted(all_js_urls)
+
+    # Fail loud, never silent. The scope check rejecting a script served by the
+    # target's OWN host cannot be correct under any scope policy — it means the
+    # rule is broken, and the consequence is the worst outcome this tool has:
+    # nothing to read, therefore nothing found, therefore a CLEAN verdict that
+    # means nothing. The v2.12.4 `lstrip("www.")` bug did exactly this to every
+    # target starting with "w" and went unnoticed because no surface said so.
+    #
+    # Deliberately narrower than "all scripts were rejected": a page that loads
+    # only third-party analytics is ordinary and must not raise an alarm. Only
+    # self-rejection is unambiguous.
+    if broadcast and scope_rejected:
+        own = urlparse(target_url).hostname or ""
+        self_rejected = [u for u in scope_rejected
+                         if (urlparse(u).hostname or "").lower() == own.lower()]
+        if self_rejected:
+            await broadcast({
+                "type": "log", "level": "ERROR",
+                "message": (
+                    f"Scope check rejected {len(self_rejected)} script(s) served by "
+                    f"the target's own host ({own}). That cannot be right: the scope "
+                    f"rule is broken, this scan is not reading the target's "
+                    f"JavaScript, and a clean result from it proves nothing. "
+                    f"Example: {self_rejected[0]}"
+                ),
+            })
+
     if broadcast:
         await broadcast({
             "type": "log",

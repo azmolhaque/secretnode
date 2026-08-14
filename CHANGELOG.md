@@ -67,6 +67,33 @@ defects in the tool, one of which decides whether a request leaves the machine.
   domain level, and accepts an explicit `scope_hosts` set for targets whose hosts do
   not share a registrable root.
 
+### Added — the guard that would have caught all of this
+
+- **A scan that cannot read the target now says so.** The scope bug above was
+  survivable-looking for one reason: nothing announced it. The scanner discarded
+  every script, found nothing, and reported CLEAN, and no surface disagreed. The
+  spider now raises an ERROR when the scope check rejects a script served by the
+  target's **own host** — a thing that cannot be correct under any scope policy, so
+  it means the rule is broken and the run's verdict is worthless.
+
+  Deliberately narrower than "every script was rejected": a page that loads only
+  third-party analytics rejects all of them and is completely ordinary. Only
+  self-rejection is unambiguous, and it is the exact signature the `lstrip` bug
+  produced. Verified by restoring the broken rule against a live local target: the
+  old rule trips the ERROR and discovers 0 JS assets, the fixed rule is silent and
+  discovers 1.
+
+### Also fixed
+
+- **`Fetching [1/3]` was an attempt counter that read as a file counter.** Printed
+  once per asset, three identical `[1/3]` lines directly above `3 file(s) to scan`
+  look like a counter that is stuck. First attempts now read `Fetching: <url>` and
+  only genuine retries carry `Retry 2/3: <url>`.
+- **`f"{type(exc).__name__}: {exc}".strip(": ")` in the deep-scan host handler** —
+  same family as the scope bug, `strip` taking a character set rather than a
+  suffix, so a host error whose message ended in a colon silently lost it. An
+  audit of the whole backend for this mistake found only this one other instance.
+
 ### Correcting the record
 
 v2.12.3 noted the robots.txt warning under "Noted, not a code change" and said the
@@ -78,13 +105,16 @@ the run where the observation was real. The finding was luck, not detection.
 
 ### Tests
 
-- `test_v2124.py`: 44 tests. The `lstrip` regression pinned with hosts that actually
+- `test_v2124.py`: 53 tests. The `lstrip` regression pinned with hosts that actually
   trip it, robots.txt group semantics including the exact cindrasec.com file plus
   Cloudflare-style AI blocks, a differential against `urllib.robotparser` over ten
   real-world robots shapes, a 441-pair scope matrix checked against an independently
   written reference, and apex/www classification symmetry asserted rather than
   described. One test guards the guard: it fails if the scope matrix ever stops
-  covering the bug it was built for. Suite: 538 → 582.
+  covering the bug it was built for, and the self-rejection guard pinned in both
+  directions — it fires when the broken rule is restored, and stays quiet on an
+  analytics-only page that legitimately rejects every script it has.
+  Suite: 538 → 591.
 - `tests/qa_dashboard.py`: browser harness, not a pytest, since it needs Chromium.
   Loads the real dashboard with only `fetch` and `WebSocket` stubbed and replays a
   deep scan's event sequence. Run it when touching the WebSocket handling.
