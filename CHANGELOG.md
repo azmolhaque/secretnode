@@ -3,6 +3,85 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.12.4] — A scope check that could fetch a domain nobody authorized
+
+The second deep scan of `cindrasec.com` from the Pi, read the same way: exported
+HTML/CSV/SARIF against the dashboard against the source. The scan was clean again —
+0 confirmed, 0 needs-review, 0 posture, 0 takeover, and the v2.12.3 fixes all held
+(duration agreed across three surfaces, no font was fetched as JavaScript). Five
+defects in the tool, one of which decides whether a request leaves the machine.
+
+### Fixed
+
+- **The scope gate used `str.lstrip("www.")`, which is not prefix removal.** `lstrip`
+  strips any leading character present in the *set* `{'w', '.'}`, so
+  `"web3forms.com"` became `"eb3forms.com"` and `"wwf.org"` became `"f.org"`.
+  `_same_scope` decides whether the scanner issues a request, so the first case is a
+  fetch against a domain that was never in scope — anyone could register
+  `eb3forms.com` and receive traffic from an authorized scan of `web3forms.com`. The
+  second case fails the other way: scanning `wwf.org` rejected `assets.wwf.org`,
+  quietly under-covering a legitimate target. Any host beginning with `w` or `.` is
+  affected, and `web3forms.com` is not hypothetical — it appears in cindrasec.com's
+  own associated-host list. All four pre-existing scope tests used `example.com`,
+  where the `lstrip` is a no-op; the fixture could not fail. Scope now lives in one
+  place, `surface.same_scope`, so the fetch decision and the client report cannot
+  disagree about what "in scope" means.
+- **The robots.txt notice reported one blocked user-agent as a site-wide block.**
+  The check was `re.search(r"^disallow:\s*/\s*$", body)` against the whole file, with
+  no notion of RFC 9309 groups. A single `User-agent: GPTBot / Disallow: /` — exactly
+  what a Cloudflare-managed robots.txt appends — made the scanner announce that the
+  target "disallows all crawling" while every general-purpose crawler, Googlebot
+  included, was free to fetch the entire site. robots.txt is now parsed into groups;
+  only the wildcard group (SecretNode publishes no product token) can trigger the
+  warning, path-scoped rules like `Disallow: /src/` correctly do not match the root,
+  and `Allow: /` wins the length tie against `Disallow: /` as Google resolves it.
+  Named-agent blocks are still reported — as what they are, with the agents named.
+  Crawl-delay is now actually read, which the docstring had claimed for some time.
+- **The scan ID on screen did not match the report just downloaded.** Every per-host
+  sub-scan in a deep scan emits its own `scan_start`, and the dashboard adopted each
+  one. The run behind this release displayed `7c19405d…` while all three exports were
+  named `6ad578be` — the operator reading an ID aloud to a client would name a scan
+  that produced no deliverable.
+- **Per-host `scan_start` also cleared the discovered-asset panel mid-run**, throwing
+  away assets already found on hosts that started earlier. It survived this run only
+  because both hosts started in the same second; at concurrency 1, or with hosts of
+  uneven speed, the earlier host's assets are lost. `startScan()` already clears both
+  panels before queueing, so the sub-scan clear was never needed.
+- **The client report filed the target's own domain under third-party
+  infrastructure.** `classify_endpoints` compared hostnames with `host == base_host`,
+  so during the `www.cindrasec.com` scan the apex counted as external and landed in
+  "Associated hosts (third-party / connected infrastructure)" in the deliverable. The
+  same root cause made two hosts serving byte-identical content report 24 endpoints /
+  8 associated hosts against 19 / 9, because absolute apex URLs were dropped from the
+  in-scope list. Classification is now scope-aware at both the per-host and the
+  domain level, and accepts an explicit `scope_hosts` set for targets whose hosts do
+  not share a registrable root.
+
+### Correcting the record
+
+v2.12.3 noted the robots.txt warning under "Noted, not a code change" and said the
+tool "was right to raise it". That was too generous to the tool. The served file does
+differ from the committed one — that part stands, and the committed file still
+produces no match for the old regex. But a file-wide grep cannot establish "disallows
+all crawling", so the warning's *conclusion* was not supported by its evidence even on
+the run where the observation was real. The finding was luck, not detection.
+
+### Tests
+
+- `test_v2124.py`: 28 tests. The `lstrip` regression pinned with hosts that actually
+  trip it, robots.txt group semantics including the exact cindrasec.com file plus
+  Cloudflare-style AI blocks, and apex/www classification symmetry asserted rather
+  than described. Suite: 538 → 566.
+
+### Not verified here
+
+The two dashboard fixes are verified by reading the code and tracing scan-ID
+allocation through `main.py` (single scans pass the queued ID to `run_scan`, so the
+new guard is a no-op there; deep scans allocate per-host IDs that the guard now
+ignores). They were not exercised in a browser — `handleWsEvent` is closure-scoped by
+design, and reproducing the event sequence needs a live target this environment
+cannot reach.
+
 ## [2.12.3] — Three bugs found by scanning our own site from the Pi
 
 A real deep scan of `cindrasec.com` from the Raspberry Pi, with the dashboard read

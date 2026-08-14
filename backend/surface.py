@@ -99,16 +99,57 @@ def extract_referenced_hosts(text: str, base_url: str) -> set[str]:
     return hosts
 
 
-def classify_endpoints(endpoints: list[str], base_host: str) -> tuple[list[str], list[str]]:
-    """Split endpoints into (same-host, associated-hosts). same-host = endpoints on
-    `base_host`; associated-hosts = the distinct OTHER hostnames referenced."""
-    base_host = (base_host or "").lower()
+def same_scope(base_host: str, candidate_host: str) -> bool:
+    """True if candidate_host is base_host or a subdomain of it, treating a
+    leading `www.` on the base as equivalent to the bare host.
+
+    The `www.` prefix MUST be removed with a prefix check, never with
+    str.lstrip("www."). lstrip strips any leading character that appears in the
+    SET {'w', '.'}, which is not prefix removal:
+
+        "web3forms.com".lstrip("www.")  ->  "eb3forms.com"
+        "wwf.org".lstrip("www.")        ->  "f.org"
+
+    The first admitted eb3forms.com — a domain nobody authorized — as in-scope,
+    and this gate decides whether the scanner issues a request, so that was a
+    real out-of-scope fetch. The second rejected assets.wwf.org while scanning
+    wwf.org, silently reducing coverage on a legitimate target. Every existing
+    test used example.com, where the lstrip happens to be a no-op.
+    """
+    base = (base_host or "").lower().strip().strip(".")
+    cand = (candidate_host or "").lower().strip().strip(".")
+    if not base or not cand:
+        return False
+    base = base.removeprefix("www.")
+    return cand == base or cand.endswith("." + base)
+
+
+def classify_endpoints(
+    endpoints: list[str],
+    base_host: str,
+    scope_hosts: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Split endpoints into (in-scope, associated-hosts).
+
+    In-scope means the endpoint belongs to the target itself: `base_host`, a
+    host named in `scope_hosts` (a deep scan's enumerated subdomains), or any
+    host sharing the same registrable root. Comparing hostnames by exact string
+    put the target's own apex into the client-facing "third-party / connected
+    infrastructure" table whenever the scan ran against www., and dropped every
+    cross-subdomain endpoint from the in-scope list — which is why scanning
+    cindrasec.com and www.cindrasec.com, serving byte-identical content,
+    reported 24 endpoints / 8 associated hosts against 19 / 9.
+    """
+    base = (base_host or "").lower()
+    scope = {h.lower().strip(".") for h in (scope_hosts or set()) if h}
     same: list[str] = []
     others: set[str] = set()
     for e in endpoints:
         host = (urlparse(e).hostname or "").lower()
-        if host == base_host:
+        if not host:
+            continue
+        if host == base or host in scope or same_scope(base, host):
             same.append(e)
-        elif host:
+        else:
             others.add(host)
     return sorted(same), sorted(others)
