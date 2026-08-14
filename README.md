@@ -3,7 +3,7 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-566%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-582%20passing-brightgreen)
 ![Version](https://img.shields.io/badge/version-2.12.4-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
@@ -24,12 +24,16 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > decides whether a request leaves the machine.
 >
 > The scope gate removed a `www.` prefix with `str.lstrip("www.")`, which strips a
-> character *set* rather than a prefix: `"web3forms.com"` became `"eb3forms.com"`, and
-> since that gate decides whether the scanner issues a request, an unrelated domain
-> could receive traffic from an authorized scan of another. It failed the other way
-> too — `"wwf.org"` became `"f.org"`, so `assets.wwf.org` was rejected as out of scope
-> for its own parent. All four existing scope tests used `example.com`, where the
-> `lstrip` is a no-op and the bug is invisible.
+> character *set* rather than a prefix: `"walmart.com"` became `"almart.com"`,
+> `"web3forms.com"` became `"eb3forms.com"`. The mangled base then failed to match the
+> target's **own hostname**, and that gate runs before anything is fetched — so for
+> any domain starting with `w`, the scanner collected zero JavaScript assets, read the
+> root HTML and nothing else, and reported the target clean. A false clean in a paid
+> deliverable is the worst thing this tool can do. It fails the other way too:
+> `eb3forms.com` was accepted as in scope for a scan of `web3forms.com`, so a domain
+> nobody authorized could receive traffic from an authorized scan. All four existing
+> scope tests used `example.com`, where the `lstrip` is a no-op and the bug is
+> invisible.
 >
 > Alongside it: robots.txt is now parsed into RFC 9309 groups, so one
 > Cloudflare-managed `User-agent: GPTBot / Disallow: /` no longer makes the scanner

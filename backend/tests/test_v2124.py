@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import urllib.robotparser
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("SECRETNODE_API_KEY", "test-key-for-pytest")
@@ -64,6 +67,49 @@ class TestSameScopeLstripRegression:
         disagree about what in-scope means."""
         assert not scanner._same_scope("web3forms.com", "eb3forms.com")
         assert scanner._same_scope("wwf.org", "assets.wwf.org")
+
+    def test_a_host_is_always_in_its_own_scope(self):
+        """The worst consequence of the lstrip bug, and the one that is easiest
+        to miss: for any target starting with "w", the mangled base no longer
+        matched the target's OWN hostname. Scanning walmart.com asked whether
+        walmart.com was in scope for almart.com — no — so every same-host asset
+        was discarded before it could be fetched."""
+        for host in ("web3forms.com", "wolf.com", "w3.org", "wwf.org", "wix.com",
+                     "wordpress.com", "walmart.com", "wise.com", "webflow.com",
+                     "example.com", "cindrasec.com", "www.acme.test"):
+            assert surface.same_scope(host, host), host
+
+
+class TestScopeBugStarvedTheScan:
+    """The scope gate runs before any asset is fetched, so a base host that
+    failed its own scope check produced a scan with no JavaScript in it at all —
+    and a scan with nothing to read reports CLEAN. A false clean in a paid
+    deliverable is a worse outcome than the unauthorized fetch this same bug
+    also allowed."""
+
+    HTML = (
+        '<script src="/app.js"></script>'
+        '<script src="https://web3forms.com/bundle.js"></script>'
+        '<script src="https://cdn.web3forms.com/vendor.js"></script>'
+    )
+
+    def test_same_host_scripts_are_collected_for_a_w_domain(self):
+        assert sorted(scanner.extract_js_urls(self.HTML, "https://web3forms.com/")) == [
+            "https://cdn.web3forms.com/vendor.js",
+            "https://web3forms.com/app.js",
+            "https://web3forms.com/bundle.js",
+        ]
+
+    def test_third_party_scripts_are_still_excluded(self):
+        html = self.HTML + '<script src="https://cdn.jsdelivr.net/x.js"></script>'
+        assert "https://cdn.jsdelivr.net/x.js" not in scanner.extract_js_urls(
+            html, "https://web3forms.com/"
+        )
+
+    def test_unaffected_domains_behave_as_before(self):
+        assert scanner.extract_js_urls(
+            '<script src="/app.js"></script>', "https://cindrasec.com/"
+        ) == ["https://cindrasec.com/app.js"]
 
 
 # ── 2. robots.txt: RFC 9309 groups, not a file-wide grep ─────────────────────
@@ -154,6 +200,87 @@ class TestRobotsGroupParsing:
     def test_malformed_crawl_delay_is_ignored(self):
         _rules, delay = self._wildcard("User-agent: *\nCrawl-delay: soon\nDisallow: /x\n")
         assert delay is None
+
+
+class TestRobotsAgreesWithStdlib:
+    """Differential against urllib.robotparser. Our parser exists because the
+    stdlib one answers a slightly different question (can THIS agent fetch THIS
+    path) and resolves conflicts first-match rather than longest-match — but on
+    "does the wildcard group block the root", the two must never disagree, and
+    the stdlib is the more trustworthy oracle."""
+
+    CORPUS = {
+        "cindrasec (real)":
+            "User-agent: *\nDisallow: /src/\nDisallow: /build.py\nAllow: /\n"
+            "\nUser-agent: GPTBot\nAllow: /\n",
+        "cloudflare AI blocks appended":
+            "User-agent: *\nDisallow: /src/\nAllow: /\n"
+            "\nUser-agent: AI2Bot\nDisallow: /\n\nUser-agent: Amazonbot\nDisallow: /\n",
+        "genuine disallow-all": "User-agent: *\nDisallow: /\n",
+        "disallow-all with carve-out": "User-agent: *\nDisallow: /\nAllow: /public/\n",
+        "empty disallow means allow": "User-agent: *\nDisallow:\n",
+        "no wildcard group at all": "User-agent: Googlebot\nDisallow: /\n",
+        "wildcard last": "User-agent: BadBot\nDisallow: /\n\nUser-agent: *\nDisallow: /tmp/\n",
+        "grouped agents": "User-agent: a\nUser-agent: *\nDisallow: /\n",
+        "comments and blanks": "# hi\n\nUser-agent: *   # all\nDisallow: /   # everything\n",
+        "crawl-delay only": "User-agent: *\nCrawl-delay: 5\n",
+    }
+
+    @pytest.mark.parametrize("name", sorted(CORPUS))
+    def test_wildcard_root_verdict_matches_stdlib(self, name):
+        body = self.CORPUS[name]
+        groups = scanner.parse_robots_groups(body)
+        wildcard = next(((r, d) for a, r, d in groups if "*" in a), None)
+        ours = bool(wildcard and scanner._group_blocks_root(wildcard[0]))
+
+        rp = urllib.robotparser.RobotFileParser()
+        rp.parse(body.splitlines())
+        stdlib = not rp.can_fetch("SomeGenericCrawler", "https://acme.test/")
+
+        assert ours == stdlib, name
+
+
+class TestScopeMatchesAnIndependentReference:
+    """441 host pairs against a separately-written statement of the rule. The
+    point is that the reference was written from the intent, not from the
+    implementation, so agreement is evidence rather than a tautology."""
+
+    HOSTS = [
+        "example.com", "www.example.com", "cdn.example.com", "notexample.com",
+        "web3forms.com", "eb3forms.com", "api.web3forms.com", "evil.eb3forms.com",
+        "wwf.org", "assets.wwf.org", "f.org", "wolf.com", "olf.com",
+        "w3.org", "3.org", "cindrasec.com", "www.cindrasec.com", "evil.com",
+        "acme.test", "www.acme.test", "acme.test.evil.net",
+    ]
+
+    @staticmethod
+    def _reference(base: str, cand: str) -> bool:
+        base, cand = base.lower().strip("."), cand.lower().strip(".")
+        if not base or not cand:
+            return False
+        root = base[4:] if base.startswith("www.") else base
+        return cand == root or cand.endswith("." + root)
+
+    def test_every_pair_agrees(self):
+        disagreements = [
+            (b, c) for b in self.HOSTS for c in self.HOSTS
+            if surface.same_scope(b, c) != self._reference(b, c)
+        ]
+        assert disagreements == []
+
+    def test_the_reference_disagrees_with_the_old_implementation(self):
+        """Guards the guard: if this ever passes with zero disagreements, the
+        matrix has stopped covering the bug it was built for."""
+        def old(base, cand):
+            base = base.lower().lstrip("www.")
+            cand = cand.lower()
+            return cand == base or cand.endswith("." + base)
+
+        disagreements = [
+            (b, c) for b in self.HOSTS for c in self.HOSTS
+            if old(b, c) != self._reference(b, c)
+        ]
+        assert len(disagreements) >= 10
 
 
 class TestRobotsBroadcast:
