@@ -51,14 +51,49 @@ handing them nothing: the heading makes a claim the data does not support.
   states what it is: a reference graph extracted from code, not an assertion that every
   entry is a live dependency.
 
+### Fixed — scope is not consent to a technique
+
+`permit_deep_scan` and `permit_verification` were defined on `Authorization`,
+stored in the schema, written by `save_authorization` and read back by
+`_row_to_auth` — and consulted by nothing. The same defect as the ledger itself,
+one level down. The run that prompted this release had *both* techniques on.
+
+- `enforce(target, deep=…, verify=…)` now refuses a domain-wide enumeration, or a
+  live credential replay, unless the engagement permits that specific technique.
+  An authorization covering a host is not consent to enumerate every subdomain it
+  has, and it is certainly not consent to authenticate to a provider with a
+  credential found along the way.
+- Both scan endpoints and the CLI pass the flags they were invoked with.
+
+### Fixed — the deep-scan endpoint had no SSRF guard
+
+`POST /api/scans` called `assert_public_target`; `POST /api/deep-scans` did not.
+The larger of the two traffic generators was the unguarded one. It now resolves and
+rejects private/internal addresses on the same terms.
+
+### Added — the ledger has a write interface
+
+It stayed empty partly because filling it meant writing Python. `python -m ops.ledger`
+now offers `add`, `list`, `check`, `revoke` and `decisions`:
+
+```
+python -m ops.ledger add --id ENG-2026-014 --client "Acme Ltd" \
+    --scope acme.com '*.acme.com' --starts 2026-08-01 --expires 2026-09-30 \
+    --recipient security@acme.com --roe "Signed RoE 2026-07-28"
+python -m ops.ledger check acme.com --deep
+```
+
+`check` answers the question the scanner will ask, before you start a scan and
+discover the answer the hard way. `decisions` prints the audit trail.
+
 ### Tests
 
-- `test_v2126.py`: 24 tests. The gate is asserted to deny an unauthorized company, an
+- `test_v2126.py`: 33 tests. The gate is asserted to deny an unauthorized company, an
   empty ledger, and both lookalike shapes (`notexample.com`, `example.com.evil.net`);
   to allow an authorized apex and subdomain; and to record denials. Three tests read
   the scan entry points and fail if the `enforce` call is removed. Comment stripping is
   pinned against every quote style, escaped quotes, unterminated blocks, and the obvious
-  trap that `https://` contains `//`. Suite: 600 → 624.
+  trap that `https://` contains `//`. Suite: 600 → 631.
 - `test_deep_scan_api.py` now seeds a real authorization rather than stubbing the gate,
   so it would notice if the gate disappeared.
 

@@ -543,13 +543,24 @@ def _is_lab_target(target: str) -> bool:
     return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
-async def enforce(target: str, *, db_path: Path | None = None) -> Authorization | None:
-    """Raise `NotAuthorized` unless `target` is covered by a live authorization.
+async def enforce(
+    target: str, *, deep: bool = False, verify: bool = False,
+    db_path: Path | None = None,
+) -> Authorization | None:
+    """Raise `NotAuthorized` unless `target` is covered by a live authorization
+    that permits the *technique* being used, not merely the host.
 
     Returns the covering Authorization, or None when the check was deliberately
     bypassed (lab target, or REQUIRE_AUTHORIZATION explicitly turned off). Every
     decision is written to the ledger's audit trail either way — "we only
     scanned what was authorised" is a claim; the trail is the evidence.
+
+    `permit_deep_scan` and `permit_verification` were stored, loaded and
+    persisted by this module from the day it shipped, and read by nothing. The
+    run that prompted the gate had both techniques enabled: whole-domain
+    enumeration, and live replay of any discovered credential against its
+    provider. Those are categorically different from fetching a public page,
+    and an authorization covering a host does not imply consent to either.
     """
     if _is_lab_target(target):
         logger.info("authorization: %s is a private lab target, ledger skipped", target)
@@ -561,4 +572,144 @@ async def enforce(target: str, *, db_path: Path | None = None) -> Authorization 
             "engagement.", target,
         )
         return None
-    return await assert_authorized(target, db_path=db_path)
+
+    auth = await assert_authorized(target, db_path=db_path)
+
+    if deep and not auth.permit_deep_scan:
+        raise NotAuthorized(
+            f"{auth.engagement_id} covers {target}, but does not permit domain-wide "
+            f"deep scanning. A deep scan enumerates every subdomain and crawls each "
+            f"live host — set permit_deep_scan on the engagement if the Rules of "
+            f"Engagement actually allow it."
+        )
+    if verify and not auth.permit_verification:
+        raise NotAuthorized(
+            f"{auth.engagement_id} covers {target}, but does not permit live "
+            f"verification. Verification replays a discovered credential against "
+            f"the provider's API — that is use of the client's credential, not "
+            f"passive observation, and needs its own line in the Rules of Engagement."
+        )
+    return auth
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI — the ledger had no write interface, which is most of why it stayed empty
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cli() -> int:
+    import argparse
+    import asyncio as _asyncio
+
+    ap = argparse.ArgumentParser(
+        prog="python -m ops.ledger",
+        description="Record and inspect scanning authorizations. Nothing is "
+                    "scannable until an engagement here covers it.",
+    )
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    add = sub.add_parser("add", help="Record a Rules of Engagement")
+    add.add_argument("--id", required=True, help="Engagement ID, e.g. ENG-2026-014")
+    add.add_argument("--client", required=True)
+    add.add_argument("--scope", required=True, nargs="+",
+                     help="Hosts/patterns, e.g. acme.com '*.acme.com'")
+    add.add_argument("--exclude", nargs="*", default=[],
+                     help="Hosts/patterns that override scope")
+    add.add_argument("--starts", required=True, help="ISO date, inclusive")
+    add.add_argument("--expires", required=True, help="ISO date, inclusive")
+    add.add_argument("--recipient", required=True,
+                     help="Who the report goes to — a named human, not a role")
+    add.add_argument("--roe", required=True,
+                     help="Reference to the signed document authorising this")
+    add.add_argument("--permit-deep-scan", action="store_true")
+    add.add_argument("--permit-verification", action="store_true",
+                     help="Allows replaying a discovered credential against its "
+                          "provider. Only with explicit written consent.")
+    add.add_argument("--notes", default="")
+
+    sub.add_parser("list", help="Show every recorded authorization")
+
+    chk = sub.add_parser("check", help="Would this target be allowed?")
+    chk.add_argument("target")
+    chk.add_argument("--deep", action="store_true")
+    chk.add_argument("--verify", action="store_true")
+
+    rev = sub.add_parser("revoke", help="Revoke an engagement (effective immediately)")
+    rev.add_argument("engagement_id")
+    rev.add_argument("--reason", required=True)
+
+    dec = sub.add_parser("decisions", help="Audit trail of allow/deny decisions")
+    dec.add_argument("-n", type=int, default=25)
+
+    args = ap.parse_args()
+
+    async def run() -> int:
+        await init_db()
+        if args.cmd == "add":
+            auth = Authorization(
+                engagement_id=args.id, client=args.client, scope=args.scope,
+                exclusions=args.exclude, starts_at=args.starts,
+                expires_at=args.expires, recipient=args.recipient,
+                roe_reference=args.roe, permit_deep_scan=args.permit_deep_scan,
+                permit_verification=args.permit_verification, notes=args.notes,
+            )
+            await save_authorization(auth)
+            print(f"Recorded {auth.engagement_id} — {auth.client}")
+            print(f"  scope      {', '.join(auth.scope)}")
+            if auth.exclusions:
+                print(f"  exclusions {', '.join(auth.exclusions)}")
+            print(f"  window     {auth.starts_at} .. {auth.expires_at}")
+            print(f"  deep scan  {'permitted' if auth.permit_deep_scan else 'NOT permitted'}")
+            print(f"  verify     {'permitted' if auth.permit_verification else 'NOT permitted'}")
+            return 0
+
+        if args.cmd == "list":
+            auths = await load_authorizations()
+            if not auths:
+                print("No authorizations on record. Every target is denied.")
+                return 0
+            for a in auths:
+                flags = []
+                if a.permit_deep_scan:
+                    flags.append("deep")
+                if a.permit_verification:
+                    flags.append("verify")
+                print(f"{a.engagement_id:<20} {a.status:<8} {a.starts_at}..{a.expires_at}  "
+                      f"{a.client}")
+                print(f"  scope: {', '.join(a.scope)}"
+                      + (f"   permits: {', '.join(flags)}" if flags else ""))
+            return 0
+
+        if args.cmd == "check":
+            try:
+                auth = await enforce(args.target, deep=args.deep, verify=args.verify)
+            except NotAuthorized as exc:
+                print(f"DENIED  {args.target}\n  {exc}")
+                return 1
+            if auth is None:
+                print(f"ALLOWED {args.target} (ledger bypassed — lab target or "
+                      f"REQUIRE_AUTHORIZATION=false)")
+            else:
+                print(f"ALLOWED {args.target} under {auth.engagement_id} ({auth.client})")
+            return 0
+
+        if args.cmd == "revoke":
+            ok = await revoke(args.engagement_id, args.reason)
+            print(f"Revoked {args.engagement_id}" if ok
+                  else f"No engagement {args.engagement_id}")
+            return 0 if ok else 1
+
+        if args.cmd == "decisions":
+            rows = await recent_decisions(args.n)
+            if not rows:
+                print("No decisions recorded yet.")
+            for r in rows:
+                print(f"{r['decided_at']}  {'ALLOW' if r['allowed'] else 'DENY '}  "
+                      f"{r['target']}  {r.get('reason', '')}")
+            return 0
+        return 2
+
+    return _asyncio.run(run())
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

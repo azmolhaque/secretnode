@@ -378,7 +378,7 @@ async def start_scan(request: ScanRequest, http_request: Request) -> dict[str, A
     # covering this target, no scan. See ops/ledger.py for why this call lives
     # in the request path rather than in an operator's memory.
     try:
-        await ledger.enforce(request.target_url)
+        await ledger.enforce(request.target_url, verify=request.verify)
     except ledger.NotAuthorized as exc:
         logger.warning("AUDIT scan_denied client=%s target=%s reason=%s",
                        client_ip, request.target_url, exc)
@@ -503,7 +503,12 @@ async def start_deep_scan(request: DeepScanRequest, http_request: Request) -> di
     # the single largest volume of traffic this service can emit at one target.
     # It gets the same gate as everything else, before any of that starts.
     try:
-        await ledger.enforce(request.domain)
+        assert_public_target(f"https://{ledger.normalise_host(request.domain) or request.domain}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        await ledger.enforce(request.domain, deep=True, verify=request.verify)
     except ledger.NotAuthorized as exc:
         logger.warning("AUDIT deep_scan_denied client=%s domain=%s reason=%s",
                        client_ip, request.domain, exc)

@@ -47,6 +47,11 @@ def authorized(tmp_path, monkeypatch):
         expires_at=(date.today() + timedelta(days=30)).isoformat(),
         recipient="security@example.com",
         roe_reference="TEST-ROE",
+        # This engagement is used to test the deep-scan endpoint, so the Rules
+        # of Engagement have to permit deep scanning. Scope alone does not:
+        # enumerating every subdomain is a different technique from fetching
+        # one page, and the ledger now says so.
+        permit_deep_scan=True,
     )
 
     async def _seed():
