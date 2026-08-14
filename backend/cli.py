@@ -32,6 +32,7 @@ import orchestrator
 import recon
 import report
 import scanner
+from ops import ledger
 
 
 def assert_public_target(url: str) -> None:
@@ -198,6 +199,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.target.startswith(("http://", "https://")):
         raise SystemExit("Target must start with http:// or https://")
     assert_public_target(args.target)
+
+    try:
+        asyncio.run(ledger.enforce(args.target))
+    except ledger.NotAuthorized as exc:
+        print(f"Refusing to scan {args.target} — not authorized: {exc}", file=sys.stderr)
+        print("Record a Rules of Engagement first, or set REQUIRE_AUTHORIZATION=false "
+              "to scan without one (every finding then lacks an engagement).",
+              file=sys.stderr)
+        return 2
 
     result = asyncio.run(scanner.run_scan(
         target_url=args.target,

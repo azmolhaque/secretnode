@@ -7,6 +7,7 @@ is mocked so nothing touches the network."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 os.environ.setdefault("SECRETNODE_API_KEY", "test-key-for-pytest")
@@ -22,6 +23,39 @@ HEADERS = {"X-API-Key": os.environ["SECRETNODE_API_KEY"]}
 @pytest.fixture
 def client():
     return TestClient(main.app)
+
+
+@pytest.fixture
+def authorized(tmp_path, monkeypatch):
+    """Record a real Rules of Engagement for example.com in a throwaway ledger.
+
+    Deliberately not a monkeypatch of `enforce`: this endpoint now refuses to
+    scan anything the ledger does not cover, and a test that stubs the gate out
+    would stop noticing if the gate were removed. Seeding an authorization
+    exercises the same path an operator takes."""
+    from datetime import date, timedelta
+
+    from ops import ledger
+
+    db = tmp_path / "ops.db"
+    auth = ledger.Authorization(
+        engagement_id="TEST-001",
+        client="Example Corp",
+        scope=["example.com", "*.example.com"],
+        exclusions=[],
+        starts_at=(date.today() - timedelta(days=1)).isoformat(),
+        expires_at=(date.today() + timedelta(days=30)).isoformat(),
+        recipient="security@example.com",
+        roe_reference="TEST-ROE",
+    )
+
+    async def _seed():
+        await ledger.init_db(db)
+        await ledger.save_authorization(auth, db)
+
+    asyncio.run(_seed())
+    monkeypatch.setattr(ledger, "DB_PATH", db)
+    return auth
 
 
 def test_deep_scan_route_registered():
@@ -43,7 +77,7 @@ def test_deep_scan_request_caps_inputs():
         main.DeepScanRequest(domain="   ")
 
 
-def test_deep_scan_starts_and_returns_scan_id(client, monkeypatch):
+def test_deep_scan_starts_and_returns_scan_id(authorized, client, monkeypatch):
     import orchestrator
 
     async def fake_deep(domain, **_kw):
