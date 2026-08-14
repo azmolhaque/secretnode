@@ -1327,9 +1327,19 @@
 
         case 'scan_start':
           appendLog(`Scan started: ${msg.scan_id}`, 'SYS');
-          $('scan-id-display').textContent = `ID: ${msg.scan_id.slice(0, 8)}…`;
-          clearAssets();
-          setProgress(5, 'initialising');
+          // In a deep scan, every per-host sub-scan emits its own scan_start.
+          // Acting on those replaced the queued scan's ID — the one that names
+          // the exported HTML/CSV/SARIF files — with whichever host started
+          // last, so the ID on screen did not match the report the operator
+          // had just downloaded. It also cleared the asset panel mid-run,
+          // discarding assets already found on hosts that started earlier
+          // (survivable only because hosts happen to start near-simultaneously).
+          // startScan() already clears both panels before queueing.
+          if (!state.scanId || msg.scan_id === state.scanId) {
+            $('scan-id-display').textContent = `ID: ${msg.scan_id.slice(0, 8)}…`;
+            clearAssets();
+            setProgress(5, 'initialising');
+          }
           break;
 
         case 'status':

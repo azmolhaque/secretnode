@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-538%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.12.3-blue)
+![Tests](https://img.shields.io/badge/tests-566%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.12.4-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,25 +14,35 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.12.3 — three bugs found by pointing SecretNode at our own site** ·
+> **v2.12.4 — a scope check that could fetch a domain nobody authorized** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> A deep scan of cindrasec.com from the Raspberry Pi, with the dashboard read side by
-> side against the downloaded report. The scan came back clean; the tool did not.
+> A second deep scan of cindrasec.com from the Raspberry Pi, read the same way: the
+> exported HTML/CSV/SARIF against the dashboard against the source. The scan came back
+> clean again, and the v2.12.3 fixes held. Five defects in the tool, one of which
+> decides whether a request leaves the machine.
 >
-> Every preloaded font was being downloaded as a candidate JavaScript asset — a bare
-> `rel="preload"` counted as script-ish, so `<link rel="preload" href="…woff2" as="font">`
-> matched. Font preloading is near-universal, which made this a bandwidth tax on
-> essentially every scan, for files that cannot contain a credential. The dashboard and
-> the report also disagreed about the same run: the report said 6 assets over ~14
-> seconds, the tiles said 1 asset and 0s.
+> The scope gate removed a `www.` prefix with `str.lstrip("www.")`, which strips a
+> character *set* rather than a prefix: `"web3forms.com"` became `"eb3forms.com"`, and
+> since that gate decides whether the scanner issues a request, an unrelated domain
+> could receive traffic from an authorized scan of another. It failed the other way
+> too — `"wwf.org"` became `"f.org"`, so `assets.wwf.org` was rejected as out of scope
+> for its own parent. All four existing scope tests used `example.com`, where the
+> `lstrip` is a no-op and the bug is invisible.
+>
+> Alongside it: robots.txt is now parsed into RFC 9309 groups, so one
+> Cloudflare-managed `User-agent: GPTBot / Disallow: /` no longer makes the scanner
+> announce that a site "disallows all crawling" while Googlebot roams it freely; and
+> the client report no longer files the target's own apex domain under "third-party /
+> connected infrastructure".
 >
 > The three releases before it: **v2.12.0** verified contact lookup — an address is
 > returned only if it literally appears on a page that was actually fetched;
 > **v2.12.1/2.12.2** made the Pi self-check able to diagnose its own most likely
 > failures, including separating cold model-load time from warm inference so a single
-> misleading figure stops driving architecture decisions.
+> misleading figure stops driving architecture decisions; **v2.12.3** stopped every
+> preloaded font being downloaded as a candidate JavaScript asset.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.

@@ -1282,10 +1282,13 @@ SCAN_HTTP_POSTURE = os.environ.get("SCAN_HTTP_POSTURE", "true").lower() == "true
 def _same_scope(base_host: str, candidate_host: str) -> bool:
     """True if candidate_host is the same registrable domain as base_host
     (exact match or a subdomain of it). Keeps scans inside the authorized
-    target instead of silently fetching third-party CDNs/analytics domains."""
-    base_host = base_host.lower().lstrip("www.")
-    candidate_host = candidate_host.lower()
-    return candidate_host == base_host or candidate_host.endswith("." + base_host)
+    target instead of silently fetching third-party CDNs/analytics domains.
+
+    Single source of truth is surface.same_scope — this gate decides whether a
+    request goes out, so the domain report and the fetch decision must never be
+    able to disagree about what "in scope" means.
+    """
+    return surface.same_scope(base_host, candidate_host)
 
 
 def _accept_asset(raw: str, base_url: str, base_host: str, seen: set[str]) -> str | None:
@@ -1514,6 +1517,64 @@ def extract_page_links(html: str, base_url: str) -> list[str]:
     return result
 
 
+RobotsGroup = tuple[list[str], list[tuple[str, str]], float | None]
+
+
+def parse_robots_groups(body: str) -> list[RobotsGroup]:
+    """Parse robots.txt into RFC 9309 groups: ([agents], [(field, path)], delay).
+
+    Consecutive User-agent lines share one group; a User-agent line that follows
+    a rule opens a new group. Comments and unparseable lines are discarded.
+    """
+    groups: list[RobotsGroup] = []
+    agents: list[str] = []
+    rules: list[tuple[str, str]] = []
+    delay: float | None = None
+
+    def flush() -> None:
+        nonlocal agents, rules, delay
+        if agents:
+            groups.append((agents, rules, delay))
+        agents, rules, delay = [], [], None
+
+    for raw in body.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        field_name, _, value = line.partition(":")
+        field_name = field_name.strip().lower()
+        value = value.strip()
+        if field_name == "user-agent":
+            if rules or delay is not None:      # rules ended the previous group
+                flush()
+            if value:
+                agents.append(value.lower())
+        elif field_name in ("allow", "disallow"):
+            if agents:
+                rules.append((field_name, value))
+        elif field_name == "crawl-delay" and agents:
+            try:
+                delay = float(value)
+            except ValueError:
+                pass
+    flush()
+    return groups
+
+
+def _group_blocks_root(rules: list[tuple[str, str]]) -> bool:
+    """Does this group disallow the root path '/'?
+
+    Only a rule whose path is exactly "/" can match the root — "/src/" cannot,
+    which is the whole point of parsing rather than grepping. Google resolves
+    conflicts by longest match with ties going to Allow, so a group carrying
+    both "Disallow: /" and "Allow: /" (equal length) permits the root.
+    """
+    paths = {(f, v.strip()) for f, v in rules}
+    if ("allow", "/") in paths:
+        return False
+    return ("disallow", "/") in paths
+
+
 async def check_robots_txt(
     client: httpx.AsyncClient,
     target_url: str,
@@ -1527,6 +1588,16 @@ async def check_robots_txt(
     publishes a crawl-delay or disallows the root path, so the operator
     is aware and can throttle manually if the client's ops team would
     care about being polite to their own robots.txt during a live audit.
+
+    The check is group-aware because the previous regex (`^disallow:\\s*/\\s*$`
+    anywhere in the file) was not. Any single blocked user-agent — one
+    Cloudflare-managed "User-agent: GPTBot / Disallow: /" block is enough —
+    made the scanner announce that the target "disallows all crawling" while
+    every general-purpose crawler was in fact free to fetch the whole site.
+    A courtesy notice that states something false is worse than no notice.
+
+    SecretNode publishes no robots product token (it rotates browser
+    fingerprints), so the wildcard group is the one that governs it.
     """
     parsed = urlparse(target_url)
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
@@ -1534,15 +1605,50 @@ async def check_robots_txt(
         resp = await client.get(robots_url, timeout=10.0)
         if resp.status_code != 200:
             return True
-        body = resp.text[:5000]
-        disallow_root = bool(re.search(r"(?im)^disallow:\s*/\s*$", body))
-        if disallow_root and broadcast:
+        body = resp.text[:20000]
+        groups = parse_robots_groups(body)
+
+        wildcard = next(((r, d) for a, r, d in groups if "*" in a), None)
+        wildcard_blocked = bool(wildcard and _group_blocks_root(wildcard[0]))
+        named_blocked = sorted({
+            agent
+            for agents, rules, _delay in groups
+            for agent in agents
+            if agent != "*" and _group_blocks_root(rules)
+        })
+
+        if not broadcast:
+            return True
+
+        if wildcard_blocked:
             await broadcast({
                 "type": "log", "level": "WARN",
                 "message": (
-                    "Target's robots.txt disallows all crawling (Disallow: /). "
-                    "Proceeding — this is an authorized security scan, not a "
-                    "generic crawler — but flagging for awareness."
+                    "Target's robots.txt disallows all crawling (User-agent: * / "
+                    "Disallow: /). Proceeding — this is an authorized security "
+                    "scan, not a generic crawler — but flagging for awareness."
+                ),
+            })
+        elif named_blocked:
+            shown = ", ".join(named_blocked[:6])
+            more = f" and {len(named_blocked) - 6} more" if len(named_blocked) > 6 else ""
+            await broadcast({
+                "type": "log", "level": "INFO",
+                "message": (
+                    f"Target's robots.txt blocks {len(named_blocked)} named "
+                    f"user-agent(s) ({shown}{more}) but leaves the wildcard group "
+                    f"free to crawl — general crawling is permitted."
+                ),
+            })
+
+        delay = wildcard[1] if wildcard else None
+        if delay:
+            await broadcast({
+                "type": "log", "level": "INFO",
+                "message": (
+                    f"Target's robots.txt requests a {delay:g}s crawl-delay. Not "
+                    f"enforced automatically — throttle manually if the client's "
+                    f"ops team expects it."
                 ),
             })
         return True
@@ -2477,7 +2583,12 @@ async def run_scan(
                         assets.append((u, body))
 
             result["discovered_endpoints"] = same_eps[:MAX_DISCOVERED_ENDPOINTS]
-            result["associated_hosts"] = sorted(h for h in ext_hosts if h and h != base_host)
+            # Scope-aware, not exact-string: `h != base_host` filed the target's
+            # own apex under "third-party / connected infrastructure" in the
+            # client report whenever the scan ran against www.
+            result["associated_hosts"] = sorted(
+                h for h in ext_hosts if h and not surface.same_scope(base_host, h)
+            )
             if result["discovered_endpoints"] or result["associated_hosts"]:
                 await emit({
                     "type": "log", "level": "INFO",

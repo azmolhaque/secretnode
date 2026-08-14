@@ -35,6 +35,7 @@ import httpx
 import historical
 import recon
 import scanner
+import surface
 import takeover
 
 logger = logging.getLogger("secretnode.orchestrator")
@@ -137,8 +138,15 @@ class DeepScanResult:
             "confirmed_findings": self._aggregate("confirmed_findings"),
             "needs_review_findings": self._aggregate("needs_review_findings"),
             "posture_findings": self._aggregate("posture_findings"),
-            "associated_hosts": sorted({h for s in self.scans
-                                        for h in s.get("associated_hosts", [])}),
+            # Filtered against the scanned domain, not just each host's own base:
+            # a sibling subdomain is the target's own infrastructure, and listing
+            # it under "third-party / connected infrastructure" in a paid report
+            # invites the obvious client question.
+            "associated_hosts": sorted({
+                h for s in self.scans
+                for h in s.get("associated_hosts", [])
+                if not surface.same_scope(self.domain, h)
+            }),
             "takeover_findings": self.takeover_findings,
             # Scan-level metrics, rolled up from the per-host scans. These are
             # top-level (not nested under "totals") because report.py reads them
