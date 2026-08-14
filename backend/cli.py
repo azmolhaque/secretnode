@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     assert_public_target(args.target)
 
     try:
-        asyncio.run(ledger.enforce(args.target))
+        asyncio.run(ledger.enforce(args.target, verify=args.verify))
     except ledger.NotAuthorized as exc:
         print(f"Refusing to scan {args.target} — not authorized: {exc}", file=sys.stderr)
         print("Record a Rules of Engagement first, or set REQUIRE_AUTHORIZATION=false "

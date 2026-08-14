@@ -3,7 +3,7 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-624%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-631%20passing-brightgreen)
 ![Version](https://img.shields.io/badge/version-2.12.6-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
@@ -26,7 +26,11 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 >
 > `ledger.enforce()` now gates both scan endpoints and the CLI, fails closed, and
 > writes every allow and deny to an audit trail. Three tests read the entry points and
-> fail if the call is removed.
+> fail if the call is removed. Two adjacent gaps closed with it: `permit_deep_scan` and
+> `permit_verification` were stored and read by nothing, so scope alone waved through
+> whole-domain enumeration and live credential replay; and `POST /api/deep-scans`, the
+> larger of the two traffic generators, had no SSRF guard at all. `python -m ops.ledger`
+> is the write interface the ledger never had — much of why it stayed empty.
 >
 > The same report listed `console.log`, `stackoverflow.com` and several developers'
 > personal blogs as the target's "third-party / connected infrastructure": protocol-

@@ -211,13 +211,86 @@ class TestScanPathsAreGated:
     def test_single_scan_endpoint_calls_enforce(self):
         import main
         src = Path(main.__file__).read_text(encoding="utf-8")
-        assert "ledger.enforce(request.target_url)" in src
+        assert "ledger.enforce(request.target_url" in src
 
     def test_deep_scan_endpoint_calls_enforce(self):
         import main
         src = Path(main.__file__).read_text(encoding="utf-8")
-        assert "ledger.enforce(request.domain)" in src
+        assert "ledger.enforce(request.domain" in src
 
     def test_cli_calls_enforce(self):
         src = (Path(__file__).parent.parent / "cli.py").read_text(encoding="utf-8")
-        assert "ledger.enforce(args.target)" in src
+        assert "ledger.enforce(args.target" in src
+
+
+class TestTechniquePermissions:
+    """Scope answers "may I touch this host". It does not answer "may I
+    enumerate every subdomain" or "may I replay a credential I find against the
+    provider". Those fields existed from day one and were read by nothing — and
+    the run that prompted this release had both techniques enabled."""
+
+    @pytest.fixture
+    def scoped_only(self, tmp_path: Path, monkeypatch):
+        db = tmp_path / "ops.db"
+
+        async def _seed():
+            await ledger.init_db(db)
+            await ledger.save_authorization(_auth(["example.com"]), db)
+
+        asyncio.run(_seed())
+        monkeypatch.setattr(ledger, "DB_PATH", db)
+        monkeypatch.setattr(ledger, "REQUIRE_AUTHORIZATION", True)
+        monkeypatch.setattr(ledger, "ALLOW_PRIVATE_TARGETS", False)
+        return db
+
+    @pytest.fixture
+    def fully_permitted(self, tmp_path: Path, monkeypatch):
+        db = tmp_path / "ops.db"
+
+        async def _seed():
+            await ledger.init_db(db)
+            await ledger.save_authorization(
+                _auth(["example.com"], engagement_id="ENG-FULL",
+                      permit_deep_scan=True, permit_verification=True), db)
+
+        asyncio.run(_seed())
+        monkeypatch.setattr(ledger, "DB_PATH", db)
+        monkeypatch.setattr(ledger, "REQUIRE_AUTHORIZATION", True)
+        monkeypatch.setattr(ledger, "ALLOW_PRIVATE_TARGETS", False)
+        return db
+
+    def test_plain_scan_allowed_on_a_scope_only_engagement(self, scoped_only):
+        assert asyncio.run(ledger.enforce("example.com")) is not None
+
+    def test_deep_scan_denied_without_permission(self, scoped_only):
+        with pytest.raises(ledger.NotAuthorized, match="deep scanning"):
+            asyncio.run(ledger.enforce("example.com", deep=True))
+
+    def test_verification_denied_without_permission(self, scoped_only):
+        with pytest.raises(ledger.NotAuthorized, match="live verification"):
+            asyncio.run(ledger.enforce("example.com", verify=True))
+
+    def test_both_allowed_when_the_engagement_permits_them(self, fully_permitted):
+        auth = asyncio.run(ledger.enforce("example.com", deep=True, verify=True))
+        assert auth.engagement_id == "ENG-FULL"
+
+    def test_permission_does_not_widen_scope(self, fully_permitted):
+        """A permissive engagement still only covers its own hosts."""
+        with pytest.raises(ledger.NotAuthorized):
+            asyncio.run(ledger.enforce("pepsico.com", deep=True, verify=True))
+
+
+class TestDeepEndpointHasAnSsrfGuard:
+    def test_deep_scan_endpoint_calls_assert_public_target(self):
+        """POST /api/scans checked; POST /api/deep-scans did not, so the larger
+        of the two traffic generators was the unguarded one."""
+        import main
+        src = Path(main.__file__).read_text(encoding="utf-8")
+        deep = src.split("async def start_deep_scan", 1)[1]
+        assert "assert_public_target(" in deep.split("async def ", 1)[0]
+
+    def test_endpoints_pass_technique_flags(self):
+        import main
+        src = Path(main.__file__).read_text(encoding="utf-8")
+        assert "enforce(request.target_url, verify=request.verify)" in src
+        assert "enforce(request.domain, deep=True, verify=request.verify)" in src
