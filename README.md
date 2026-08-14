@@ -14,24 +14,25 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.12.0 — verified contact lookup: an address is only returned if it literally
-> appears on a page that was actually fetched** · [full changelog](CHANGELOG.md) ·
+> **v2.12.3 — three bugs found by pointing SecretNode at our own site** ·
+> [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> `python3 -m ops.contacts acme.com` resolves a contact address from a company's own
-> site and cites the page it came from. Built because an outreach email once bounced
-> against an address taken from a search snippet while the real one sat in a `mailto:`
-> link on the company's own website.
+> A deep scan of cindrasec.com from the Raspberry Pi, with the dashboard read side by
+> side against the downloaded report. The scan came back clean; the tool did not.
 >
-> The division of labour is the design: **a regex extracts, the model only ranks.** A
-> regex finds every address with perfect recall and cannot invent one; asking a language
-> model to "find the contact email" invites it to produce `contact@` + domain, which is
-> plausible, often wrong, and does not look wrong in review. The model is consulted only
-> to break a close tie, choosing from an enum of addresses that were actually found — so
-> it works with Ollama switched off, and an invented address is not expressible.
+> Every preloaded font was being downloaded as a candidate JavaScript asset — a bare
+> `rel="preload"` counted as script-ish, so `<link rel="preload" href="…woff2" as="font">`
+> matched. Font preloading is near-universal, which made this a bandwidth tax on
+> essentially every scan, for files that cannot contain a credential. The dashboard and
+> the report also disagreed about the same run: the report said 6 assets over ~14
+> seconds, the tiles said 1 asset and 0s.
 >
-> This is browsing, not scanning, and that is enforced: the company's own domain only, a
-> hard page cap, sequential with a delay, GET only, links followed rather than guessed.
+> The three releases before it: **v2.12.0** verified contact lookup — an address is
+> returned only if it literally appears on a page that was actually fetched;
+> **v2.12.1/2.12.2** made the Pi self-check able to diagnose its own most likely
+> failures, including separating cold model-load time from warm inference so a single
+> misleading figure stops driving architecture decisions.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
