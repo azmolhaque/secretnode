@@ -603,7 +603,9 @@ def _cli() -> int:
     ap = argparse.ArgumentParser(
         prog="python -m ops.ledger",
         description="Record and inspect scanning authorizations. Nothing is "
-                    "scannable until an engagement here covers it.",
+                    "scannable until an engagement here covers it. Run from "
+                    "the backend/ directory (cd backend && python -m ops.ledger), "
+                    "or use the make auth-* targets from the repo root.",
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 

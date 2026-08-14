@@ -77,11 +77,15 @@ It stayed empty partly because filling it meant writing Python. `python -m ops.l
 now offers `add`, `list`, `check`, `revoke` and `decisions`:
 
 ```
+cd backend                      # `ops` is a package inside backend/
 python -m ops.ledger add --id ENG-2026-014 --client "Acme Ltd" \
     --scope acme.com '*.acme.com' --starts 2026-08-01 --expires 2026-09-30 \
     --recipient security@acme.com --roe "Signed RoE 2026-07-28"
 python -m ops.ledger check acme.com --deep
 ```
+
+or from the repo root: `make auth-list`, `make auth-check TARGET=acme.com`,
+`make auth-decisions`.
 
 `check` answers the question the scanner will ask, before you start a scan and
 discover the answer the hard way. `decisions` prints the audit trail.
