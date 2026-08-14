@@ -3,13 +3,25 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [2.12.4] — A scope check that could fetch a domain nobody authorized
+## [2.12.5] — Two ways a scan could report clean without having looked
 
 The second deep scan of `cindrasec.com` from the Pi, read the same way: exported
 HTML/CSV/SARIF against the dashboard against the source. The scan was clean again —
 0 confirmed, 0 needs-review, 0 posture, 0 takeover, and the v2.12.3 fixes all held
-(duration agreed across three surfaces, no font was fetched as JavaScript). Five
-defects in the tool, one of which decides whether a request leaves the machine.
+(duration agreed across three surfaces, no font was fetched as JavaScript).
+
+The tool did not come out as well. Two separate defects could each produce a CLEAN
+verdict from a scan that had not actually examined anything: a scope rule that
+discarded the target's own JavaScript before fetching it, and a routing rule that
+threw away every generic credential finding when no AI key was configured. Neither
+announced itself. A scanner that is wrong loudly costs an hour; one that is wrong
+quietly gets written into a client report.
+
+> **On 2.12.4.** There is no released 2.12.4. It existed only as an untagged state
+> of `main` that self-reported that version, and this release absorbed it. A build
+> reporting 2.12.4 predates the `ai_judged` fix below and should be updated — that
+> is exactly the ambiguity a version number exists to prevent, and folding fixes
+> into an unreleased version stopped being safe the moment a machine was running it.
 
 ### Fixed
 

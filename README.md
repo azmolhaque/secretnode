@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 ![Tests](https://img.shields.io/badge/tests-600%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.12.4-blue)
+![Version](https://img.shields.io/badge/version-2.12.5-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,34 +14,40 @@ Pipeline: **browser-like spider (+ source-map mining) → regex (63 patterns) + 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.12.4 — a scope check that could fetch a domain nobody authorized** ·
+> **v2.12.5 — two ways a scan could report clean without having looked** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
 > A second deep scan of cindrasec.com from the Raspberry Pi, read the same way: the
 > exported HTML/CSV/SARIF against the dashboard against the source. The scan came back
-> clean again, and the v2.12.3 fixes held. Five defects in the tool, one of which
-> decides whether a request leaves the machine.
+> clean again and the v2.12.3 fixes held. The tool did not come out as well.
 >
 > The scope gate removed a `www.` prefix with `str.lstrip("www.")`, which strips a
-> character *set* rather than a prefix: `"walmart.com"` became `"almart.com"`,
-> `"web3forms.com"` became `"eb3forms.com"`. The mangled base then failed to match the
-> target's **own hostname**, and that gate runs before anything is fetched — so for
-> any domain starting with `w`, the scanner collected zero JavaScript assets, read the
-> root HTML and nothing else, and reported the target clean. A false clean in a paid
-> deliverable is the worst thing this tool can do. It fails the other way too:
-> `eb3forms.com` was accepted as in scope for a scan of `web3forms.com`, so a domain
-> nobody authorized could receive traffic from an authorized scan. All four existing
-> scope tests used `example.com`, where the `lstrip` is a no-op and the bug is
-> invisible. The scanner now raises an ERROR when the scope check rejects a script
-> served by the target's own host — the one condition that cannot be correct under
-> any scope policy, and the signal that was missing the whole time this bug ran.
+> character *set* rather than a prefix: `"walmart.com"` became `"almart.com"`. The
+> mangled base then failed to match the target's **own hostname**, and that gate runs
+> before anything is fetched — so for any domain starting with `w`, the scanner
+> collected zero JavaScript, read the root HTML and nothing else, and called the
+> target clean. It fails the other way too: `eb3forms.com` was accepted as in scope
+> for a scan of `web3forms.com`, so a domain nobody authorized could receive traffic
+> from an authorized scan. All four existing scope tests used `example.com`, where
+> the `lstrip` is a no-op and the bug is invisible.
 >
-> Alongside it: robots.txt is now parsed into RFC 9309 groups, so one
-> Cloudflare-managed `User-agent: GPTBot / Disallow: /` no longer makes the scanner
-> announce that a site "disallows all crawling" while Googlebot roams it freely; and
-> the client report no longer files the target's own apex domain under "third-party /
-> connected infrastructure".
+> The second one was found by a new ground-truth benchmark, on its first end-to-end
+> run: with no Gemini key configured, every generic `api_key = "…"` finding was
+> silently discarded — the most common shape a hardcoded credential takes in real
+> code, dropped by the documented offline configuration.
+>
+> Both share a root cause worth naming: nothing said anything was wrong. The scanner
+> now raises an ERROR when the scope check rejects a script served by the target's own
+> host, and a finding the AI never judged is routed to a human instead of being
+> treated as one the AI dismissed.
+>
+> Alongside: robots.txt is parsed into RFC 9309 groups, so one Cloudflare-managed
+> `User-agent: GPTBot / Disallow: /` no longer makes the scanner announce that a site
+> "disallows all crawling" while Googlebot roams it freely; the client report no
+> longer files the target's own apex domain under "third-party / connected
+> infrastructure"; and `make bench-full` measures all 63 detectors against a
+> ground-truth corpus.
 >
 > The three releases before it: **v2.12.0** verified contact lookup — an address is
 > returned only if it literally appears on a page that was actually fetched;
