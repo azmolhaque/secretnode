@@ -585,7 +585,15 @@
     <div style="display:flex;align-items:center;gap:24px;">
       <div style="text-align:right;">
         <div id="ws-status" style="font-family:'Share Tech Mono';font-size:10px;color:#4a7c59;letter-spacing:0.1em;">
-          <span class="status-dot idle" id="ws-dot"></span>WS: DISCONNECTED
+          <!-- IDLE, not DISCONNECTED. Nothing sets this on load, so the string
+               baked in here is what a freshly-opened dashboard shows until the
+               first scan ends — and "DISCONNECTED" reports a failure that has
+               not happened, on a socket that has never been opened. The three
+               runtime states set by connectWS are LIVE / DROPPED / IDLE; this
+               is the fourth wall of that same state machine and has to agree
+               with them. It is also the longest of the four, which is what
+               wrapped the header onto three lines on a phone. -->
+          <span class="status-dot idle" id="ws-dot"></span>WS: IDLE
         </div>
         <div id="clock" style="font-family:'Orbitron';font-size:11px;color:#5a9470;margin-top:2px;"></div>
       </div>
