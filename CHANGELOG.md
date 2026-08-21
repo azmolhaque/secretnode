@@ -3,6 +3,86 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.1] — Three limits that were documented, asserted, or implied
+
+An audit for this codebase's recurring shape: a guarantee stated somewhere a
+reader will believe it, with no mechanism behind it. Three found, all measured
+before being fixed — and one proposal measured and then dropped.
+
+### Fixed — the documented RAM bound was not one
+
+The architecture table credited `asyncio.Semaphore(20)` with *"bounds RAM on Pi
+5 during deep JS analysis"*. It bounds concurrent **fetches**, which is a
+different thing: every fetched body was appended to one list held until the scan
+ended, with no aggregate cap. `js_urls` had no cap at all — every `<script src>`
+across every crawled page was gathered at once — so source maps alone could
+reach 200 MB and archived seed assets 1 GB, on the 16 GB Pi this project targets.
+
+- `MAX_TOTAL_ASSET_BYTES` (256 MB) bounds what a scan **keeps**, charged at every
+  accumulation point: root, crawled pages, JS bundles, source maps, archive
+  seeds and the deeper endpoint crawl. `MAX_JS_ASSETS` (400) bounds the count.
+- Advisory, not fatal: a scan that stops collecting still reports everything it
+  read, where one killed by the OOM killer reports nothing. Engaging the cap is
+  a WARN **and** `assets_skipped_over_budget` on the result — reading less than
+  the operator asked for is a coverage statement, and a coverage statement only
+  in a log line nobody keeps is how a clean verdict comes to mean nothing.
+- A crawled page is still parsed for links when the budget is spent; only its
+  body is dropped. A page is a link graph as well as something to grep.
+- Verified end to end: eight ~9 KB bundles against a 20 KB budget kept four,
+  skipped ten, and completed cleanly with the count on the result.
+- The README row now says what the semaphore actually does.
+
+### Fixed — credentials were retained in memory indefinitely
+
+`main._registry` was appended to and never pruned — no `del`, no `pop`, no
+eviction anywhere — and each completed entry holds the full result, matched
+values included. Measured at ~16 KB for a scan of ten findings, ~156 MB at
+10,000 scans. The memory is the lesser problem: a long-running dashboard held
+every credential it had ever found in process memory, indefinitely, long after
+any use for them. That is the same argument the `asset_cache` schema already
+makes about not keeping a client's secrets on disk, applied to RAM, where
+nothing enforced it.
+
+`MAX_REGISTRY_ENTRIES` (200) bounds it. Eviction is safe because `_resolve_scan`
+already falls back to SQLite, so a report requested afterwards is served from
+the durable store; running scans are never evicted, since they hold live state.
+
+### Fixed — scan history grew without limit
+
+Measured at ~16.7 KB per scan, which under continuous monitoring is on the order
+of a gigabyte a year onto an SD card. `SCAN_HISTORY_LIMIT` (1000, `0` disables)
+prunes at the point the table grows, so retention needs no separate schedule.
+By count rather than age: an operator who scans monthly should not lose their
+history to a 90-day rule, and one who scans hourly should not accumulate forever.
+
+### Fixed — a credential could reach a log
+
+`verifier.py` states it *"never reveals or transmits the secret anywhere except
+to its own issuer"*, and nothing enforced it. Telegram's API requires the token
+in the URL path, and `httpx.HTTPStatusError` renders the full URL into its
+message, which `verify_finding_detailed` logged verbatim on any failure — a live
+bot token in cleartext, reproduced with a synthetic one.
+
+Latent rather than live: no verifier calls `raise_for_status()` today, so
+nothing reaches that path. It is fixed anyway, because a docstring invariant with
+no mechanism behind it is precisely how the authorization ledger came to be a
+comment. The scrub covers the percent-encoded form too — a token containing `:`
+or `/` arrives encoded, so matching only the literal would let exactly the
+tokens that need encoding through.
+
+### Measured and deliberately not shipped: WAL journaling
+
+SQLite runs in `delete` journal mode with no explicit PRAGMAs, which looked like
+an obvious win for an async app writing from concurrent host scans. Measured
+first: 30 concurrent writes plus 30 concurrent reads ran in **0.28 s as shipped
+and 0.77 s with WAL, with zero errors either way**. `busy_timeout` already
+defaults to 5 s, and every call opens its own connection, so WAL's per-connection
+cost lands without its cross-connection benefit. A 2.8x regression sold as a
+performance improvement is worse than leaving it alone.
+
+**787 tests, ruff clean.** Ground truth 71/71 offline and over HTTP, zero false
+positives; external-validity recall unchanged at 80.6%.
+
 ## [2.14.0] — The recall number is now measured from outside
 
 Asked to test against intentionally vulnerable targets. Two things made that

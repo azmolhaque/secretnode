@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-768%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.14.0-blue)
+![Tests](https://img.shields.io/badge/tests-787%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.14.1-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,37 +14,41 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.14.0 — the recall number is now measured from outside** ·
+> **v2.14.1 — three limits that were documented, asserted, or implied** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> `bench/benchmark.py` has printed its own caveat since it shipped: a detector
-> matching its own canonical example proves the detector is wired up, not that it
-> catches credentials in the wild. 71/71 was never a recall claim.
-> **`make bench-external`** measures against gitleaks' rule definitions —
-> specimens written by another project, for another scanner, owing nothing to
-> these patterns. **80.6% of 108**, with misses split into the only two buckets
-> that matter: a provider this scanner covers and missed (a defect) versus one it
-> never claimed (a coverage decision).
+> An audit for this codebase's recurring shape: a guarantee stated somewhere a
+> reader will believe it, with nothing behind it.
 >
-> It paid for itself on the first run. **The current OpenAI key formats were
-> undetected** — the pattern required exactly 20 characters before the `T3BlbkFJ`
-> marker, true of the original format and false of the `sk-proj-` and
-> `sk-admin-` keys OpenAI issues today. Every internal specimen passed
-> throughout, because each was built to satisfy the pattern the code already had.
-> Also found: AWS matched only `AKIA` and not `ASIA` (the temporary credential a
-> browser-side vending flow actually hands out), Stripe only `sk_live_` and not
-> restricted `rk_` keys, GitLab only `glpat-` and none of the deploy/runner/feed
-> family, plus Grafana Cloud, Cloudflare Origin CA and Hugging Face org tokens.
+> **The documented RAM bound was not one.** The table below credited
+> `Semaphore(20)` with bounding RAM during deep JS analysis; it bounds concurrent
+> *fetches*. Every body was held until the scan ended with no aggregate cap, and
+> the JS asset list had no cap at all — so source maps alone could reach 200 MB
+> on the 16 GB Pi this targets. `MAX_TOTAL_ASSET_BYTES` now bounds what a scan
+> *keeps*, and engaging it is reported as partial coverage rather than a silent
+> shortfall.
 >
-> **64 → 71 detectors**, internal benchmarks held at 71/71 with zero false
-> positives offline and end-to-end, so none of it cost precision.
+> **Credentials were retained in memory indefinitely.** The scan registry was
+> appended to and never pruned, so a long-running dashboard held every credential
+> it had ever found in RAM — the same argument the asset cache already makes
+> about disk, applied where nothing enforced it. Scan history had no retention
+> either, at ~16.7 KB per scan.
 >
-> The two releases before it: **v2.13.2** fixed posture measuring a redirect hop
-> instead of the page behind it, and one site being scanned twice via its `www`
-> alias; **v2.13.1** fixed a comment stripper defeated by a single regex literal,
-> posture findings that reached no deliverable, and a CLEAN verdict over a domain
-> the scan mostly did not read.
+> **A credential could reach a log.** Telegram's API requires the token in the
+> URL, and an `HTTPStatusError` renders that URL into a message the verifier
+> logged verbatim. Latent — no verifier calls `raise_for_status()` today — and
+> fixed anyway, because a docstring invariant with no mechanism behind it is how
+> the authorization ledger came to be a comment.
+>
+> **Measured and not shipped:** WAL journaling looked like an obvious win and
+> made this workload **2.8x slower** with zero errors either way. A regression
+> sold as an improvement is worse than leaving it alone.
+>
+> The two releases before it: **v2.14.0** gave recall a number measured against a
+> corpus this project did not write (80.6%), which immediately found that the
+> current OpenAI key formats were undetected; **v2.13.2** fixed posture measuring
+> a redirect hop instead of the page behind it.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
@@ -99,7 +103,8 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 |---|---|---|
 | Event loop | `uvloop` | 2–4× faster than default asyncio on ARM64 |
 | HTTP | `httpx.AsyncClient` | Native async, connection pooling, retries |
-| Concurrency | `asyncio.Semaphore(20)` | Bounds RAM on Pi 5 during deep JS analysis |
+| Concurrency | `asyncio.Semaphore(20)` | Bounds *in-flight fetches* — not retained bytes |
+| Memory ceiling | `MAX_TOTAL_ASSET_BYTES` (256 MB) | Bounds what a scan *keeps*; the semaphore never did |
 | AI | Two-tier Gemini (`google-genai`): 3.5-flash-lite → 3.6-flash | Cheap pre-filter kills noise; strong tier deep-validates real/critical findings with structured output |
 | Transport | WebSocket fan-out | Browser gets live logs without polling |
 | Frontend | Vanilla JS, self-hosted CSS + fonts | Zero build step, deployable immediately, fully offline-capable (no Tailwind CDN — removed; see `frontend/index.html`) |

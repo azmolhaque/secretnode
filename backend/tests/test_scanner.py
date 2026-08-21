@@ -273,7 +273,7 @@ class TestSeedUrlInjection:
             return False
 
     def _patch(self, monkeypatch):
-        async def fake_spider(client, url, sem, broadcast, max_pages=1):
+        async def fake_spider(client, url, sem, broadcast, max_pages=1, **kw):   # **kw absorbs budget
             return [("https://ex.com/base.js", "const base = 1;")]
 
         async def fake_fetch(client, url, sem, broadcast=None):
@@ -320,7 +320,7 @@ class TestSurfaceExtraction:
 
     def _patch(self, monkeypatch):
         # Base asset references a same-site JS endpoint and an external host.
-        async def fake_spider(client, url, sem, broadcast, max_pages=1):
+        async def fake_spider(client, url, sem, broadcast, max_pages=1, **kw):   # **kw absorbs budget
             body = ('fetch("/api/v1/session");'
                     'src="/static/deep.js";'
                     'x="https://cdn.thirdparty.net/lib.js";')

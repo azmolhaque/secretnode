@@ -45,6 +45,7 @@ import orchestrator
 from ops import ledger
 from storage import (
     init_db, save_scan, load_scans, load_scan, get_previous_scan_for_target,
+    prune_scan_history,
     get_asset_cache, save_asset_cache,
     mark_false_positive, unmark_false_positive, get_suppressed_fingerprints,
     list_false_positives,
@@ -172,6 +173,37 @@ manager = ConnectionManager()
 
 # scan_id → {"state": ScanState, "task": asyncio.Task, "meta": dict}
 _registry: dict[str, dict[str, Any]] = {}
+
+# A completed entry's `meta` is the full scan result, matched values included.
+# Nothing ever removed one — no del, no pop, no eviction anywhere — so a
+# long-running dashboard accumulated every credential it had ever found in
+# process memory, indefinitely, long after any use for them. The memory is the
+# lesser problem (~16 KB per scan of ten findings); the retention is the real
+# one, and it is the same argument the asset_cache schema already makes about
+# not keeping a client's secrets on disk.
+#
+# Evicting is safe because `_resolve_scan` already falls back to SQLite, so a
+# report requested after eviction is served from the durable store. Running
+# scans are never evicted: they are the ones with live state attached.
+MAX_REGISTRY_ENTRIES = int(os.environ.get("MAX_REGISTRY_ENTRIES", "200") or 200)
+
+
+def _evict_finished_scans() -> int:
+    """Drop the oldest completed scans once the registry exceeds its bound.
+
+    Insertion order is completion order closely enough for this purpose —
+    dicts preserve it, and scans are registered when they start."""
+    if len(_registry) <= MAX_REGISTRY_ENTRIES:
+        return 0
+    evictable = [sid for sid, e in _registry.items()
+                 if e.get("task") is None or e["task"].done()]
+    dropped = 0
+    for scan_id in evictable[: len(_registry) - MAX_REGISTRY_ENTRIES]:
+        _registry.pop(scan_id, None)
+        dropped += 1
+    if dropped:
+        logger.info("Evicted %d completed scan(s) from memory (kept in SQLite)", dropped)
+    return dropped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -421,6 +453,9 @@ async def start_scan(request: ScanRequest, http_request: Request) -> dict[str, A
             )
             _registry[scan_id]["meta"] = result
             await save_scan(scan_id, result)
+            # Bound the history at the point it grows, so retention
+            # needs no separate schedule to be enforced.
+            await prune_scan_history()
             await save_asset_cache(request.target_url, drain_asset_cache())
         except asyncio.CancelledError:
             logger.info("Scan %s task cancelled", scan_id)
@@ -447,6 +482,7 @@ async def start_scan(request: ScanRequest, http_request: Request) -> dict[str, A
         },
     }
 
+    _evict_finished_scans()
     logger.info("Scan %s started for %s", scan_id, request.target_url)
     return {
         "scan_id":    scan_id,
@@ -541,6 +577,9 @@ async def start_deep_scan(request: DeepScanRequest, http_request: Request) -> di
                                     or totals.get("posture_issues")) else "clean")
             _registry[scan_id]["meta"] = result
             await save_scan(scan_id, result)
+            # Bound the history at the point it grows, so retention
+            # needs no separate schedule to be enforced.
+            await prune_scan_history()
         except asyncio.CancelledError:
             await manager.broadcast_scan(scan_id, {"type": "scan_cancelled", "scan_id": scan_id})
         except Exception as exc:
@@ -555,6 +594,7 @@ async def start_deep_scan(request: DeepScanRequest, http_request: Request) -> di
         "meta": {"scan_id": scan_id, "target_url": request.domain,
                  "status": "running", "deep_scan": True},
     }
+    _evict_finished_scans()
     logger.info("Deep scan %s started for %s", scan_id, request.domain)
     return {"scan_id": scan_id, "domain": request.domain, "status": "started",
             "ws_url": f"/ws/logs/{scan_id}",

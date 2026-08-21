@@ -463,6 +463,23 @@ VERIFIERS: dict[str, Verifier] = {
 }
 
 
+def _scrub(text: str, secret: str) -> str:
+    """Remove a credential from text that is about to be logged.
+
+    Also scrubs the URL-encoded form: a token containing `:` or `/` reaches an
+    exception message percent-encoded, so matching only the literal would let
+    exactly the tokens that need encoding through.
+    """
+    if not secret:
+        return text
+    from urllib.parse import quote
+
+    for form in {secret, quote(secret, safe=""), quote(secret)}:
+        if form:
+            text = text.replace(form, "[REDACTED]")
+    return text
+
+
 def is_supported(secret_type: str) -> bool:
     return secret_type in VERIFIERS
 
@@ -477,7 +494,15 @@ async def verify_finding_detailed(secret_type: str, raw_value: str, client: Any)
         active, detail = await fn(raw_value, client)
         return VerifyResult("verified", detail) if active else VerifyResult("unverified", "")
     except Exception as exc:  # noqa: BLE001 — fail closed, never crash a scan
-        logger.warning("Verification error for %s: %s", secret_type, exc)
+        # The credential must never reach a log. Most providers take it in a
+        # header, but some — Telegram among them — require it in the URL path,
+        # and httpx.HTTPStatusError renders the full URL into its message. That
+        # path writes a live bot token to the log in cleartext. No verifier
+        # calls raise_for_status today, so this is latent rather than live: an
+        # invariant this module's docstring asserts and nothing enforced, which
+        # is exactly how the authorization ledger came to be a comment.
+        logger.warning("Verification error for %s: %s",
+                       secret_type, _scrub(str(exc), raw_value))
         return VerifyResult("unverified", "")
 
 

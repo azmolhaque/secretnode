@@ -117,6 +117,17 @@ MAX_RAW_FINDINGS_PER_SCAN = _env_int("MAX_RAW_FINDINGS_PER_SCAN", 500)  # safety
 MAX_MATCHES_PER_PATTERN = _env_int("MAX_MATCHES_PER_PATTERN", 100)  # R3 defence-in-depth: bound the
                                      # matches examined for ANY single pattern on ANY single text, so a
                                      # crafted blob cannot spawn millions of matches for one detector.
+# Every fetched body is held in one list until the scan ends, so the ceiling on
+# a scan's memory is the SUM of what it collects, not the per-asset cap. The
+# README credits CONCURRENCY_LIMIT with "bounds RAM on Pi 5 during deep JS
+# analysis"; it bounds concurrent *fetches*, which is a different thing and does
+# nothing about accumulation. Nothing capped the total, and js_urls is not capped
+# either — every <script src> across every crawled page is fetched — so a site
+# with many large bundles could push a 16 GB Pi into swap or the OOM killer, and
+# a scan that dies is worth less than a scan that says what it could not read.
+MAX_TOTAL_ASSET_BYTES = _env_int("MAX_TOTAL_ASSET_BYTES", 256 * 1024 * 1024)  # 256 MB
+MAX_JS_ASSETS = _env_int("MAX_JS_ASSETS", 400)
+
 MAX_SEED_URLS = _env_int("MAX_SEED_URLS", 200)  # cap externally-supplied seed assets fetched per scan
                                      # (e.g. historical JS bundles from public archives) — bounds the
                                      # extra fetches a deep scan does beyond the live crawl.
@@ -1974,12 +1985,45 @@ async def check_robots_txt(
         return True  # robots.txt missing/unreachable is not an error condition
 
 
+class _AssetBudget:
+    """Tracks the bytes a scan is holding and says when to stop collecting.
+
+    Deliberately advisory rather than a hard failure: a scan that stops reading
+    new assets still reports everything it read, whereas one killed by the OOM
+    killer reports nothing at all. The cap engaging is broadcast at WARN and
+    recorded on the result, because silently reading less than the operator
+    asked for is the failure mode this scanner treats as unacceptable — a
+    clean verdict over assets nobody fetched means nothing.
+    """
+
+    __slots__ = ("used", "limit", "skipped")
+
+    def __init__(self, limit: int = 0) -> None:
+        self.limit = limit or MAX_TOTAL_ASSET_BYTES
+        self.used = 0
+        self.skipped = 0
+
+    def exhausted(self) -> bool:
+        return self.used >= self.limit
+
+    def take(self, body: str | None) -> bool:
+        """Charge `body` against the budget. False means do not keep it."""
+        if not _usable_body(body):
+            return False
+        if self.exhausted():
+            self.skipped += 1
+            return False
+        self.used += len(body)
+        return True
+
+
 async def spider_target(
     client: httpx.AsyncClient,
     target_url: str,
     semaphore: asyncio.Semaphore,
     broadcast: Broadcaster | None = None,
     max_pages: int = 1,
+    budget: "_AssetBudget | None" = None,
 ) -> list[tuple[str, str]]:
     """
     Fetch the root HTML (and, if max_pages > 1, shallow-crawl same-domain
@@ -2013,8 +2057,9 @@ async def spider_target(
             })
         return []
 
+    budget = budget or _AssetBudget()
     assets: list[tuple[str, str]] = (
-        [(root_url, html_body)] if _usable_body(html_body) else []
+        [(root_url, html_body)] if budget.take(html_body) else []
     )
     html_pages: list[tuple[str, str]] = [(root_url, html_body)]
     visited_pages: set[str] = {root_url}
@@ -2043,8 +2088,12 @@ async def spider_target(
                 visited_pages.add(page_url)
                 if not _usable_body(page_body):
                     continue
+                # A page is a link graph as well as something to grep, so it is
+                # still parsed for assets even when the budget is spent — only
+                # its body is dropped from the scan set.
                 html_pages.append((page_url, page_body))
-                assets.append((page_url, page_body))
+                if budget.take(page_body):
+                    assets.append((page_url, page_body))
                 for js in extract_js_urls(page_body, page_url, scope_rejected):
                     all_js_urls.add(js)
         if broadcast and len(visited_pages) > 1:
@@ -2054,6 +2103,20 @@ async def spider_target(
             })
 
     js_urls = sorted(all_js_urls)
+    if len(js_urls) > MAX_JS_ASSETS:
+        # Fail loud: a truncated asset list is a truncated scan, and a clean
+        # verdict over assets nobody fetched is the failure this tool exists to
+        # avoid reporting.
+        if broadcast:
+            await broadcast({
+                "type": "log", "level": "WARN",
+                "message": (
+                    f"{len(js_urls)} JS assets discovered — scanning the first "
+                    f"{MAX_JS_ASSETS} (MAX_JS_ASSETS). Coverage is partial; raise "
+                    f"the cap to scan the rest."
+                ),
+            })
+        js_urls = js_urls[:MAX_JS_ASSETS]
 
     # Fail loud, never silent. The scope check rejecting a script served by the
     # target's OWN host cannot be correct under any scope policy — it means the
@@ -2093,7 +2156,7 @@ async def spider_target(
         tasks = [fetch_url(client, u, semaphore, broadcast) for u in js_urls]
         fetched = await asyncio.gather(*tasks, return_exceptions=False)
         for js_url, js_body in fetched:
-            if _usable_body(js_body):
+            if budget.take(js_body):
                 assets.append((js_url, js_body))
                 js_bodies.append((js_url, js_body))
 
@@ -2116,7 +2179,7 @@ async def spider_target(
             map_tasks = [fetch_url(client, u, semaphore, broadcast) for u in map_urls]
             fetched_maps = await asyncio.gather(*map_tasks, return_exceptions=False)
             for map_url, map_body in fetched_maps:
-                if _usable_body(map_body):
+                if budget.take(map_body):
                     assets.append((map_url, map_body))
 
     # Broadcast every non-HTML asset we actually collected (JS + source maps),
@@ -3059,7 +3122,9 @@ async def run_scan(
         # ── 1. Spider ──────────────────────────────────────────────────────
         state.check()
         try:
-            assets = await spider_target(client, target_url, semaphore, broadcast, max_pages=max_crawl_pages)
+            budget = _AssetBudget()
+            assets = await spider_target(client, target_url, semaphore, broadcast,
+                                         max_pages=max_crawl_pages, budget=budget)
         except asyncio.CancelledError:
             result["status"] = "cancelled"
             await emit({"type": "scan_cancelled", "scan_id": scan_id})
@@ -3090,7 +3155,8 @@ async def run_scan(
                 added = 0
                 for u, body in fetched:
                     if _usable_body(body):
-                        assets.append((u, body))
+                        if budget.take(body):
+                            assets.append((u, body))
                         added += 1
                 await emit({
                     "type": "log", "level": "INFO",
@@ -3127,7 +3193,8 @@ async def run_scan(
                 )
                 for u, body in fetched:
                     if _usable_body(body):
-                        assets.append((u, body))
+                        if budget.take(body):
+                            assets.append((u, body))
 
             result["discovered_endpoints"] = same_eps[:MAX_DISCOVERED_ENDPOINTS]
             # Scope-aware, not exact-string: `h != base_host` filed the target's
@@ -3142,6 +3209,20 @@ async def run_scan(
                     "message": (f"Surface intel: {len(result['discovered_endpoints'])} endpoint(s), "
                                 f"{len(result['associated_hosts'])} associated host(s)"),
                 })
+
+        # The budget engaging means this scan deliberately read less than the
+        # target offered. That is a coverage statement, and a coverage statement
+        # belongs on the result rather than only in a log line nobody keeps.
+        if budget.skipped:
+            result["assets_skipped_over_budget"] = budget.skipped
+            await emit({
+                "type": "log", "level": "WARN",
+                "message": (
+                    f"Asset budget reached ({budget.limit // (1024 * 1024)} MB) — "
+                    f"{budget.skipped} asset(s) fetched but not retained. Coverage "
+                    f"is partial; raise MAX_TOTAL_ASSET_BYTES to scan them."
+                ),
+            })
 
         # Three distinct numbers, because conflating them misreports coverage:
         #   assets_fetched — bodies actually downloaded this run
