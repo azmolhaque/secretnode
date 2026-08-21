@@ -793,6 +793,10 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
     # stays where it is: raising it silently multiplies traffic against a third
     # party. What changes is that the report stops overstating what it looked at.
     live_total = int(totals.get("live_hosts", 0) or len(deep.get("live_hosts", []) or []))
+    # A host collapsed as a redirect alias was covered — its content was read at
+    # the host it points to — so it counts toward coverage. Counting it as
+    # unexamined would hedge a fully-covered domain to PARTIAL, which is the
+    # mirror image of the overstatement this verdict exists to prevent.
     scanned_total = len([h for h in hosts if not h.get("error")])
     partial = live_total > 0 and scanned_total < live_total
 
@@ -827,8 +831,15 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
         err = h.get("error")
         conf = int(h.get("confirmed", 0))
         conf_cell = (f'<span class="hit">{conf}</span>' if conf else "0")
-        status = ('<span class="err">error</span>' if err else "scanned")
-        note = html.escape(str(err)) if err else ""
+        # An explicit status wins: a host that only redirects into another host
+        # in this run is neither "scanned" nor an error, and colouring it red
+        # would report a de-duplication as a failure.
+        explicit = str(h.get("status", "") or "")
+        if explicit:
+            status = html.escape(explicit)
+        else:
+            status = '<span class="err">error</span>' if err else "scanned"
+        note = html.escape(str(err or h.get("note", "") or ""))
         return (
             "<tr>"
             f'<td class="mono">{html.escape(str(h.get("host", "")))}</td>'

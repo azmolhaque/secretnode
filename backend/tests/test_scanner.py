@@ -279,7 +279,7 @@ class TestSeedUrlInjection:
         async def fake_fetch(client, url, sem, broadcast=None):
             return (url, "// clean seed body, no secrets")
 
-        async def fake_posture(client, url):
+        async def fake_posture(client, url, **kw):   # **kw absorbs get_final
             return []
 
         monkeypatch.setattr(scanner, "spider_target", fake_spider)
@@ -329,7 +329,7 @@ class TestSurfaceExtraction:
         async def fake_fetch(client, url, sem, broadcast=None):
             return (url, "// deep bundle, no secrets")
 
-        async def fake_posture(client, url):
+        async def fake_posture(client, url, **kw):   # **kw absorbs get_final
             return []
 
         monkeypatch.setattr(scanner, "spider_target", fake_spider)

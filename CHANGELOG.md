@@ -3,6 +3,78 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.13.2] — The redirect guard changed what posture measures
+
+A second live deep scan, of a domain whose apex and `www` both answer. Two
+defects, both reproduced against the real pipeline in a local lab before a line
+was changed — the lab reproduces the shapes the real reports exhibited, because
+this environment cannot reach an external target.
+
+### Fixed — posture was measuring the redirect, not the page
+
+v2.13.0 set `follow_redirects=False` on the shared client so every hop could be
+address-checked before a request went out. That was right, and it silently
+changed what `posture.fetch_posture` sees: its single `client.get()` now
+returned whatever answered *first*. On any host that redirects, that is the
+**301**, not the page a browser ends up on.
+
+A redirect hop is not the site. The first real target hid this — Cloudflare
+applies header rules to redirects too, so the wrong measurement and the right
+one agreed. Against a lab server whose landing page sets six security headers
+and whose redirect hop sets none:
+
+```
+landing page (headers present) : 1 issue   (the Python Server: banner)
+redirect hop (headers ABSENT)  : 6 issues  -> 5 of them fabricated
+```
+
+Five missing headers reported for a page that sets all five.
+
+- `fetch_posture` takes a `get_final` callable and `scanner` passes it the same
+  validated hop-walk the fetch path uses, so posture measures the landing page
+  and a redirect into internal space is still refused rather than read for
+  headers. Injected rather than imported: the only implementation lives in
+  `scanner`, which imports `posture`, so a parameter keeps the dependency
+  one-way and the function unit-testable with no network.
+- The landing page's URL also decides the HTTPS-only checks, so an `http://`
+  start that lands on `https://` is judged on where it ended.
+
+### Fixed — one site was being scanned twice
+
+`www.example.com` 301-ing to `example.com` looked like two independent live
+hosts. `_probe_one` returned the URL it asked for on any HTTP response —
+including a 301 — and never recorded where it pointed, so `run_deep_scan`
+crawled both. In the lab: **eleven requests for four unique paths**, both
+"hosts" reporting the same three assets. Against a real domain that is double
+the traffic aimed at a target, and a client report claiming twice the coverage
+it has.
+
+- The probe now captures the redirect destination — it is the only place that
+  sees it, since the client stopped following redirects in v2.13.0.
+- `collapse_redirect_duplicates` drops a host only when its redirect lands on a
+  host **already being scanned**. A redirect leaving that set is scanned
+  normally: it may be the only route to content nothing else reaches, so
+  dropping it would lose coverage rather than remove duplicate work. A mutual
+  redirect loop falls back to scanning both — duplicate work beats a scan that
+  reads nothing and still prints a verdict.
+- Lab after the fix: **five requests, one duplicate** (posture's own root GET).
+
+### Fixed — a collapsed host is not a failure
+
+Found while wiring the above, and it would have been wrong twice over. The only
+way to record a host that was not scanned was `HostScan.error`, which renders
+red as **error** in the per-host table *and* is what the v2.13.1 coverage check
+counts as unexamined — so de-duplicating a `www` alias would have hedged a
+fully-covered domain to PARTIAL, the mirror image of the overstatement that
+verdict exists to prevent.
+
+`status` and `note` now carry that case without overloading a field that means
+"this failed". The alias appears in the table, labelled `redirect`, with the
+host it points to; a genuinely failed host still reads as an error.
+
+**758 tests, ruff clean.** Labelled corpus precision 1.000 / recall 1.000;
+ground truth 64/64 with zero false positives.
+
 ## [2.13.1] — Three defects a live scan found that the suite could not
 
 A deep scan of a real company's domain produced an HTML report, a CSV and a

@@ -29,6 +29,7 @@ import socket
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -70,12 +71,22 @@ class HostScan:
     posture_issues: int = 0
     assets: int = 0
     error: str | None = None
+    # A host may be neither scanned nor failed. One that only redirects into
+    # another host in this run was deliberately not crawled a second time, and
+    # reporting that as an `error` would be wrong twice: it renders red in the
+    # per-host table, and the coverage check treats every errored host as
+    # unexamined — which would hedge the verdict to PARTIAL over hosts whose
+    # content was in fact scanned. `status`/`note` carry that case without
+    # overloading a field that means "this failed".
+    status: str = ""
+    note: str = ""
 
     def to_dict(self) -> dict:
         return {
             "host": self.host, "url": self.url, "confirmed": self.confirmed,
             "needs_review": self.needs_review, "posture_issues": self.posture_issues,
             "assets": self.assets, "error": self.error,
+            "status": self.status, "note": self.note,
         }
 
 
@@ -210,17 +221,34 @@ def _target_ip_class(host: str) -> str:
     return "public"
 
 
-async def _probe_one(client: httpx.AsyncClient, host: str) -> str | None:
-    """Return the reachable base URL for a host (preferring https), or None if it
-    is unreachable. ANY HTTP response — including 401/403/5xx — means the host is
-    live and worth scanning; only a transport error (DNS/connect/timeout) is dead."""
+_PROBE_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+
+
+async def _probe_one(client: httpx.AsyncClient, host: str) -> tuple[str, str] | None:
+    """Return ``(base_url, redirect_host)`` for a reachable host, or None if it is
+    unreachable. ANY HTTP response — including 401/403/5xx — means the host is
+    live and worth scanning; only a transport error (DNS/connect/timeout) is dead.
+
+    `redirect_host` is the host this one immediately redirects to, or "" when it
+    answers directly. It is captured because the probe is the only place that
+    sees it: since v2.13.0 the shared client does not follow redirects, so a 301
+    arrives here intact. Without it, `www.example.com` and `example.com` look
+    like two independent live hosts, and the deep scan crawls the same site
+    twice — doubling the requests made against a target and doubling the asset
+    and host counts the client's report claims as coverage.
+    """
     for scheme in ("https", "http"):
         url = f"{scheme}://{host}"
         try:
-            await client.get(url, timeout=httpx.Timeout(PROBE_TIMEOUT, connect=10.0))
-            return url
+            r = await client.get(url, timeout=httpx.Timeout(PROBE_TIMEOUT, connect=10.0))
         except httpx.HTTPError:
             continue
+        target = ""
+        if r.status_code in _PROBE_REDIRECT_CODES:
+            loc = r.headers.get("location", "")
+            if loc:
+                target = (urlparse(urljoin(url, loc.strip())).hostname or "").lower()
+        return url, target
     return None
 
 
@@ -228,14 +256,59 @@ async def probe_live_hosts(
     client: httpx.AsyncClient, hosts: list[str], *, concurrency: int = PROBE_CONCURRENCY,
 ) -> list[str]:
     """Concurrently probe hosts; return the reachable base URLs, order preserved."""
+    return [url for url, _redirect in await probe_live_hosts_detailed(
+        client, hosts, concurrency=concurrency)]
+
+
+async def probe_live_hosts_detailed(
+    client: httpx.AsyncClient, hosts: list[str], *, concurrency: int = PROBE_CONCURRENCY,
+) -> list[tuple[str, str]]:
+    """As `probe_live_hosts`, but each entry is ``(base_url, redirect_host)``."""
     sem = asyncio.Semaphore(max(1, concurrency))
 
-    async def _guarded(h: str) -> str | None:
+    async def _guarded(h: str) -> tuple[str, str] | None:
         async with sem:
             return await _probe_one(client, h)
 
     results = await asyncio.gather(*(_guarded(h) for h in hosts))
-    return [u for u in results if u]
+    return [r for r in results if r]
+
+
+def collapse_redirect_duplicates(
+    probed: list[tuple[str, str]],
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Split probed hosts into those worth scanning and those that merely point
+    at one of them.
+
+    Returns ``(targets, collapsed)`` where `collapsed` is ``(host, redirect_host)``.
+
+    A host is collapsed only when its redirect lands on a host that is itself
+    being scanned — the common apex/www pairing. A redirect to somewhere *not*
+    in the set is left alone and scanned normally: it may be the only way that
+    content is reachable, and dropping it would lose coverage rather than
+    duplicate work. Ordering is preserved, so the caller's cap still applies to
+    a stable list.
+    """
+    live_hosts = {(urlparse(u).hostname or "").lower() for u, _t in probed}
+    targets: list[str] = []
+    collapsed: list[tuple[str, str]] = []
+    kept_hosts: set[str] = set()
+    for url, redirect_host in probed:
+        host = (urlparse(url).hostname or "").lower()
+        # `redirect_host in kept_hosts` is not enough on its own: the apex may be
+        # probed after the www that points at it. Checking the full live set
+        # decides the pair the same way regardless of enumeration order.
+        if redirect_host and redirect_host != host and redirect_host in live_hosts:
+            collapsed.append((host, redirect_host))
+            continue
+        targets.append(url)
+        kept_hosts.add(host)
+    # Every host redirecting to another that was itself collapsed would leave
+    # nothing to scan (a mutual apex/www redirect loop). Falling back to the
+    # unfiltered list is the safe answer: duplicate work beats no scan at all.
+    if not targets and probed:
+        return [u for u, _t in probed], []
+    return targets, collapsed
 
 
 def _summarise_scan(host: str, url: str, scan: dict) -> HostScan:
@@ -369,7 +442,27 @@ async def run_deep_scan(
                                f"takeover(s) found", "WARN"))
 
         await emit(log(f"Probing {len(safe_hosts)} candidate host(s) for liveness…"))
-        result.live_hosts = await probe_live_hosts(client, safe_hosts)
+        probed = await probe_live_hosts_detailed(client, safe_hosts)
+        result.live_hosts = [u for u, _t in probed]
+
+        # Collapse hosts that only redirect into another host already being
+        # scanned. `www.example.com` 301-ing to `example.com` is one site, and
+        # scanning both crawls every page twice: double the requests against the
+        # target, and a report claiming twice the coverage it actually has.
+        scan_urls, collapsed = collapse_redirect_duplicates(probed)
+        for host, redirect_host in collapsed:
+            # Recorded, never silently dropped. A host missing from the per-host
+            # table with no explanation is indistinguishable from one the scan
+            # failed to reach.
+            result.hosts.append(HostScan(
+                host=host, url=f"https://{host}", status="redirect",
+                note=f"redirects to {redirect_host} — that site was scanned, not this alias",
+            ))
+        if collapsed:
+            await emit(log(
+                f"{len(collapsed)} host(s) redirect into another scanned host "
+                f"({', '.join(h for h, _t in collapsed)}) — scanning each site once."
+            ))
 
         if not result.live_hosts:
             result.error = enum.error or "no live hosts found"
@@ -378,7 +471,7 @@ async def run_deep_scan(
             await emit({"type": "deep_scan_complete", "totals": result.to_dict()["totals"]})
             return result
 
-        targets = result.live_hosts[:max(1, max_targets)]
+        targets = scan_urls[:max(1, max_targets)]
         n = len(targets)
         await emit(log(f"{len(result.live_hosts)} host(s) live — scanning {n} "
                        f"(concurrency {HOST_SCAN_CONCURRENCY})"))

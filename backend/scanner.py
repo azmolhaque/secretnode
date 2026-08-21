@@ -3040,7 +3040,13 @@ async def run_scan(
         # security controls. Best-effort: never blocks or fails the scan.
         if SCAN_HTTP_POSTURE:
             state.check()
-            pfindings = await posture.fetch_posture(client, target_url)
+            # Inject the validated hop-walk so posture measures the page a
+            # visitor lands on, not a 301 pointing at it. The same walk the
+            # fetch path uses, so a redirect into internal space is refused here
+            # too rather than being read for headers.
+            pfindings = await posture.fetch_posture(
+                client, target_url, get_final=_get_following_redirects,
+            )
             result["posture_findings"] = [p.to_dict() for p in pfindings]
             if pfindings:
                 await emit({

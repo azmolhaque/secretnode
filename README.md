@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-739%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.13.1-blue)
+![Tests](https://img.shields.io/badge/tests-758%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.13.2-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,43 +14,41 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.13.1 — three defects a live scan found that the suite could not** ·
+> **v2.13.2 — the redirect guard changed what posture measures** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> A deep scan of a real domain produced an HTML report, a CSV and a SARIF file.
-> Reading the three next to each other turned up three defects that none of the
-> 708 tests could see, because each needs input messier than a fixture usually is.
+> Two defects from a second live deep scan, both reproduced against the real
+> pipeline in a local lab before a line was changed.
 >
-> **One regex literal disabled the whole comment stripper.** v2.12.6 stripped
-> comments so a bundled library's documentation links would stop being reported as
-> the client's "connected infrastructure". The report still listed `i.test`,
-> `caniuse.com`, `stackoverflow.com` and `raw.githubusercontent.com` — four of the
-> five strings that entry names as fixed. The stripper tracked strings but not
-> regex literals, and `/['"]/g` is ordinary in any bundle that normalises quoting:
-> the apostrophe inside it opened a string that never closed, so every comment in
-> the rest of the file survived. It failed open, silently, on input no test used.
+> **Posture was measuring the redirect, not the page.** v2.13.0 stopped the shared
+> client following redirects so every hop could be address-checked — right, and it
+> silently changed what the posture check sees: on any host that redirects, it
+> analysed the **301**. The first real target hid this, because Cloudflare applies
+> header rules to redirects too and the wrong measurement agreed with the right
+> one. Against a lab server whose landing page sets six headers and whose redirect
+> hop sets none, it reported five missing headers for a page that has them all.
+> Posture now runs through the same validated hop-walk the fetch path uses.
 >
-> **143 posture issues reached no deliverable.** The HTML showed the count in a
-> tile and itemised none; the CSV was a bare header row; the SARIF was
-> `"results": []`. Two deliverables built from one scan disagreeing about whether
-> anything was found is worse than either being empty, because each looks
-> authoritative alone — a consumer gating on the SARIF was told the target was
-> clean. Posture now reaches all three, closing the R8 follow-up the roadmap
-> carried at [HIGH].
+> **One site was being scanned twice.** `www.example.com` 301-ing to
+> `example.com` looked like two live hosts, so the deep scan crawled both — eleven
+> requests for four unique paths in the lab. Against a real domain that is double
+> the traffic aimed at a target and a report claiming twice the coverage it has.
+> A host is now collapsed only when its redirect lands on a host already being
+> scanned; one leaving that set is still scanned, because it may be the only route
+> to content nothing else reaches. Five requests after the fix.
 >
-> **A CLEAN verdict over a domain the scan mostly did not read.** `MAX_TARGETS`
-> is a prefix slice of an alphabetically sorted host list, so the scan read 26 of
-> 83 live hosts — everything after "g" was never fetched — and the banner still
-> said "across the domain". The verdict now reads PARTIAL and states both counts.
-> The cap is unchanged: raising it silently multiplies traffic against a third
-> party, which is an operator's decision, not a reporting fix.
+> **And a collapsed host is not a failure.** The only way to record an unscanned
+> host was `error`, which renders red *and* counts as unexamined — so
+> de-duplicating a `www` alias would have hedged a fully-covered domain to
+> PARTIAL. `status`/`note` now carry that case.
 >
-> The previous release, **v2.13.0**, closed four defects of the same shape — a
-> documented feature the code path meant to reach it did not reach: an unguarded
-> redirect chain (SSRF, out-of-scope fetches, misattributed findings), an offline
-> mode that rendered no verdict, R7 composite/proximity rules, and public-by-design
-> findings deleted rather than reported.
+> The two releases before it: **v2.13.1** fixed a comment stripper defeated by a
+> single regex literal, posture findings that reached no deliverable, and a CLEAN
+> verdict over a domain the scan mostly did not read; **v2.13.0** closed an
+> unguarded redirect chain, an offline mode with no verdict, R7
+> composite/proximity rules, and public-by-design findings deleted rather than
+> reported.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
