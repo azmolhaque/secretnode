@@ -2733,18 +2733,39 @@ class ScanState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def classify_validated(v: "ValidatedFinding") -> str:
-    """Route a validated finding to exactly one of: 'confirmed', 'review', 'drop'.
+    """Route a validated finding to exactly one of: 'confirmed', 'review',
+    'informational', 'drop'.
 
-    The critical rule is the last one: a *structural/provider* match (high-precision
-    by shape — AKIA…, ghp_…, sk_live_…, PEM) that the AI did **not confidently
-    dismiss** is sent to manual review, never silently dropped. Without this, a real
-    live key the AI merely under-called on (e.g. because a page gave it no
-    surrounding context) would vanish with no trace — a false negative, the worst
-    failure mode for a scanner. The generic keyword=value catch-all keeps the old
-    aggressive behaviour (an AI 'no' there is trusted and dropped), preserving the
-    'no false positives in Confirmed' promise."""
+    The critical rule is the structural one: a *structural/provider* match
+    (high-precision by shape — AKIA…, ghp_…, sk_live_…, PEM) that was **not
+    confidently dismissed** is sent to manual review, never silently dropped.
+    Without this, a real live key a tier merely under-called on (e.g. because a
+    page gave it no surrounding context) would vanish with no trace — a false
+    negative, the worst failure mode for a scanner. The generic keyword=value
+    catch-all keeps the aggressive behaviour (a confident 'no' there is trusted
+    and dropped), preserving the 'no false positives in Confirmed' promise.
+
+    'informational' is public-by-design: a Stripe pk_, a Sentry DSN, a Firebase
+    web apiKey. These used to route to 'drop', because a public-by-design verdict
+    is a confident dismissal and confident dismissals were deleted. Two things
+    said that was wrong. `effective_severity()` exists for the sole purpose of
+    downgrading such a finding to INFO, and nothing reaching it could survive
+    routing — so the method was unreachable. And the ground-truth corpus declares
+    a `public` class whose contract is "must be detected AND classified
+    public-by-design", which deletion does not satisfy; the HTTP benchmark scored
+    exactly those three specimens as false negatives.
+
+    Reporting them is also the better client outcome. Silently deleting a Stripe
+    publishable key leaves the reader unable to tell whether the scanner examined
+    it and cleared it or never saw it at all. An INFO line saying "found, public
+    by design, no action needed" is evidence of thoroughness. It is emphatically
+    NOT the same as reporting it as an exposure: informational findings raise no
+    alert, are never live-verified, and carry INFO severity.
+    """
     if v.confidence == NEEDS_REVIEW_SENTINEL:
         return "review"                                    # no verdict — human decides
+    if v.public_by_design:
+        return "informational"
     if not v.ai_judged:
         # No model judged this. Either the deterministic tier did, or nothing did.
         if not v.offline_triaged:
@@ -2890,6 +2911,10 @@ async def run_scan(
         "validated_findings": 0,
         "confirmed_findings": [],
         "needs_review_findings": [],
+        # Public-by-design values (Stripe pk_, Sentry DSN, Firebase web apiKey).
+        # Reported at INFO so the client can see the scanner examined them and
+        # cleared them, rather than being unable to tell whether it looked.
+        "informational_findings": [],
         "suppressed_count":   0,
         "new_findings_count": 0,
         "recurring_findings_count": 0,
@@ -3132,12 +3157,16 @@ async def run_scan(
         _routed = [(classify_validated(v), v) for v in validated]
         confirmed: list[ValidatedFinding] = [v for b, v in _routed if b == "confirmed"]
         needs_review: list[ValidatedFinding] = [v for b, v in _routed if b == "review"]
+        informational: list[ValidatedFinding] = [v for b, v in _routed if b == "informational"]
 
         # ── Suppress known false positives ──────────────────────────────
         if suppressed_fingerprints:
             pre_suppress = len(confirmed)
             confirmed = [v for v in confirmed if v.raw.fingerprint not in suppressed_fingerprints]
             needs_review = [v for v in needs_review if v.raw.fingerprint not in suppressed_fingerprints]
+            informational = [
+                v for v in informational if v.raw.fingerprint not in suppressed_fingerprints
+            ]
             result["suppressed_count"] = pre_suppress - len(confirmed)
             if result["suppressed_count"]:
                 await emit({
@@ -3235,6 +3264,7 @@ async def run_scan(
                 f"Validation done — {len(confirmed)}/{len(all_raw)} confirmed "
                 f"(confidence ≥ {GEMINI_CONFIDENCE_MIN}%)"
                 + (f", {len(needs_review)} flagged for manual review" if needs_review else "")
+                + (f", {len(informational)} public-by-design (INFO)" if informational else "")
             ),
         })
 
@@ -3276,6 +3306,7 @@ async def run_scan(
         # ── 6. Finalise ────────────────────────────────────────────────────
         result["confirmed_findings"]    = [vf.to_dict() for vf in confirmed]
         result["needs_review_findings"] = [vf.to_dict() for vf in needs_review]
+        result["informational_findings"] = [vf.to_dict() for vf in informational]
         result["status"]             = "complete"
         result["duration_seconds"]   = round(time.monotonic() - t0, 2)
 

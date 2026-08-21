@@ -177,7 +177,10 @@ async def test_offline_mode_downgrades_a_known_public_value(monkeypatch):
     )
     assert r.public_by_design is True
     assert r.effective_severity() == "INFO"
-    assert scanner.classify_validated(r) == "drop", "known-public info is not an exposure"
+    # Reported, not deleted. Silently dropping a Stripe publishable key leaves
+    # the client unable to tell whether the scanner examined it and cleared it or
+    # never saw it. INFO is not an exposure — no alert, no verification.
+    assert scanner.classify_validated(r) == "informational"
 
 
 @pytest.mark.asyncio
@@ -262,9 +265,11 @@ async def test_offline_plus_verify_can_confirm_findings_end_to_end(monkeypatch):
 
 # ── routing: the asymmetry, made explicit ────────────────────────────────────
 
-def _vf(**kw):
+def _vf(secret_type_generic=False, **kw):
     base = dict(
-        raw=_raw(), is_valid=True, confidence=70, reason="r",
+        raw=_raw(scanner.GENERIC_SECRET_TYPE, "abc123def456ghi789") if secret_type_generic
+             else _raw(),
+        is_valid=True, confidence=70, reason="r",
         ai_judged=False, offline_triaged=True,
     )
     base.update(kw)
@@ -285,9 +290,21 @@ def test_a_hedged_offline_dismissal_is_not_grounds_to_discard():
 
 
 def test_a_confident_offline_dismissal_does_discard():
+    """A confident dismissal on grounds other than public-by-design — test
+    scaffolding, a placeholder — is discarded."""
+    assert scanner.classify_validated(
+        _vf(is_valid=False, confidence=95, secret_type_generic=True)
+    ) == "drop"
+
+
+def test_public_by_design_is_reported_not_discarded():
+    """The one confident dismissal that is NOT a deletion. See
+    classify_validated: `effective_severity()` exists solely to render these at
+    INFO, and until this bucket existed nothing reaching it survived routing, so
+    that method was unreachable."""
     assert scanner.classify_validated(
         _vf(is_valid=False, confidence=95, public_by_design=True)
-    ) == "drop"
+    ) == "informational"
 
 
 def test_offline_triage_can_never_confirm_however_confident():
@@ -303,3 +320,40 @@ def test_the_report_says_which_tier_produced_the_verdict():
     assert _vf().to_dict()["validation_tier"] == "offline-triage"
     assert _vf(ai_judged=True).to_dict()["validation_tier"] == "ai"
     assert _vf(offline_triaged=False).to_dict()["validation_tier"] == "none"
+
+
+# ── the corpus's third ground-truth class ────────────────────────────────────
+
+def test_every_public_specimen_is_actually_classified_public_by_design():
+    """The ground-truth corpus declares three classes, and `public` has a
+    two-part contract: "must be detected AND classified public-by-design".
+
+    Nothing enforced the second half. Findings that reached public_by_design=True
+    were routed to 'drop' and deleted, so the corpus's own declared expectation
+    was unmet by construction — and the HTTP benchmark scored exactly these
+    specimens as false negatives once the offline tier started classifying them
+    correctly. This test reads the corpus's labels and checks the pipeline
+    against them, rather than trusting either side.
+    """
+    from bench import groundtruth
+
+    c = groundtruth.build()
+    public_specimens = [s for s in c.specimens if s.kind == "public"]
+    assert public_specimens, "the corpus is supposed to carry a public class"
+
+    for s in public_specimens:
+        meta = scanner.PATTERN_BY_NAME[s.pattern]
+        v = triage.triage(
+            secret_type=s.pattern, raw_match=s.value, context_snippet=s.snippet,
+            entropy=scanner.shannon_entropy(s.value), severity=meta.severity,
+            structural=not meta.entropy_gated,
+        )
+        assert v.public_by_design is True, f"{s.pattern} is declared public in the corpus"
+
+        vf = scanner.ValidatedFinding(
+            raw=_raw(s.pattern, s.value, s.snippet), is_valid=v.is_valid,
+            confidence=v.confidence, reason=v.reason,
+            public_by_design=v.public_by_design, ai_judged=False, offline_triaged=True,
+        )
+        assert scanner.classify_validated(vf) == "informational"
+        assert vf.effective_severity() == "INFO"
