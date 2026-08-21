@@ -117,6 +117,7 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     confirmed = sorted(scan.get("confirmed_findings", []), key=_sort_key)
     needs_review = scan.get("needs_review_findings", [])
+    informational = scan.get("informational_findings", [])
     new_count = scan.get("new_findings_count", len(confirmed))
     recurring_count = scan.get("recurring_findings_count", 0)
     duration = scan.get("duration_seconds", 0)
@@ -218,6 +219,8 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
         '<tr><td colspan="8" class="empty">No confirmed findings — no live credentials detected in this scan.</td></tr>'
     review_html = "\n".join(review_row(f) for f in needs_review) or \
         '<tr><td colspan="4" class="empty">None.</td></tr>'
+    informational_html = "\n".join(review_row(f) for f in informational) or \
+        '<tr><td colspan="4" class="empty">None — no public-by-design identifiers found.</td></tr>'
 
     # Deduplicated remediation guidance, one block per distinct secret type found.
     remediation_blocks = ""
@@ -414,6 +417,17 @@ def generate_html_report(scan: dict[str, Any], agency_name: str = "Independent S
     <tbody>{review_html}</tbody>
   </table>
 
+  <h2>Examined and Cleared — Public by Design ({len(informational)})</h2>
+  <div class="small" style="margin-bottom:6px;">Credential-shaped values that are <b>meant</b> to ship in
+  client code and are <b>not</b> exposures: publishable payment keys, Sentry DSNs, Firebase web
+  <span class="mono">apiKey</span> values, browser Maps keys. They are listed because their absence would be
+  ambiguous — a reader who sees nothing cannot tell whether these were examined and cleared, or never looked at.
+  <b>No action is required for anything in this table.</b></div>
+  <table>
+    <thead><tr><th>Severity</th><th>Type</th><th>Location</th><th>Why it is not an exposure</th></tr></thead>
+    <tbody>{informational_html}</tbody>
+  </table>
+
   <h2>Attack Surface Intelligence</h2>
   <div class="small" style="margin-bottom:6px;"><b>External hosts referenced by this asset</b>
   (CDNs, APIs, analytics, auth providers). Extracted from code, with comments removed — a host
@@ -445,14 +459,24 @@ def generate_json_report(scan: dict[str, Any]) -> dict[str, Any]:
     client is most likely to pipe into another tool or commit to a triage repo.
     """
     out = dict(scan)
-    for key in ("confirmed_findings", "needs_review_findings"):
-        findings = out.get(key)
-        if isinstance(findings, list):
-            out[key] = [
-                {**f, "raw_match": redact_finding(f)}
-                if isinstance(f, dict) and f.get("raw_match") else f
-                for f in findings
-            ]
+    # Every bucket, discovered by shape rather than named in a list.
+    #
+    # This used to enumerate ("confirmed_findings", "needs_review_findings").
+    # Adding a third bucket without remembering to extend that tuple would have
+    # shipped unmasked live credentials in the one deliverable a client is most
+    # likely to pipe into another tool or commit to a triage repo — reintroducing
+    # exactly the bug this function's docstring describes as fixed. A masking
+    # rule that depends on someone updating a list is a masking rule that will
+    # eventually be wrong, so it now keys off the field that actually matters:
+    # a dict carrying `raw_match` gets masked, wherever it lives.
+    for key, findings in list(out.items()):
+        if not key.endswith("_findings") or not isinstance(findings, list):
+            continue
+        out[key] = [
+            {**f, "raw_match": redact_finding(f)}
+            if isinstance(f, dict) and f.get("raw_match") else f
+            for f in findings
+        ]
     return out
 
 
@@ -481,6 +505,16 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
             "NEEDS_REVIEW", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
             f.get("source_url", f.get("target_url", "")),
             "", "", "", "", f.get("impact", ""), redact_finding(f),
+            f.get("reason", ""), f.get("found_at", ""),
+        ])
+    # Public-by-design values, at INFO. Included so the export shows the scanner
+    # examined them and cleared them; a reader who sees nothing cannot tell that
+    # apart from the scanner never having looked.
+    for f in scan.get("informational_findings", []):
+        writer.writerow([
+            "INFORMATIONAL", _severity_of(f), f.get("cwe", ""), f.get("secret_type", ""),
+            f.get("source_url", f.get("target_url", "")),
+            f.get("confidence", 0), "", "", "", "", redact_finding(f),
             f.get("reason", ""), f.get("found_at", ""),
         ])
     return buf.getvalue()
@@ -535,13 +569,20 @@ def _catalog_rules() -> dict[str, dict[str, Any]]:
 
 def generate_sarif_report(scan: dict[str, Any]) -> str:
     """Emit findings as SARIF 2.1.0 — uploadable to GitHub code scanning or any
-    SARIF-aware pipeline. Confirmed and needs-review findings are both included;
-    needs-review findings are downgraded to 'note' level so they don't fail a
-    build gate but are still visible for triage."""
+    SARIF-aware pipeline. Confirmed, needs-review and informational findings are
+    all included; the latter two are downgraded to 'note' level so they don't
+    fail a build gate but are still visible for triage.
+
+    Informational findings are public-by-design values (Stripe pk_, Sentry DSN,
+    a Firebase web apiKey). They belong in the export precisely because they must
+    NOT fail a gate: a pipeline that goes red on a publishable key is a pipeline
+    someone disables, and then the AWS key goes unnoticed too."""
     all_findings = [
         (f, False) for f in scan.get("confirmed_findings", [])
     ] + [
         (f, True) for f in scan.get("needs_review_findings", [])
+    ] + [
+        (f, True) for f in scan.get("informational_findings", [])
     ]
 
     # Advertise the full detector catalog; add finding-specific rules for any

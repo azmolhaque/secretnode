@@ -199,11 +199,21 @@ def run_http(c: corpus_mod.Corpus, directory: Path, port: int) -> Result:
     }
     res.stage_counts["confirmed"] = len(scan.get("confirmed_findings", []))
     res.stage_counts["needs_review"] = len(scan.get("needs_review_findings", []))
+    res.stage_counts["informational"] = len(scan.get("informational_findings", []))
 
-    # Score against everything the pipeline surfaced to a human — confirmed and
-    # needs-review alike. Counting only `confirmed` would score the Gemini key's
-    # presence rather than the scanner, and the two must not be conflated.
-    for bucket in ("confirmed_findings", "needs_review_findings"):
+    # Score against everything the pipeline surfaced to a human — confirmed,
+    # needs-review and informational alike. Counting only `confirmed` would score
+    # the Gemini key's presence rather than the scanner, and the two must not be
+    # conflated.
+    #
+    # `informational_findings` belongs here because the corpus declares a third
+    # ground-truth class: a `public` specimen must be DETECTED and classified
+    # public-by-design. Omitting the bucket scored the three public specimens as
+    # false negatives — the harness reporting a recall loss for the pipeline
+    # doing exactly what the corpus asks of it, which is the measuring instrument
+    # being wrong about the tool.
+    for bucket in ("confirmed_findings", "needs_review_findings",
+                   "informational_findings"):
         for f in scan.get(bucket, []):
             value = f.get("matched_value") or f.get("raw_match") or ""
             stype = f.get("secret_type", "")

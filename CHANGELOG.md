@@ -3,6 +3,202 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.13.0] — The SSRF guard ran once. Offline mode had no verdict.
+
+Four defects found by auditing the code against what it claims to do, each with
+its own root cause and its own regression net. Two are security-relevant, two
+are about a report telling the truth.
+
+### Fixed — the redirect chain was completely unguarded
+
+`build_client()` set `follow_redirects=True`, so httpx resolved and connected on
+its own for every hop. `assert_public_target` ran once, against the URL the
+operator typed, and never again. A probe against the old code:
+
+```
+requested:    http://127.0.0.1:PORT/redirect
+returned url: http://127.0.0.1:PORT/redirect   <- the URL asked for
+body:         const k = "AKIA…"                <- served by /internal
+```
+
+Three consequences, one root cause.
+
+- **SSRF.** A single 302 reaches loopback, RFC1918 and link-local space,
+  including `169.254.169.254` — and the instance-metadata response is scanned
+  for credentials and written into a client report. This needs no hostile
+  target: an open redirect on a legitimate one is a sufficient trigger.
+- **Scope.** `_accept_asset` refuses to *discover* a third-party host, then a
+  redirect fetches one anyway. For a tool whose authorization ledger asserts
+  that only authorized hosts were contacted, that traffic is the violation the
+  ledger exists to prevent.
+- **Attribution.** `fetch_url` returned the URL it asked for, never the one that
+  answered, so a credential served by the redirect's destination was reported at
+  the original location and the remediation pointed at the wrong system. The
+  same bug resolved relative URLs against the pre-redirect base: an apex
+  redirecting to `www`, or to a locale prefix, produced 404s for every relative
+  asset and a quietly under-covered scan that still printed CLEAN.
+
+`netguard.py` is now the single answer to "may this scanner request this?".
+`main.py` and `cli.py` each carried a hand-rolled copy of the address rule and
+the fetch path had none — the missing one is the one traffic went through.
+`_get_following_redirects` walks the chain one validated hop at a time.
+
+- Scope is judged against the URL originally requested, never the previous hop.
+  Otherwise a chain walks anywhere one in-scope step at a time: A → B (in scope
+  for A) → C (in scope for B, authorized by nobody).
+- Scope is checked *before* resolution — no DNS lookup for a host already
+  refused, and the refusal reason is the scope decision rather than a DNS
+  failure.
+- Refusal is loud. A silent skip trades an SSRF for a coverage loss that nothing
+  reports, and a scan that quietly stopped reading still prints CLEAN.
+- RFC6598 CGNAT (`100.64.0.0/10`) is refused. It is not `is_private`, so the
+  previous rule let it through; a test documents the old blind spot.
+- One test asserts `follow_redirects is False` on the built client. If that is
+  ever re-enabled every other test still passes while the hole reopens, because
+  httpx would resolve the chain internally and `fetch_url` would never see a 3xx.
+
+Also: a duplicated `Content-Length` (`"512, 512"`, as some proxies emit) raised
+`ValueError`, which the catch-all handler turned into a silent asset drop with
+no retry. An unread asset is an unscanned asset.
+
+### Added — a deterministic verdict that needs no API key (`triage.py`)
+
+With no `GEMINI_API_KEY`, `_ai_skipped` returned `is_valid=True, confidence=50`
+for everything. That is not a verdict, it is a placeholder standing in for one:
+an AWS secret key, a Sentry DSN and a Stripe *publishable* key came back
+byte-identical apart from the type name, none carrying a sentence about blast
+radius. This is the **default** configuration — the README documents offline
+operation on a Pi as first-class — so the most common way to run the tool was
+also the way that produced the least usable output.
+
+- Known-public values are dismissed at the same confidence the AI tier uses:
+  Stripe `pk_`, Sentry DSN and PostHog `phc_` by type; a Firebase web `apiKey`
+  or a Maps key by the config siblings beside it. A bare `AIza…` with neither
+  context is retained, and the reason says it is ambiguous rather than
+  manufacturing a call.
+- Generic keyword=value matches inside evident test scaffolding are dismissed.
+  Provider-shaped keys in the same file are **not** — developers hardcode real
+  credentials into fixtures constantly and those fixtures ship in bundles.
+  `staging` and `dev` are deliberately absent from the non-production markers:
+  staging credentials are real credentials against real infrastructure.
+- Everything retained carries a blast-radius sentence, so an offline report says
+  what an attacker gets rather than listing types.
+- Findings now report `validation_tier` (`ai` / `offline-triage` / `none`). A
+  confidence number with no tier named invites the reader to assume the
+  strongest tier ran, and for an offline scan that assumption is wrong.
+
+Triage never confirms, by construction *and* by routing: its retain confidence
+is capped below the threshold, and `classify_validated` refuses to confirm an
+un-AI-judged finding regardless of the number attached to it.
+
+The never-drop guarantee holds and is now explicit about why. Only a *confident*
+offline dismissal discards; a hedged one goes to a human. Getting a confirmation
+wrong wastes an afternoon; getting a dismissal wrong is the failure this whole
+tool exists to prevent.
+
+### Fixed — offline mode could not confirm anything, ever
+
+Verification only ever ran on `confirmed`. Offline, everything routes to review,
+and review was never verified — so the Confirmed table was structurally
+guaranteed to be empty no matter how many live credentials the scan had actually
+found. The strongest evidence this tool can obtain was withheld from exactly the
+findings nobody could judge.
+
+Verification now also runs on review findings that have a verifier, and promotes
+any the provider confirms ACTIVE. A provider answering "yes, this key works" is
+an observation, not an opinion; it does not additionally need a model to agree.
+The scan-to-scan diff moved after verification so a promoted finding is counted
+like any other confirmed one.
+
+### Added — R7: credentials no single regex can find (`composite.py`)
+
+Several registry detectors are keyword-anchored:
+
+```
+AWS Secret Access Key   (?i)aws.{0,20}secret.{0,20}['"]([A-Za-z0-9/+=]{40})['"]
+```
+
+The keyword is doing all the work, and a bundler deletes it. What ships is
+`{a:"AKIA…",b:"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}` — the ID is found
+because `AKIA…` is self-describing, the secret is not. The scan reported the half
+that is a public identifier and missed the half that is the credential, and no
+amount of tuning a single-value regex fixes it, because the information needed is
+not inside the value. It is right next to it.
+
+Two rules: `AKIA…` → the AWS secret beside it, Twilio Account SID → the auth
+token beside it. Anchors are never reported on their own — a Twilio SID is a
+public identifier, and adding it to the registry to enable the pairing would mean
+reporting known-public information as an exposure.
+
+The precision work is the substance, and the ground-truth benchmark drove it. The
+unconstrained rule's first run produced a false positive: a 40-hex git commit SHA
+is exactly as long as an AWS secret key and appears in essentially every build,
+so proximity alone made every such build yield a CRITICAL finding on a value that
+is public by definition. The fix is a character-class test — an AWS secret is 40
+draws from a 64-symbol base64 alphabet, so P(no uppercase) is about 1 in 10⁹,
+while a hex digest can never satisfy upper+lower+digit. The Twilio rule cannot
+use that test (its token *is* 32 hex), so proximity carries the whole weight and
+the window tightens to 120 characters.
+
+Composite findings pass every existing gate and carry their rationale into the
+context snippet: a shapeless 40-character string reported as CRITICAL has to be
+able to show its reasoning, or an analyst is right to distrust it.
+
+`_collapse_generic_duplicates` becomes `_collapse_duplicates` with a three-tier
+rank — a registry detector outranks a composite inference, which outranks the
+generic catch-all — because R7 creates the same collision from the other
+direction. The old name is kept as an alias.
+
+A test asserting that every composite rule names a registry type caught a defect
+in this change itself: `OAuth Client Secret` had no registry entry, so its
+severity and remediation would have silently degraded to the generic
+MEDIUM/CWE-798 fallback. Investigating showed the rule was never a composite at
+all — its companion requires the literal `client_secret` keyword, so it anchors
+itself and never consults the `client_id`. It is now an ordinary detector in the
+registry, which is where a keyword-anchored pattern belongs. **64 detectors.**
+
+### Fixed — public-by-design findings were deleted, not reported
+
+The ground-truth corpus declares three classes, and `public` has a two-part
+contract: "must be detected AND classified public-by-design". Nothing enforced
+the second half. `classify_validated` routed a confident dismissal to `drop`, and
+a public-by-design verdict *is* a confident dismissal — so those findings were
+deleted, and `effective_severity()`, whose sole purpose is to downgrade them to
+INFO, was unreachable dead code.
+
+Deleting them is also the worse client outcome. A reader who sees nothing about
+their Stripe publishable key cannot tell whether the scanner examined it and
+cleared it or never looked.
+
+- New `informational` bucket, rendered as **"Examined and Cleared — Public by
+  Design"**. This is not the same as reporting an exposure: informational
+  findings raise no alert, are never live-verified, and carry INFO severity. In
+  SARIF they are `note` level, because a pipeline that goes red on a publishable
+  key is a pipeline someone disables — and then the AWS key goes unnoticed too.
+- Carried through HTML, CSV, SARIF, JSON and the dashboard. No toast on the
+  dashboard, deliberately: an alert that needs no action teaches an operator to
+  ignore alerts.
+- The benchmark harness now scores the bucket it was blind to. It had reported
+  recall 0.953 for the pipeline doing exactly what the corpus asks — the
+  measuring instrument being wrong about the tool.
+
+**Found while wiring it up, and the more dangerous of the two:**
+`generate_json_report` masked credentials in a hardcoded list of two bucket
+names. Adding a third without extending that tuple would have shipped unmasked
+live keys in the one deliverable a client is most likely to pipe into another
+tool or commit to a triage repo — reintroducing exactly the bug that function's
+docstring describes as fixed. A masking rule that depends on someone remembering
+to update a list will eventually be wrong, so it now keys off the field that
+actually matters: a dict carrying `raw_match` gets masked, wherever it lives.
+
+### Measurements
+
+- **708 tests passing** (was 631), ruff clean.
+- Labelled corpus: **precision 1.000 · recall 1.000 · F1 1.000**, 0 false positives.
+- Ground truth, offline: **64/64**, 0 false positives.
+- Ground truth, full pipeline over HTTP: **64/64**, 0 false positives — restored
+  from the 0.953 the informational bucket had exposed.
+
 ## [2.12.6] — The ledger existed. Nothing called it.
 
 A whole-domain deep scan ran from the dashboard against a company with no Rules of

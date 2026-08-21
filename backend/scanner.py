@@ -28,8 +28,11 @@ from google import genai
 from google.genai import errors as genai_errors, types
 from pydantic import BaseModel, Field, ValidationError
 
+import composite
+import netguard
 import posture
 import surface
+import triage
 import verifier
 import version
 
@@ -215,6 +218,11 @@ class ValidatedFinding:
     # key, missing model). Distinct from "the AI said it is fake": there is no
     # verdict to trust, so routing must not act as though there were one.
     ai_judged: bool = True
+    # True when `triage` rendered a deterministic verdict for this finding.
+    # Distinct from ai_judged, and both can be False: that combination means no
+    # tier reached a conclusion at all, which is the only case that must go to a
+    # human on the grounds of ignorance rather than on the grounds of evidence.
+    offline_triaged: bool = False
     verified: str = "disabled"  # live-verification status: verified/unverified/unsupported/disabled
     verified_detail: str = ""   # identity/scope of a VERIFIED credential (R1) — never the secret itself
     impact: str = ""            # AI blast-radius statement: what an attacker could actually do
@@ -264,7 +272,19 @@ class ValidatedFinding:
             "severity":       self.effective_severity(),
             "cwe":            self._meta().cwe,
             "remediation":    self._meta().remediation,
+            # Which tier actually reached this verdict. A report that shows a
+            # confidence number without saying who produced it invites the
+            # reader to assume the strongest available tier ran, and for an
+            # offline scan that assumption is wrong. Naming the tier is the
+            # difference between a measurement and an unlabelled number.
+            "validation_tier": self.validation_tier(),
         }
+
+    def validation_tier(self) -> str:
+        """'ai', 'offline-triage', or 'none'."""
+        if self.ai_judged:
+            return "ai"
+        return "offline-triage" if self.offline_triaged else "none"
 
     def _meta(self) -> "SecretPattern":
         """Look up the registry metadata (severity/CWE/remediation) for this
@@ -388,6 +408,21 @@ SECRET_PATTERNS: list[SecretPattern] = [
         description="Generic credential assignment",
         severity="MEDIUM",
         entropy_gated=True,   # loose keyword=value match — entropy keeps it quiet
+    ),
+    SecretPattern(
+        name="OAuth Client Secret",
+        regex=re.compile(
+            r"(?i)client[_-]?secret['\"]?\s*[=:]\s*['\"]([A-Za-z0-9\-_.~+/]{16,80})['\"]"
+        ),
+        description="OAuth 2.0 client secret",
+        severity="HIGH",
+        remediation=(
+            "An OAuth client secret in browser-delivered code lets anyone "
+            "impersonate the application to the identity provider and complete "
+            "the authorization-code exchange. Rotate the secret at the provider, "
+            "and move the exchange server-side — a public SPA client should use "
+            "PKCE with no secret at all."
+        ),
     ),
     SecretPattern(
         name="Mailgun API Key",
@@ -886,6 +921,20 @@ _asset_cache_out: dict[str, dict[str, Any]] = {}
 # "0 assets", which reads to a client as "nothing was scanned".
 _asset_cache_hits: set[str] = set()
 
+# final URL -> the URL originally requested, for assets that redirected.
+#
+# The cache is keyed on the URL we *ask for*, because that is the stable key
+# across scans: it is what discovery produces, and it is what the next scan will
+# look up. But `fetch_url` now returns the URL that actually answered (see the
+# redirect guard), so `mark_asset_dirty` is called with the final URL — and
+# without this map it would find no entry and mark nothing.
+#
+# That silent miss is the dangerous direction. An asset that redirected and held
+# a credential would stay recorded as `was_clean=True`, so the next scan's 304
+# would skip it and the finding would vanish from the report. A finding that
+# disappears reads as "resolved". This map is what keeps the two keyings in step.
+_asset_redirect_alias: dict[str, str] = {}
+
 
 def load_asset_cache(entries: dict[str, dict[str, Any]]) -> None:
     """Prime the conditional-GET cache for a scan."""
@@ -893,6 +942,7 @@ def load_asset_cache(entries: dict[str, dict[str, Any]]) -> None:
     _asset_cache_in.update(entries or {})
     _asset_cache_out.clear()
     _asset_cache_hits.clear()
+    _asset_redirect_alias.clear()
 
 
 def cached_clean_count() -> int:
@@ -921,9 +971,15 @@ def _usable_body(body: str | None) -> bool:
 
 def mark_asset_dirty(url: str) -> None:
     """Record that `url` yielded a finding, so a future 304 refetches it
-    instead of skipping — a finding must never silently vanish."""
-    if url in _asset_cache_out:
-        _asset_cache_out[url]["was_clean"] = False
+    instead of skipping — a finding must never silently vanish.
+
+    `url` may be either the URL requested or the URL that answered after a
+    redirect, because callers hold the latter. Resolve through the alias map so
+    a redirected asset's entry is marked too.
+    """
+    key = url if url in _asset_cache_out else _asset_redirect_alias.get(url, url)
+    if key in _asset_cache_out:
+        _asset_cache_out[key]["was_clean"] = False
 
 
 def _backoff_delay(attempt: int) -> float:
@@ -1000,7 +1056,12 @@ def build_client(user_agent: str | None = None) -> httpx.AsyncClient:
         http2 = False
     return httpx.AsyncClient(
         timeout=httpx.Timeout(FETCH_TIMEOUT, connect=10.0),
-        follow_redirects=True,
+        # Redirects are followed by `_get_following_redirects`, one hop at a
+        # time, with every hop validated. httpx's own follow_redirects=True
+        # resolves and connects internally, which leaves no seam to check an
+        # address at — so a 302 to 169.254.169.254 was simply followed, and the
+        # instance-metadata response was scanned for credentials. See netguard.
+        follow_redirects=False,
         http2=http2,
         limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
         headers=_browser_headers(ua),
@@ -1028,6 +1089,67 @@ def _looks_scannable(content_type: str) -> bool:
     }
 
 
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+
+
+async def _get_following_redirects(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str] | None,
+    broadcast: Broadcaster | None = None,
+) -> tuple[httpx.Response, str]:
+    """GET `url`, following redirects one validated hop at a time.
+
+    Returns ``(response, final_url)``. Raises `netguard.BlockedTarget` if any hop
+    is refused — the caller turns that into a logged, non-fatal skip for that
+    asset, because one refused redirect must not abort a whole scan.
+
+    Hops are walked here rather than by httpx because httpx resolves and
+    connects internally: with ``follow_redirects=True`` there is no point at
+    which the next hop's address can be inspected before the request goes out.
+    Checking the chain afterwards is not equivalent — by then the request has
+    already been made, which for an internal address is the entire harm.
+
+    A 303, and a 301/302 answering anything other than GET/HEAD, become a GET by
+    specification. Everything this scanner issues is already a GET, so the rule
+    is noted rather than implemented: there is no method to downgrade.
+    """
+    current = url
+    for hop in range(netguard.MAX_REDIRECTS + 1):
+        response = await client.get(current, headers=headers)
+        if response.status_code not in _REDIRECT_CODES:
+            return response, current
+
+        location = response.headers.get("location")
+        if not location:
+            # A redirect status with no Location is a broken server, not a
+            # redirect. Hand back the response as-is and let the ordinary
+            # status handling deal with it.
+            return response, current
+
+        # Resolve against the hop we are on, which is what a browser does.
+        # Scope, though, is judged against the URL originally requested — see
+        # check_redirect_hop for why chaining scope hop-to-hop is unsafe.
+        nxt = urljoin(current, location.strip())
+        netguard.check_redirect_hop(url, nxt, enforce_scope=SCOPE_SAME_DOMAIN)
+
+        if hop >= netguard.MAX_REDIRECTS:
+            raise netguard.BlockedTarget(
+                f"Redirect chain exceeded {netguard.MAX_REDIRECTS} hops starting at {url} "
+                "— treating as a loop."
+            )
+        if broadcast:
+            await broadcast({
+                "type": "log", "level": "INFO",
+                "message": f"Redirect {response.status_code}: {current} → {nxt}",
+            })
+        current = nxt
+
+    # Unreachable: the loop either returns a response or raises. Kept explicit
+    # so a future edit to the bounds cannot fall out of the function with None.
+    raise netguard.BlockedTarget(f"Redirect handling fell through for {url}")
+
+
 async def fetch_url(
     client: httpx.AsyncClient,
     url: str,
@@ -1043,7 +1165,15 @@ async def fetch_url(
     Resilience for authorized testing (v2.4.0): on a WAF/CDN challenge
     (401/403/406/429/503) we retry with a different browser fingerprint before
     giving up, and emit a diagnostic that names the likely cause instead of a
-    bare "failed". Respects 429 Retry-After. Returns (url, body) or (url, None).
+    bare "failed". Respects 429 Retry-After.
+
+    Returns ``(final_url, body)`` or ``(final_url, None)``. The first element is
+    the URL that **answered**, which after a redirect is not the URL requested.
+    Returning the requested URL, as this did before, mis-stated provenance in
+    two ways that both reach the client's report: a finding served from the
+    redirect's destination was attributed to the original host, and relative
+    asset URLs in a redirected page were resolved against the pre-redirect base,
+    producing 404s and a quietly under-covered scan.
 
     `allow_cache_skip=False` still sends the conditional GET and still records
     the validators, but never returns CACHED_CLEAN — the caller gets a real
@@ -1095,7 +1225,14 @@ async def fetch_url(
                     if len(cond) > len(extra_headers or {}):
                         extra_headers = cond
 
-                response = await client.get(url, headers=extra_headers)
+                response, final_url = await _get_following_redirects(
+                    client, url, extra_headers, broadcast
+                )
+                if final_url != url:
+                    # Keep the cache keyed on the requested URL (the stable key
+                    # discovery will produce again next scan) while callers work
+                    # with the URL that answered.
+                    _asset_redirect_alias[final_url] = url
 
                 if response.status_code == 304:
                     _throttle_reward(host)
@@ -1103,7 +1240,7 @@ async def fetch_url(
                         # Unchanged and previously clean -> nothing to re-scan.
                         _cout[url] = dict(entry)
                         _asset_cache_hits.add(url)
-                        return url, CACHED_CLEAN
+                        return final_url, CACHED_CLEAN
                     # Either the asset yielded a finding last time, or the server
                     # sent 304 unprompted. Both need the body: a finding that
                     # vanished from a report reads as "resolved", which would be
@@ -1112,13 +1249,17 @@ async def fetch_url(
                     # RETRY_ATTEMPTS=1 the refetch never happens and the asset is
                     # silently lost.
                     revalidate = False
-                    response = await client.get(
-                        url, headers=extract_headers_without_validators(extra_headers)
+                    response, final_url = await _get_following_redirects(
+                        client, url,
+                        extract_headers_without_validators(extra_headers),
+                        broadcast,
                     )
+                    if final_url != url:
+                        _asset_redirect_alias[final_url] = url
                     if response.status_code == 304:
                         # Server insists nothing changed even unconditionally —
                         # treat as unreachable rather than spin.
-                        return url, None
+                        return final_url, None
 
                 if response.status_code == 429:
                     retry_after = _parse_retry_after(
@@ -1138,7 +1279,7 @@ async def fetch_url(
                     continue
 
                 if response.status_code in (404, 410):
-                    return url, None
+                    return final_url, None
 
                 if response.status_code in _WAF_BLOCK_CODES:
                     waf_block_status = response.status_code
@@ -1168,13 +1309,23 @@ async def fetch_url(
                                 f"scanner's source IP or set SECRETNODE_USER_AGENT to an approved value."
                             ),
                         })
-                    return url, None
+                    return final_url, None
 
                 response.raise_for_status()
                 # Clean response — let this host's pacing relax back toward zero.
                 _throttle_reward(host)
 
-                cl = int(response.headers.get("content-length", 0))
+                # A malformed or duplicated Content-Length ("512, 512", as some
+                # proxies emit) raised ValueError here, which the catch-all
+                # handler below turned into a silent asset drop with no retry —
+                # an unread asset is an unscanned asset, and the scan still
+                # reported CLEAN. The body-size cap below already bounds what we
+                # read, so an unparseable header is a reason to fall through to
+                # it, not to abandon the asset.
+                try:
+                    cl = int(response.headers.get("content-length", 0) or 0)
+                except (TypeError, ValueError):
+                    cl = 0
                 if cl > MAX_ASSET_BYTES:
                     if broadcast:
                         await broadcast({
@@ -1182,10 +1333,10 @@ async def fetch_url(
                             "level": "WARN",
                             "message": f"Skipping oversized asset ({cl/1024/1024:.1f} MB): {url}",
                         })
-                    return url, None
+                    return final_url, None
 
                 if not _looks_scannable(response.headers.get("content-type", "")):
-                    return url, None
+                    return final_url, None
 
                 # Guard against a chunked/undeclared body that exceeds the cap.
                 text = response.text
@@ -1205,7 +1356,7 @@ async def fetch_url(
                             # corrects this once the asset has been scanned.
                             "was_clean": True,
                         }
-                return url, text
+                return final_url, text
 
             except httpx.TimeoutException:
                 msg = f"Timeout (attempt {attempt}/{RETRY_ATTEMPTS}): {url}"
@@ -1218,6 +1369,19 @@ async def fetch_url(
                 logger.warning(msg)
                 if broadcast:
                     await broadcast({"type": "log", "level": "WARN", "message": msg})
+
+            except netguard.BlockedTarget as exc:
+                # A refused hop is a skipped asset, never an aborted scan: one
+                # bad redirect on one bundle must not cost the whole engagement.
+                # It is logged at ERROR rather than swallowed, because this is
+                # the branch where coverage is deliberately given up, and a
+                # coverage loss nobody is told about is how a scan that read
+                # almost nothing still reports CLEAN.
+                msg = f"Refused to follow redirect from {url} — {exc}"
+                logger.error(msg)
+                if broadcast:
+                    await broadcast({"type": "log", "level": "ERROR", "message": msg})
+                return url, None
 
             except httpx.HTTPStatusError as exc:
                 msg = f"HTTP {exc.response.status_code} for {url}"
@@ -1288,6 +1452,12 @@ MAX_SOURCEMAP_SOURCES  = _env_int("MAX_SOURCEMAP_SOURCES", 200)
 # version disclosure, insecure cookies) on the target root. Pure analysis of the
 # response the target already serves — no exploitation, no third-party calls.
 SCAN_HTTP_POSTURE = os.environ.get("SCAN_HTTP_POSTURE", "true").lower() == "true"
+# R7: composite/proximity rules. A keyword-anchored detector (AWS Secret Access
+# Key, Twilio Auth Token) needs the provider's name beside the value, and
+# minification deletes it — so the shipped bundle keeps the credential and loses
+# the word the regex anchors on. Composite rules use a nearby high-precision
+# anchor (AKIA…, AC+32hex) to supply the identity instead. See composite.py.
+SCAN_COMPOSITE = os.environ.get("SCAN_COMPOSITE", "true").lower() == "true"
 
 
 def _same_scope(base_host: str, candidate_host: str) -> bool:
@@ -1724,11 +1894,20 @@ async def spider_target(
     html_pages: list[tuple[str, str]] = [(root_url, html_body)]
     visited_pages: set[str] = {root_url}
     scope_rejected: list[str] = []
-    all_js_urls: set[str] = set(extract_js_urls(html_body, target_url, scope_rejected))
+    # Relative URLs in the root document resolve against the URL that ANSWERED,
+    # not the one that was asked for. `https://example.com` answering as
+    # `https://example.com/en/` means `src="app.js"` is `/en/app.js`; resolving
+    # it against the pre-redirect base produced `/app.js`, a 404, and a bundle
+    # that silently never entered the scan. Every redirecting target — an apex
+    # sending traffic to `www`, a locale prefix, a trailing-slash normalisation —
+    # was losing coverage this way, and nothing in the output said so.
+    all_js_urls: set[str] = set(extract_js_urls(html_body, root_url, scope_rejected))
 
     # ── Shallow same-domain crawl for additional HTML pages ─────────────────
     if max_pages > 1:
-        queue = [u for u in extract_page_links(html_body, target_url) if u not in visited_pages]
+        # Same reason as the asset base above: link hrefs resolve against the
+        # URL that answered.
+        queue = [u for u in extract_page_links(html_body, root_url) if u not in visited_pages]
         while queue and len(visited_pages) < max_pages:
             batch = queue[: max_pages - len(visited_pages)]
             queue = queue[len(batch):]
@@ -1924,6 +2103,56 @@ def _scan_text(
     return findings
 
 
+# Secret types that reached a finding through a composite rule rather than
+# through their own detector. Used by `_collapse_duplicates` to rank a composite
+# claim below a real detector's claim on the same value.
+COMPOSITE_TYPES: frozenset[str] = frozenset(r.name for r in composite.COMPOSITE_RULES)
+
+
+def _scan_composites(
+    scan_id: str, target_url: str, source_url: str, text: str,
+) -> list[RawFinding]:
+    """Findings a single regex cannot reach — see composite.py.
+
+    Every existing gate still applies. The composite rule supplies an *identity*
+    for a value whose own shape carries none; it is not a licence to skip the
+    placeholder allowlist or the entropy floor, and skipping them is how a
+    proximity rule turns into a false-positive engine.
+
+    The entropy floor used is the structural one, not the generic one: a value
+    that an AKIA vouches for is anchored by shape in the same sense a provider
+    prefix is, so holding it to the loose-match bar would drop genuinely
+    modest-entropy live keys for no gain.
+    """
+    if not SCAN_COMPOSITE:
+        return []
+    out: list[RawFinding] = []
+    for cm in composite.find_composites(text):
+        if is_benign_placeholder(cm.value):
+            continue
+        entropy = shannon_entropy(cm.value)
+        if entropy < MIN_STRUCTURAL_ENTROPY:
+            continue
+        start = max(0, cm.start - CONTEXT_WINDOW_CHARS)
+        end = min(len(text), cm.end + CONTEXT_WINDOW_CHARS)
+        snippet = text[start:end].replace("\n", " ").strip()
+        out.append(RawFinding(
+            scan_id=scan_id,
+            target_url=target_url,
+            source_url=source_url,
+            secret_type=cm.secret_type,
+            raw_match=cm.value,
+            # The rationale travels with the finding because a report otherwise
+            # has no way to explain why a shapeless 40-character string was
+            # called an AWS secret key. "Proximity to an AKIA ID" is the whole
+            # justification, and a finding that cannot show its reasoning is one
+            # an analyst is right to distrust.
+            context_snippet=f"[composite: {cm.rationale}] {snippet}",
+            entropy=entropy,
+        ))
+    return out
+
+
 def extract_secrets(
     scan_id: str,
     target_url: str,
@@ -1931,6 +2160,8 @@ def extract_secrets(
     text: str,
 ) -> list[RawFinding]:
     findings = _scan_text(scan_id, target_url, source_url, text)
+    # R7: values that only become identifiable because of what sits next to them.
+    findings.extend(_scan_composites(scan_id, target_url, source_url, text))
     # Also inspect base64-decoded blobs for secrets hidden inside encoded strings.
     for decoded in _decode_base64_blobs(text):
         findings.extend(_scan_text(scan_id, target_url, source_url, decoded, decoded=True))
@@ -1952,7 +2183,7 @@ def extract_secrets(
             continue
         seen.add(fp)
         unique.append(f)
-    return _collapse_generic_duplicates(unique)
+    return _collapse_duplicates(unique)
 
 
 def scan_asset(
@@ -1977,31 +2208,59 @@ def scan_asset(
     return [(source_url, extract_secrets(scan_id, target_url, source_url, body))]
 
 
-def _collapse_generic_duplicates(findings: list[RawFinding]) -> list[RawFinding]:
+def _claim_rank(secret_type: str) -> int:
+    """How authoritative a detector's claim on a value is. Higher wins.
+
+    2 — a provider detector matched the value by its own shape. Most specific:
+        it knows the provider, so it carries the right severity and the right
+        remediation text.
+    1 — a composite rule inferred the value's identity from a neighbouring
+        anchor. Correct often enough to be worth having, but it is a fallback
+        for what the registry missed, never a second opinion on what it caught.
+    0 — the generic keyword=value catch-all. Matched loosely; knows nothing
+        about the provider.
+    """
+    if secret_type == GENERIC_SECRET_TYPE:
+        return 0
+    return 1 if secret_type in COMPOSITE_TYPES else 2
+
+
+def _collapse_duplicates(findings: list[RawFinding]) -> list[RawFinding]:
     """Collapse one credential matched by several detectors into a single finding.
 
     The generic keyword=value catch-all matches loosely and therefore also fires on
     secrets a provider-specific detector already typed precisely. Reporting both is
     wrong three ways: it double-counts the exposure in client reports, spends a
     second AI-validation call on the same string, and leaves two conflicting
-    severities for one credential.
+    severities for one credential. R7's composite rules create the same collision
+    from the other direction — an AWS secret key that the keyword-anchored detector
+    *did* manage to see would also be claimed by the AKIA-proximity rule.
 
     Identity here is (source_url, raw_match) — the same value at the same location.
-    When several detectors claim it, the typed/structural one wins over the generic
-    catch-all, because it carries the accurate severity and provider-specific
-    remediation. Order is otherwise preserved.
+    The most authoritative claim on that value wins; order is otherwise preserved.
     """
-    typed_locations = {
-        (f.source_url, f.raw_match)
-        for f in findings
-        if f.secret_type != GENERIC_SECRET_TYPE
-    }
-    return [
-        f
-        for f in findings
-        if f.secret_type != GENERIC_SECRET_TYPE
-        or (f.source_url, f.raw_match) not in typed_locations
-    ]
+    best: dict[tuple[str, str], int] = {}
+    for f in findings:
+        key = (f.source_url, f.raw_match)
+        rank = _claim_rank(f.secret_type)
+        if rank > best.get(key, -1):
+            best[key] = rank
+
+    kept: list[RawFinding] = []
+    seen: set[tuple[str, str]] = set()
+    for f in findings:
+        key = (f.source_url, f.raw_match)
+        if _claim_rank(f.secret_type) < best[key] or key in seen:
+            continue
+        seen.add(key)
+        kept.append(f)
+    return kept
+
+
+# Retained under its original name: the v2.x tests and the benchmark harness
+# import it directly, and renaming a function is not a behaviour change worth
+# breaking a caller over.
+_collapse_generic_duplicates = _collapse_duplicates
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2105,16 +2364,48 @@ def _describe_ai_config_error(code: object, exc: Exception) -> str:
 
 def _ai_skipped(finding: RawFinding, reason: str) -> ValidatedFinding:
     """AI unavailable for a configuration reason (no key / rejected key / missing
-    model). The finding is returned unvalidated (confidence 50) rather than flooding
-    needs-review with one scary item per finding — the root cause is surfaced once.
+    model). The root cause is surfaced once, not once per finding.
 
     `ai_judged=False` is what makes "unvalidated" mean it: without it,
     classify_validated read confidence 50 as an ordinary weak verdict, sent
     structural findings to review and *dropped* every entropy-gated one. Running
     with no Gemini key is the documented offline mode, so the default
-    configuration was silently discarding every `apiKey = "…"` finding."""
-    return ValidatedFinding(raw=finding, is_valid=True, confidence=50,
-                            reason=reason, ai_judged=False)
+    configuration was silently discarding every `apiKey = "…"` finding.
+
+    What it returned instead — is_valid=True, confidence=50, no impact, no
+    public-by-design call — kept every finding, but it is not a verdict. It is
+    the absence of one, identical for an AWS secret key and for a Stripe
+    publishable key, and the operator got both in the same undifferentiated
+    queue with nothing said about either. `triage` renders a real deterministic
+    verdict here instead: known-public values are dismissed with the same
+    confidence the AI tier would use, generic noise from test scaffolding is
+    dismissed, and everything retained carries a blast-radius sentence.
+
+    `ai_judged` stays False regardless, because it is a statement of fact about
+    which tier judged this, and the report says "triaged offline" rather than
+    implying a model looked at it. What changed is that the offline tier now has
+    something to say.
+    """
+    meta = PATTERN_BY_NAME.get(finding.secret_type)
+    verdict = triage.triage(
+        secret_type=finding.secret_type,
+        raw_match=finding.raw_match,
+        context_snippet=finding.context_snippet,
+        entropy=finding.entropy,
+        severity=meta.severity if meta else "MEDIUM",
+        structural=(meta is not None and not meta.entropy_gated),
+        source_url=finding.source_url,
+    )
+    return ValidatedFinding(
+        raw=finding,
+        is_valid=verdict.is_valid,
+        confidence=verdict.confidence,
+        reason=f"{reason} Offline triage: {verdict.reason}",
+        impact=verdict.impact,
+        public_by_design=verdict.public_by_design,
+        ai_judged=False,
+        offline_triaged=True,
+    )
 
 
 async def _call_tier(
@@ -2442,18 +2733,56 @@ class ScanState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def classify_validated(v: "ValidatedFinding") -> str:
-    """Route a validated finding to exactly one of: 'confirmed', 'review', 'drop'.
+    """Route a validated finding to exactly one of: 'confirmed', 'review',
+    'informational', 'drop'.
 
-    The critical rule is the last one: a *structural/provider* match (high-precision
-    by shape — AKIA…, ghp_…, sk_live_…, PEM) that the AI did **not confidently
-    dismiss** is sent to manual review, never silently dropped. Without this, a real
-    live key the AI merely under-called on (e.g. because a page gave it no
-    surrounding context) would vanish with no trace — a false negative, the worst
-    failure mode for a scanner. The generic keyword=value catch-all keeps the old
-    aggressive behaviour (an AI 'no' there is trusted and dropped), preserving the
-    'no false positives in Confirmed' promise."""
-    if v.confidence == NEEDS_REVIEW_SENTINEL or not v.ai_judged:
-        return "review"                                    # AI unavailable — human decides
+    The critical rule is the structural one: a *structural/provider* match
+    (high-precision by shape — AKIA…, ghp_…, sk_live_…, PEM) that was **not
+    confidently dismissed** is sent to manual review, never silently dropped.
+    Without this, a real live key a tier merely under-called on (e.g. because a
+    page gave it no surrounding context) would vanish with no trace — a false
+    negative, the worst failure mode for a scanner. The generic keyword=value
+    catch-all keeps the aggressive behaviour (a confident 'no' there is trusted
+    and dropped), preserving the 'no false positives in Confirmed' promise.
+
+    'informational' is public-by-design: a Stripe pk_, a Sentry DSN, a Firebase
+    web apiKey. These used to route to 'drop', because a public-by-design verdict
+    is a confident dismissal and confident dismissals were deleted. Two things
+    said that was wrong. `effective_severity()` exists for the sole purpose of
+    downgrading such a finding to INFO, and nothing reaching it could survive
+    routing — so the method was unreachable. And the ground-truth corpus declares
+    a `public` class whose contract is "must be detected AND classified
+    public-by-design", which deletion does not satisfy; the HTTP benchmark scored
+    exactly those three specimens as false negatives.
+
+    Reporting them is also the better client outcome. Silently deleting a Stripe
+    publishable key leaves the reader unable to tell whether the scanner examined
+    it and cleared it or never saw it at all. An INFO line saying "found, public
+    by design, no action needed" is evidence of thoroughness. It is emphatically
+    NOT the same as reporting it as an exposure: informational findings raise no
+    alert, are never live-verified, and carry INFO severity.
+    """
+    if v.confidence == NEEDS_REVIEW_SENTINEL:
+        return "review"                                    # no verdict — human decides
+    if v.public_by_design:
+        return "informational"
+    if not v.ai_judged:
+        # No model judged this. Either the deterministic tier did, or nothing did.
+        if not v.offline_triaged:
+            return "review"
+        if v.is_valid:
+            # Triage retains but never confirms: a rules engine that has not seen
+            # the credential work has no business putting a finding under a
+            # heading that reads "confirmed". Live verification is what promotes
+            # one, on the provider's own evidence rather than on an opinion.
+            return "review"
+        if v.confidence >= GEMINI_CONFIDENCE_MIN:
+            return "drop"      # confidently not an exposure (public by design, test scaffolding)
+        # A hedged offline dismissal is not grounds to discard anything. The
+        # asymmetry is the whole point: a wrong confirmation wastes an
+        # afternoon, a wrong dismissal is the failure this tool exists to
+        # prevent. Anything short of certain goes to a human.
+        return "review"
     if v.is_valid and v.confidence >= GEMINI_CONFIDENCE_MIN:
         return "confirmed"
     meta = PATTERN_BY_NAME.get(v.raw.secret_type)
@@ -2582,6 +2911,10 @@ async def run_scan(
         "validated_findings": 0,
         "confirmed_findings": [],
         "needs_review_findings": [],
+        # Public-by-design values (Stripe pk_, Sentry DSN, Firebase web apiKey).
+        # Reported at INFO so the client can see the scanner examined them and
+        # cleared them, rather than being unable to tell whether it looked.
+        "informational_findings": [],
         "suppressed_count":   0,
         "new_findings_count": 0,
         "recurring_findings_count": 0,
@@ -2824,12 +3157,16 @@ async def run_scan(
         _routed = [(classify_validated(v), v) for v in validated]
         confirmed: list[ValidatedFinding] = [v for b, v in _routed if b == "confirmed"]
         needs_review: list[ValidatedFinding] = [v for b, v in _routed if b == "review"]
+        informational: list[ValidatedFinding] = [v for b, v in _routed if b == "informational"]
 
         # ── Suppress known false positives ──────────────────────────────
         if suppressed_fingerprints:
             pre_suppress = len(confirmed)
             confirmed = [v for v in confirmed if v.raw.fingerprint not in suppressed_fingerprints]
             needs_review = [v for v in needs_review if v.raw.fingerprint not in suppressed_fingerprints]
+            informational = [
+                v for v in informational if v.raw.fingerprint not in suppressed_fingerprints
+            ]
             result["suppressed_count"] = pre_suppress - len(confirmed)
             if result["suppressed_count"]:
                 await emit({
@@ -2837,7 +3174,76 @@ async def run_scan(
                     "message": f"Suppressed {result['suppressed_count']} finding(s) previously marked as false positive.",
                 })
 
+        # ── 3b. Optional live verification (off by default) ─────────────────
+        # Read-only "is this credential still active?" checks against each
+        # secret's own provider (never the target). Eliminates dead-key noise.
+        #
+        # This runs BEFORE the scan-to-scan diff, because it can change which
+        # bucket a finding is in and the diff has to describe the final answer.
+        do_verify = VERIFY_SECRETS if verify is None else verify
+
+        # Review findings with a verifier are checked too, not just confirmed
+        # ones. A provider answering "yes, this key works" is the strongest
+        # evidence this tool can obtain — stronger than any model's opinion,
+        # because it is an observation rather than a judgement. Leaving that
+        # evidence ungathered for exactly the findings nobody could judge was
+        # backwards, and it made the offline mode structurally incapable of
+        # confirming anything: with no Gemini key every finding lands in review,
+        # review was never verified, so the Confirmed table was always empty no
+        # matter how many live credentials the scan had actually found.
+        verifiable_review = [
+            v for v in needs_review if verifier.is_supported(v.raw.secret_type)
+        ] if do_verify else []
+
+        to_verify = confirmed + verifiable_review
+        if do_verify and to_verify:
+            await emit({"type": "status", "stage": "verifying", "total": len(to_verify)})
+            await emit({
+                "type": "log", "level": "WARN",
+                "message": (
+                    f"[VERIFY] Live-verifying {len(confirmed)} confirmed"
+                    + (f" and {len(verifiable_review)} needs-review" if verifiable_review else "")
+                    + " finding(s) against provider APIs (read-only). Authorized use only."
+                ),
+            })
+            await verify_confirmed_findings(to_verify, client, state, semaphore)
+
+            # Promote on evidence. A verified-active credential is confirmed by
+            # the provider itself; it does not also need a model to agree.
+            promoted = [v for v in verifiable_review if v.verified == "verified"]
+            if promoted:
+                confirmed = confirmed + promoted
+                promoted_fps = {v.raw.fingerprint for v in promoted}
+                needs_review = [v for v in needs_review if v.raw.fingerprint not in promoted_fps]
+                result["promoted_by_verification_count"] = len(promoted)
+                await emit({
+                    "type": "log", "level": "ERROR",
+                    "message": (
+                        f"[VERIFY] {len(promoted)} needs-review finding(s) confirmed ACTIVE by "
+                        f"the provider — promoted to confirmed on evidence."
+                    ),
+                })
+
+            result["verified_count"]   = sum(1 for v in confirmed if v.verified == "verified")
+            result["unverified_count"] = sum(1 for v in confirmed if v.verified == "unverified")
+            await emit({
+                "type": "log",
+                "level": "ERROR" if result["verified_count"] else "INFO",
+                "message": (
+                    f"[VERIFY] {result['verified_count']} ACTIVE, "
+                    f"{result['unverified_count']} inactive/unconfirmed, "
+                    f"{sum(1 for v in confirmed if v.verified == 'unsupported')} unsupported"
+                ),
+            })
+            if only_verified:
+                # Keep verified + unsupported (can't auto-check); drop confirmed-inactive.
+                before = len(confirmed)
+                confirmed = [v for v in confirmed if v.verified != "unverified"]
+                result["filtered_unverified_count"] = before - len(confirmed)
+
         # ── Diff against the previous scan of this same target ─────────────
+        # After verification, so a finding promoted on live evidence is diffed
+        # like any other confirmed finding rather than missing from the counts.
         for v in confirmed:
             v.is_new = v.raw.fingerprint not in known_fingerprints
         result["new_findings_count"] = sum(1 for v in confirmed if v.is_new)
@@ -2855,47 +3261,14 @@ async def run_scan(
         await emit({
             "type": "log", "level": "INFO",
             "message": (
-                f"AI validation done — {len(confirmed)}/{len(all_raw)} confirmed "
+                f"Validation done — {len(confirmed)}/{len(all_raw)} confirmed "
                 f"(confidence ≥ {GEMINI_CONFIDENCE_MIN}%)"
                 + (f", {len(needs_review)} flagged for manual review" if needs_review else "")
+                + (f", {len(informational)} public-by-design (INFO)" if informational else "")
             ),
         })
 
-        # ── 3b. Optional live verification (off by default) ─────────────────
-        # Read-only "is this credential still active?" checks against each
-        # secret's own provider (never the target). Eliminates dead-key noise.
-        do_verify = VERIFY_SECRETS if verify is None else verify
-        if do_verify and confirmed:
-            await emit({"type": "status", "stage": "verifying", "total": len(confirmed)})
-            await emit({
-                "type": "log", "level": "WARN",
-                "message": (
-                    f"[VERIFY] Live-verifying {len(confirmed)} confirmed finding(s) against "
-                    f"provider APIs (read-only). Authorized use only."
-                ),
-            })
-            await verify_confirmed_findings(confirmed, client, state, semaphore)
-            result["verified_count"]   = sum(1 for v in confirmed if v.verified == "verified")
-            result["unverified_count"] = sum(1 for v in confirmed if v.verified == "unverified")
-            await emit({
-                "type": "log",
-                "level": "ERROR" if result["verified_count"] else "INFO",
-                "message": (
-                    f"[VERIFY] {result['verified_count']} ACTIVE, "
-                    f"{result['unverified_count']} inactive/unconfirmed, "
-                    f"{sum(1 for v in confirmed if v.verified == 'unsupported')} unsupported"
-                ),
-            })
-            if only_verified:
-                # Keep verified + unsupported (can't auto-check); drop confirmed-inactive.
-                before = len(confirmed)
-                confirmed = [v for v in confirmed if v.verified != "unverified"]
-                result["filtered_unverified_count"] = before - len(confirmed)
-                # keep new/recurring counts consistent with the filtered set
-                result["new_findings_count"] = sum(1 for v in confirmed if v.is_new)
-                result["recurring_findings_count"] = len(confirmed) - result["new_findings_count"]
-
-        # ── 4. Broadcast Confirmed + Needs-Review Findings ────────────────
+        # ── 4. Broadcast Confirmed + Needs-Review + Informational ─────────
         for vf in confirmed:
             await emit({
                 "type": "finding",
@@ -2904,6 +3277,16 @@ async def run_scan(
         for vf in needs_review:
             await emit({
                 "type": "finding_needs_review",
+                "data": vf.to_dict(),
+            })
+        # Emitted at INFO, and deliberately without a toast: a public-by-design
+        # value needs no attention, and an alert that needs no action is how an
+        # operator learns to dismiss alerts. It belongs in the log so the run is
+        # legible after the fact, and in the report so the client can see it was
+        # examined.
+        for vf in informational:
+            await emit({
+                "type": "finding_informational",
                 "data": vf.to_dict(),
             })
 
@@ -2933,6 +3316,7 @@ async def run_scan(
         # ── 6. Finalise ────────────────────────────────────────────────────
         result["confirmed_findings"]    = [vf.to_dict() for vf in confirmed]
         result["needs_review_findings"] = [vf.to_dict() for vf in needs_review]
+        result["informational_findings"] = [vf.to_dict() for vf in informational]
         result["status"]             = "complete"
         result["duration_seconds"]   = round(time.monotonic() - t0, 2)
 

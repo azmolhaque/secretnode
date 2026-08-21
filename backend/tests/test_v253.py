@@ -80,8 +80,12 @@ async def test_invalid_key_fails_fast_no_retry(monkeypatch):
 async def test_invalid_key_returns_skipped_not_needs_review(monkeypatch):
     _wire(monkeypatch, _invalid_key())
     r = await scanner.validate_with_gemini(_raw(1), broadcast=None)
-    assert r.confidence == 50                       # skipped/unvalidated, not…
+    # Was `== 50`, the placeholder confidence that stood in for an unrendered
+    # verdict. Offline triage now scores the finding on its merits; what the test
+    # is really pinning is that a config error degrades to unvalidated-but-kept,
+    # never to needs-review and never to a drop.
     assert r.confidence != scanner.NEEDS_REVIEW_SENTINEL
+    assert r.ai_judged is False
     assert r.is_valid is True
     assert "rejected" in r.reason.lower() or "invalid" in r.reason.lower()
     assert "aistudio.google.com" in r.reason        # actionable guidance
@@ -103,7 +107,8 @@ async def test_ai_disabled_latch_short_circuits_rest_of_scan(monkeypatch):
 async def test_model_not_found_reports_model_guidance(monkeypatch):
     _wire(monkeypatch, genai_errors.ClientError(404, {"error": {"code": 404, "message": "model not found"}}))
     r = await scanner.validate_with_gemini(_raw(1), broadcast=None)
-    assert r.confidence == 50
+    assert r.confidence != scanner.NEEDS_REVIEW_SENTINEL
+    assert r.ai_judged is False
     assert "model" in r.reason.lower()
 
 

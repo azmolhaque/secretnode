@@ -1381,6 +1381,13 @@
           appendLog(`NEEDS REVIEW (AI validation failed): ${nr.secret_type} in ${nr.source_url || nr.target_url} — ${nr.reason}`, 'ERROR');
           break;
 
+        case 'finding_informational':
+          // No toast on purpose. This is a value that needs no action, and an
+          // alert that needs no action teaches an operator to ignore alerts.
+          const inf = msg.data;
+          appendLog(`PUBLIC BY DESIGN (no action needed): ${inf.secret_type} in ${inf.source_url || inf.target_url} — ${inf.reason}`, 'INFO');
+          break;
+
         case 'scan_complete':
           // In a deep scan this fires once PER HOST — don't finalise the UI or
           // disconnect; just note the host finished. deep_scan_complete ends it.
