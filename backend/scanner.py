@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, ValidationError
 import netguard
 import posture
 import surface
+import triage
 import verifier
 import version
 
@@ -216,6 +217,11 @@ class ValidatedFinding:
     # key, missing model). Distinct from "the AI said it is fake": there is no
     # verdict to trust, so routing must not act as though there were one.
     ai_judged: bool = True
+    # True when `triage` rendered a deterministic verdict for this finding.
+    # Distinct from ai_judged, and both can be False: that combination means no
+    # tier reached a conclusion at all, which is the only case that must go to a
+    # human on the grounds of ignorance rather than on the grounds of evidence.
+    offline_triaged: bool = False
     verified: str = "disabled"  # live-verification status: verified/unverified/unsupported/disabled
     verified_detail: str = ""   # identity/scope of a VERIFIED credential (R1) — never the secret itself
     impact: str = ""            # AI blast-radius statement: what an attacker could actually do
@@ -265,7 +271,19 @@ class ValidatedFinding:
             "severity":       self.effective_severity(),
             "cwe":            self._meta().cwe,
             "remediation":    self._meta().remediation,
+            # Which tier actually reached this verdict. A report that shows a
+            # confidence number without saying who produced it invites the
+            # reader to assume the strongest available tier ran, and for an
+            # offline scan that assumption is wrong. Naming the tier is the
+            # difference between a measurement and an unlabelled number.
+            "validation_tier": self.validation_tier(),
         }
+
+    def validation_tier(self) -> str:
+        """'ai', 'offline-triage', or 'none'."""
+        if self.ai_judged:
+            return "ai"
+        return "offline-triage" if self.offline_triaged else "none"
 
     def _meta(self) -> "SecretPattern":
         """Look up the registry metadata (severity/CWE/remediation) for this
@@ -2244,16 +2262,48 @@ def _describe_ai_config_error(code: object, exc: Exception) -> str:
 
 def _ai_skipped(finding: RawFinding, reason: str) -> ValidatedFinding:
     """AI unavailable for a configuration reason (no key / rejected key / missing
-    model). The finding is returned unvalidated (confidence 50) rather than flooding
-    needs-review with one scary item per finding — the root cause is surfaced once.
+    model). The root cause is surfaced once, not once per finding.
 
     `ai_judged=False` is what makes "unvalidated" mean it: without it,
     classify_validated read confidence 50 as an ordinary weak verdict, sent
     structural findings to review and *dropped* every entropy-gated one. Running
     with no Gemini key is the documented offline mode, so the default
-    configuration was silently discarding every `apiKey = "…"` finding."""
-    return ValidatedFinding(raw=finding, is_valid=True, confidence=50,
-                            reason=reason, ai_judged=False)
+    configuration was silently discarding every `apiKey = "…"` finding.
+
+    What it returned instead — is_valid=True, confidence=50, no impact, no
+    public-by-design call — kept every finding, but it is not a verdict. It is
+    the absence of one, identical for an AWS secret key and for a Stripe
+    publishable key, and the operator got both in the same undifferentiated
+    queue with nothing said about either. `triage` renders a real deterministic
+    verdict here instead: known-public values are dismissed with the same
+    confidence the AI tier would use, generic noise from test scaffolding is
+    dismissed, and everything retained carries a blast-radius sentence.
+
+    `ai_judged` stays False regardless, because it is a statement of fact about
+    which tier judged this, and the report says "triaged offline" rather than
+    implying a model looked at it. What changed is that the offline tier now has
+    something to say.
+    """
+    meta = PATTERN_BY_NAME.get(finding.secret_type)
+    verdict = triage.triage(
+        secret_type=finding.secret_type,
+        raw_match=finding.raw_match,
+        context_snippet=finding.context_snippet,
+        entropy=finding.entropy,
+        severity=meta.severity if meta else "MEDIUM",
+        structural=(meta is not None and not meta.entropy_gated),
+        source_url=finding.source_url,
+    )
+    return ValidatedFinding(
+        raw=finding,
+        is_valid=verdict.is_valid,
+        confidence=verdict.confidence,
+        reason=f"{reason} Offline triage: {verdict.reason}",
+        impact=verdict.impact,
+        public_by_design=verdict.public_by_design,
+        ai_judged=False,
+        offline_triaged=True,
+    )
 
 
 async def _call_tier(
@@ -2591,8 +2641,25 @@ def classify_validated(v: "ValidatedFinding") -> str:
     failure mode for a scanner. The generic keyword=value catch-all keeps the old
     aggressive behaviour (an AI 'no' there is trusted and dropped), preserving the
     'no false positives in Confirmed' promise."""
-    if v.confidence == NEEDS_REVIEW_SENTINEL or not v.ai_judged:
-        return "review"                                    # AI unavailable — human decides
+    if v.confidence == NEEDS_REVIEW_SENTINEL:
+        return "review"                                    # no verdict — human decides
+    if not v.ai_judged:
+        # No model judged this. Either the deterministic tier did, or nothing did.
+        if not v.offline_triaged:
+            return "review"
+        if v.is_valid:
+            # Triage retains but never confirms: a rules engine that has not seen
+            # the credential work has no business putting a finding under a
+            # heading that reads "confirmed". Live verification is what promotes
+            # one, on the provider's own evidence rather than on an opinion.
+            return "review"
+        if v.confidence >= GEMINI_CONFIDENCE_MIN:
+            return "drop"      # confidently not an exposure (public by design, test scaffolding)
+        # A hedged offline dismissal is not grounds to discard anything. The
+        # asymmetry is the whole point: a wrong confirmation wastes an
+        # afternoon, a wrong dismissal is the failure this tool exists to
+        # prevent. Anything short of certain goes to a human.
+        return "review"
     if v.is_valid and v.confidence >= GEMINI_CONFIDENCE_MIN:
         return "confirmed"
     meta = PATTERN_BY_NAME.get(v.raw.secret_type)
@@ -2976,7 +3043,76 @@ async def run_scan(
                     "message": f"Suppressed {result['suppressed_count']} finding(s) previously marked as false positive.",
                 })
 
+        # ── 3b. Optional live verification (off by default) ─────────────────
+        # Read-only "is this credential still active?" checks against each
+        # secret's own provider (never the target). Eliminates dead-key noise.
+        #
+        # This runs BEFORE the scan-to-scan diff, because it can change which
+        # bucket a finding is in and the diff has to describe the final answer.
+        do_verify = VERIFY_SECRETS if verify is None else verify
+
+        # Review findings with a verifier are checked too, not just confirmed
+        # ones. A provider answering "yes, this key works" is the strongest
+        # evidence this tool can obtain — stronger than any model's opinion,
+        # because it is an observation rather than a judgement. Leaving that
+        # evidence ungathered for exactly the findings nobody could judge was
+        # backwards, and it made the offline mode structurally incapable of
+        # confirming anything: with no Gemini key every finding lands in review,
+        # review was never verified, so the Confirmed table was always empty no
+        # matter how many live credentials the scan had actually found.
+        verifiable_review = [
+            v for v in needs_review if verifier.is_supported(v.raw.secret_type)
+        ] if do_verify else []
+
+        to_verify = confirmed + verifiable_review
+        if do_verify and to_verify:
+            await emit({"type": "status", "stage": "verifying", "total": len(to_verify)})
+            await emit({
+                "type": "log", "level": "WARN",
+                "message": (
+                    f"[VERIFY] Live-verifying {len(confirmed)} confirmed"
+                    + (f" and {len(verifiable_review)} needs-review" if verifiable_review else "")
+                    + " finding(s) against provider APIs (read-only). Authorized use only."
+                ),
+            })
+            await verify_confirmed_findings(to_verify, client, state, semaphore)
+
+            # Promote on evidence. A verified-active credential is confirmed by
+            # the provider itself; it does not also need a model to agree.
+            promoted = [v for v in verifiable_review if v.verified == "verified"]
+            if promoted:
+                confirmed = confirmed + promoted
+                promoted_fps = {v.raw.fingerprint for v in promoted}
+                needs_review = [v for v in needs_review if v.raw.fingerprint not in promoted_fps]
+                result["promoted_by_verification_count"] = len(promoted)
+                await emit({
+                    "type": "log", "level": "ERROR",
+                    "message": (
+                        f"[VERIFY] {len(promoted)} needs-review finding(s) confirmed ACTIVE by "
+                        f"the provider — promoted to confirmed on evidence."
+                    ),
+                })
+
+            result["verified_count"]   = sum(1 for v in confirmed if v.verified == "verified")
+            result["unverified_count"] = sum(1 for v in confirmed if v.verified == "unverified")
+            await emit({
+                "type": "log",
+                "level": "ERROR" if result["verified_count"] else "INFO",
+                "message": (
+                    f"[VERIFY] {result['verified_count']} ACTIVE, "
+                    f"{result['unverified_count']} inactive/unconfirmed, "
+                    f"{sum(1 for v in confirmed if v.verified == 'unsupported')} unsupported"
+                ),
+            })
+            if only_verified:
+                # Keep verified + unsupported (can't auto-check); drop confirmed-inactive.
+                before = len(confirmed)
+                confirmed = [v for v in confirmed if v.verified != "unverified"]
+                result["filtered_unverified_count"] = before - len(confirmed)
+
         # ── Diff against the previous scan of this same target ─────────────
+        # After verification, so a finding promoted on live evidence is diffed
+        # like any other confirmed finding rather than missing from the counts.
         for v in confirmed:
             v.is_new = v.raw.fingerprint not in known_fingerprints
         result["new_findings_count"] = sum(1 for v in confirmed if v.is_new)
@@ -2994,45 +3130,11 @@ async def run_scan(
         await emit({
             "type": "log", "level": "INFO",
             "message": (
-                f"AI validation done — {len(confirmed)}/{len(all_raw)} confirmed "
+                f"Validation done — {len(confirmed)}/{len(all_raw)} confirmed "
                 f"(confidence ≥ {GEMINI_CONFIDENCE_MIN}%)"
                 + (f", {len(needs_review)} flagged for manual review" if needs_review else "")
             ),
         })
-
-        # ── 3b. Optional live verification (off by default) ─────────────────
-        # Read-only "is this credential still active?" checks against each
-        # secret's own provider (never the target). Eliminates dead-key noise.
-        do_verify = VERIFY_SECRETS if verify is None else verify
-        if do_verify and confirmed:
-            await emit({"type": "status", "stage": "verifying", "total": len(confirmed)})
-            await emit({
-                "type": "log", "level": "WARN",
-                "message": (
-                    f"[VERIFY] Live-verifying {len(confirmed)} confirmed finding(s) against "
-                    f"provider APIs (read-only). Authorized use only."
-                ),
-            })
-            await verify_confirmed_findings(confirmed, client, state, semaphore)
-            result["verified_count"]   = sum(1 for v in confirmed if v.verified == "verified")
-            result["unverified_count"] = sum(1 for v in confirmed if v.verified == "unverified")
-            await emit({
-                "type": "log",
-                "level": "ERROR" if result["verified_count"] else "INFO",
-                "message": (
-                    f"[VERIFY] {result['verified_count']} ACTIVE, "
-                    f"{result['unverified_count']} inactive/unconfirmed, "
-                    f"{sum(1 for v in confirmed if v.verified == 'unsupported')} unsupported"
-                ),
-            })
-            if only_verified:
-                # Keep verified + unsupported (can't auto-check); drop confirmed-inactive.
-                before = len(confirmed)
-                confirmed = [v for v in confirmed if v.verified != "unverified"]
-                result["filtered_unverified_count"] = before - len(confirmed)
-                # keep new/recurring counts consistent with the filtered set
-                result["new_findings_count"] = sum(1 for v in confirmed if v.is_new)
-                result["recurring_findings_count"] = len(confirmed) - result["new_findings_count"]
 
         # ── 4. Broadcast Confirmed + Needs-Review Findings ────────────────
         for vf in confirmed:

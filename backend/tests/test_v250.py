@@ -109,7 +109,14 @@ async def test_no_key_skips(monkeypatch):
     monkeypatch.setattr(scanner, "GEMINI_API_KEY", "")
     result = await scanner.validate_with_gemini(_raw(), broadcast=None)
     assert isinstance(result, scanner.ValidatedFinding)
-    assert result.confidence == 50 and "skipped" in result.reason.lower()
+    assert "skipped" in result.reason.lower()
+    # The literal 50 this used to pin was a placeholder standing in for a verdict
+    # nobody had rendered. Offline triage renders a real one, so the assertion is
+    # on the properties that actually matter: the finding survived, it is not
+    # needs-review, and no model judged it.
+    assert result.confidence != scanner.NEEDS_REVIEW_SENTINEL
+    assert result.ai_judged is False
+    assert result.is_valid is True
 
 
 # ── Tier escalation logic ────────────────────────────────────────────────────
