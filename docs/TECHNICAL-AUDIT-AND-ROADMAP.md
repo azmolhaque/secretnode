@@ -1,6 +1,74 @@
 # SecretNode — Technical Audit & Enhancement Roadmap
 *Prepared 18 Jul 2026 · baseline: v2.5.4 · grounded in 2026 secret-scanning SOTA (TruffleHog, Gitleaks, GitHub Secret Scanning).*
 
+## Update — 21 Aug 2026 (current: v2.13.0)
+
+Re-checking the "genuinely still open" list from the 13 Aug update against the
+code, then auditing the code against what it *claims* to do rather than against
+a feature list. The second half is where the findings were.
+
+**Closed since the last update:**
+
+- **R7 (composite/proximity engine)** — the last open MED item. Shipped in
+  v2.13.0 as `composite.py`. Worth recording *why* it mattered, because the
+  roadmap framed it as a false-positive control for generic patterns and the
+  real value turned out to be the opposite: it closes a **false negative**.
+  Keyword-anchored detectors ("AWS Secret Access Key" requires *aws* and
+  *secret* within twenty characters) lose their anchor to minification, so the
+  shipped bundle keeps the credential and loses the word — the scan reported the
+  `AKIA…` ID and missed the secret half entirely. A composite rule uses the
+  nearby anchor to supply the identity the value's own shape cannot.
+- **Gap #6 (AI dependency)** — `triage.py` renders a deterministic verdict with
+  no key, no network and no model. The gap list called for "a stronger offline
+  heuristic tier"; measuring what offline mode actually produced showed it was
+  worse than the entry implied. Every finding came back `confidence=50` with no
+  impact statement and no public-by-design call, so an AWS secret key and a
+  Stripe publishable key were indistinguishable — in the **default**
+  configuration.
+
+**Still open**, verified against the code rather than assumed:
+
+- wasm-string scanning (the last R5 item) [LOW]
+- PyPI distribution (R11) [LOW]
+- opt-in authorized known-path probe (`.env`, `.git/config`) [MED] — still
+  deliberately deferred; it is active enumeration and would contradict the
+  "passive assessment" statement in every client report.
+- ASM breadth beyond secrets (gap #8) — unchanged, still the larger later step.
+
+### The lesson this pass actually taught
+
+The 13 Aug update ended by telling the next reader to verify each gap against
+the current code. That was right and insufficient. Every one of the four defects
+fixed in v2.13.0 was invisible to a gap-oriented read, because none of them is a
+*missing* feature — each is a feature that exists, is documented, and does not
+do what the surrounding code assumes it does:
+
+- The SSRF guard existed in two places and ran on the fetch path in neither.
+  `follow_redirects=True` meant a 302 walked past it into loopback and
+  link-local space. The check was present, tested, and bypassed.
+- `effective_severity()` existed solely to downgrade public-by-design findings
+  to INFO, and routing deleted every finding that could reach it. Unreachable
+  code that reads as a working feature.
+- The ground-truth corpus declared a `public` class whose contract was "detected
+  AND classified public-by-design". Nothing enforced the second clause, so the
+  corpus documented an expectation the pipeline had never met.
+- `generate_json_report` masked credentials in a hardcoded list of bucket names.
+  Correct on the day it was written; a latent credential leak the moment anyone
+  added a bucket — which this release did.
+
+Three of the four were caught by *writing a test that tried to break the thing*
+or by *making the benchmark score what the pipeline actually emits*. The
+ground-truth harness found the composite engine's first false positive on its
+first run, and found it in the specific form the corpus was built to contain (a
+git SHA is exactly as long as an AWS secret key). The measuring instruments are
+carrying the load here — so the highest-value next step is not another detector,
+it is the external-validity corpus the benchmark's own output keeps asking for:
+SecretBench or the gitleaks/trufflehog fixtures, a corpus nobody derived from
+these regexes.
+
+For the next update: check whether each documented *capability* is reachable by
+the code path that is supposed to reach it, not only whether it exists.
+
 ## Update — 13 Aug 2026 (current: v2.8.2)
 
 The body below is kept as written — it was accurate against v2.5.4 — but four
@@ -133,7 +201,9 @@ repo scanning; win the *web-surface* niche.
   Chosen deliberately over adding new *detectors* — this widens the verification-first differentiator
   with **zero new false-positive risk** (no new regexes). +6 tests. *Follow-up:* new detectors (Twilio
   SID-paired, GCP SA JSON, Supabase service_role) when each can ship with a corpus entry + verifier.
-- **R7 · Composite/proximity rule engine** for generic high-FP patterns (Gitleaks-style). [MED]
+- **R7 · Composite/proximity rule engine.** ✅ **DONE (v2.13.0)** — `composite.py`.
+  Framed here as an FP control for generic patterns; it shipped as a false-*negative*
+  fix, which is the more valuable end. See the 21 Aug update at the top.
 
 ### Tier 3 — ASM breadth (fulfills the brand fully; larger)
 - **R8 · Passive attack-surface map.** ✅ **DONE 18 Jul (security-posture slice)** — `posture.py`

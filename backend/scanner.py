@@ -3268,7 +3268,7 @@ async def run_scan(
             ),
         })
 
-        # ── 4. Broadcast Confirmed + Needs-Review Findings ────────────────
+        # ── 4. Broadcast Confirmed + Needs-Review + Informational ─────────
         for vf in confirmed:
             await emit({
                 "type": "finding",
@@ -3277,6 +3277,16 @@ async def run_scan(
         for vf in needs_review:
             await emit({
                 "type": "finding_needs_review",
+                "data": vf.to_dict(),
+            })
+        # Emitted at INFO, and deliberately without a toast: a public-by-design
+        # value needs no attention, and an alert that needs no action is how an
+        # operator learns to dismiss alerts. It belongs in the log so the run is
+        # legible after the fact, and in the report so the client can see it was
+        # examined.
+        for vf in informational:
+            await emit({
+                "type": "finding_informational",
                 "data": vf.to_dict(),
             })
 
