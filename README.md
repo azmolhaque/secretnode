@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-708%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.13.0-blue)
+![Tests](https://img.shields.io/badge/tests-739%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.13.1-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,52 +14,45 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.13.0 — the SSRF guard ran once; offline mode had no verdict** ·
+> **v2.13.1 — three defects a live scan found that the suite could not** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> Four defects, found by auditing the code against what it claims to do.
+> A deep scan of a real domain produced an HTML report, a CSV and a SARIF file.
+> Reading the three next to each other turned up three defects that none of the
+> 708 tests could see, because each needs input messier than a fixture usually is.
 >
-> **The redirect chain was completely unguarded.** `follow_redirects=True` meant
-> httpx resolved and connected on its own for every hop; `assert_public_target`
-> ran once, against the URL the operator typed, and never again. A single 302
-> reaches `169.254.169.254` — and the instance-metadata response was scanned for
-> credentials and written into a client report. This needs no hostile target; an
-> open redirect on a legitimate one is enough. It also fetched out-of-scope hosts
-> the discovery gate had refused, and attributed findings to the URL requested
-> rather than the one that answered. `netguard.py` now validates every hop before
-> the request goes out, and is the single copy of a rule that previously existed
-> twice and applied nowhere that mattered.
+> **One regex literal disabled the whole comment stripper.** v2.12.6 stripped
+> comments so a bundled library's documentation links would stop being reported as
+> the client's "connected infrastructure". The report still listed `i.test`,
+> `caniuse.com`, `stackoverflow.com` and `raw.githubusercontent.com` — four of the
+> five strings that entry names as fixed. The stripper tracked strings but not
+> regex literals, and `/['"]/g` is ordinary in any bundle that normalises quoting:
+> the apostrophe inside it opened a string that never closed, so every comment in
+> the rest of the file survived. It failed open, silently, on input no test used.
 >
-> **Offline mode had no verdict, and no way to reach one.** With no
-> `GEMINI_API_KEY` — the documented Pi/offline mode, and the default — every
-> finding came back `confidence=50` with no impact statement, so an AWS secret
-> key and a Stripe *publishable* key were indistinguishable. `triage.py` renders
-> a deterministic verdict instead. And because verification only ever ran on
-> `confirmed`, while offline routes everything to review, the Confirmed table was
-> structurally guaranteed to be empty however many live credentials were found;
-> verification now runs on review findings too and promotes the ones a provider
-> confirms active — an observation, not an opinion.
+> **143 posture issues reached no deliverable.** The HTML showed the count in a
+> tile and itemised none; the CSV was a bare header row; the SARIF was
+> `"results": []`. Two deliverables built from one scan disagreeing about whether
+> anything was found is worse than either being empty, because each looks
+> authoritative alone — a consumer gating on the SARIF was told the target was
+> clean. Posture now reaches all three, closing the R8 follow-up the roadmap
+> carried at [HIGH].
 >
-> **R7 landed** — the last open roadmap item. Keyword-anchored detectors
-> ("AWS Secret Access Key" needs the words *aws* and *secret* within twenty
-> characters) lose their anchor to minification, so the shipped bundle kept the
-> credential and lost the word: the scan reported the `AKIA…` ID and missed the
-> secret half entirely. Composite rules use the nearby anchor to supply the
-> identity the value's own shape cannot. The ground-truth benchmark caught the
-> first version's false positive — a 40-hex git SHA is exactly as long as an AWS
-> secret key — which is what the character-class constraint now excludes.
+> **A CLEAN verdict over a domain the scan mostly did not read.** `MAX_TARGETS`
+> is a prefix slice of an alphabetically sorted host list, so the scan read 26 of
+> 83 live hosts — everything after "g" was never fetched — and the banner still
+> said "across the domain". The verdict now reads PARTIAL and states both counts.
+> The cap is unchanged: raising it silently multiplies traffic against a third
+> party, which is an operator's decision, not a reporting fix.
 >
-> **Public-by-design findings were deleted rather than reported.** The corpus
-> declares they "must be detected AND classified public-by-design"; routing sent
-> them to `drop`, leaving `effective_severity()` unreachable. They now appear as
-> *Examined and Cleared — Public by Design*, at INFO, raising no alert — a reader
-> who sees nothing cannot tell that apart from the scanner never having looked.
+> The previous release, **v2.13.0**, closed four defects of the same shape — a
+> documented feature the code path meant to reach it did not reach: an unguarded
+> redirect chain (SSRF, out-of-scope fetches, misattributed findings), an offline
+> mode that rendered no verdict, R7 composite/proximity rules, and public-by-design
+> findings deleted rather than reported.
 >
-> 708 tests · corpus precision 1.000 / recall 1.000 · ground truth 64/64 offline
-> and over HTTP, 0 false positives.
-
-Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
+> Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
 
 ---

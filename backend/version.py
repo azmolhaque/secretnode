@@ -16,7 +16,7 @@ from pathlib import Path
 
 # Used only when pyproject.toml is unreadable (an odd install layout, a
 # stripped container). Keep it in step with pyproject on every release.
-_FALLBACK_VERSION = "2.13.0"
+_FALLBACK_VERSION = "2.13.1"
 
 
 def read_version() -> str:

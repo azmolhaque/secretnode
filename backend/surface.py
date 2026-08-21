@@ -46,8 +46,14 @@ def _valid_host(host: str) -> bool:
     host = (host or "").lower()
     if not host or " " in host or "." not in host:
         return False
+    # A label may not be empty, which rules out a leading or trailing dot and any
+    # doubled dot. Only the trailing case was checked, so `.test` — produced by
+    # the comment-stripper desync above — passed as a hostname and was printed in
+    # a client's "external hosts" list. A name that cannot resolve is not a host.
+    if any(not label for label in host.split(".")):
+        return False
     # reject things like "example" tokens with no TLD, or all-numeric non-IP junk
-    return bool(re.fullmatch(r"[a-z0-9.\-]{3,255}", host)) and not host.endswith(".")
+    return bool(re.fullmatch(r"[a-z0-9.\-]{3,255}", host))
 
 
 def extract_endpoints(text: str, base_url: str) -> list[str]:
@@ -108,10 +114,38 @@ def strip_js_comments(text: str) -> str:
     happens to cite — stackoverflow.com, caniuse.com, pastebin.com, an author's
     personal blog. A denylist cannot keep up with that; removing comments
     addresses the cause rather than enumerating the symptoms.
+
+    Regex literals must be tracked too, and skipping that is why v2.12.6 did not
+    actually hold. A regex may contain a quote — `/['"]/g` is ordinary in any
+    bundle that normalises quoting — and a scanner that only knows about strings
+    reads that apostrophe as the *start* of one. From there the tracker is
+    inverted for the rest of the file: real code counts as string content, and
+    every subsequent comment survives untouched. It fails open, silently, and
+    only on input realistic enough that no unit test used it. A live scan of
+    pepsico.com still listed `i.test`, `caniuse.com`, `stackoverflow.com` and
+    `raw.githubusercontent.com` — the exact strings v2.12.6 was written to
+    remove — because one regex early in a bundle disabled the whole pass.
+
+    Telling a regex literal from division is the classic JavaScript lexing
+    ambiguity, and it cannot be resolved without knowing whether the previous
+    token ends an expression: in `a / b` the slash divides, in `(/ab/)` it opens
+    a literal. `_REGEX_MAY_FOLLOW` is that test, kept deliberately conservative —
+    when the preceding token is anything that can end a value (identifier,
+    literal, `)`, `]`, `}`, `++`, `--`) the slash is division.
+
+    Two bounds keep a misread cheap. A regex literal cannot span a line, so an
+    unterminated one is re-read as division rather than swallowing the file; and
+    a `/` classified as division is simply skipped, which at worst restores the
+    old behaviour for that one line. Guessing "regex" too eagerly is the more
+    expensive error — it blanks real code and drops hosts from the graph — so
+    the ambiguity resolves toward division.
     """
     out = list(text)
     i, n = 0, len(text)
     quote: str | None = None
+    # Last significant (non-whitespace) character seen outside a string/comment.
+    # This is what decides the `/` ambiguity below.
+    prev = ""
     while i < n:
         ch = text[i]
         if quote is not None:
@@ -120,6 +154,10 @@ def strip_js_comments(text: str) -> str:
                 continue
             if ch == quote:
                 quote = None
+                # A closed string ends a value, so a following `/` divides:
+                # `"a" / 2`. Leaving `prev` at the *opening* quote would read
+                # that slash as opening a regex.
+                prev = ch
             i += 1
             continue
         if ch in "\"'`":
@@ -143,8 +181,84 @@ def strip_js_comments(text: str) -> str:
                         out[k] = " "
                 i = end
                 continue
+            if _regex_may_follow(text, i, prev):
+                end = _skip_regex_literal(text, i)
+                if end is not None:
+                    # Leave the literal's text in place — it is code, not a
+                    # comment. Only its extent matters, so that a quote inside
+                    # it never opens a string.
+                    i = end
+                    prev = "/"
+                    continue
+        if not ch.isspace():
+            prev = ch
         i += 1
     return "".join(out)
+
+
+# Characters that, as the last token before a `/`, mean a value just ended — so
+# the slash is division. Anything else (an operator, an opening bracket, a comma,
+# a semicolon, or start-of-input) means a regex literal may begin here.
+#
+# The quote characters are here because `prev` is set to the *closing* quote when
+# a string ends, and a closed string is a value: `"a" / 2` divides.
+_VALUE_ENDING_CHARS = frozenset(")]}" + "\"'`")
+# Keywords after which a `/` still starts a regex, even though they end in a
+# letter and so look like an identifier to the character test above.
+_REGEX_PRECEDING_KEYWORDS = frozenset({
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "case", "do", "else", "yield", "await", "throw",
+})
+
+
+def _regex_may_follow(text: str, slash: int, prev: str) -> bool:
+    """True if a `/` at `slash` can open a regex literal rather than divide."""
+    if not prev:
+        return True                      # start of input
+    if prev in _VALUE_ENDING_CHARS:
+        return False                     # `)` `]` `}` end a value -> division
+    if prev.isalnum() or prev in "_$":
+        # An identifier or number ends a value, so this divides — unless the
+        # identifier is actually a keyword like `return` or `typeof`.
+        j = slash - 1
+        while j >= 0 and text[j].isspace():
+            j -= 1
+        end = j + 1
+        while j >= 0 and (text[j].isalnum() or text[j] in "_$"):
+            j -= 1
+        return text[j + 1:end] in _REGEX_PRECEDING_KEYWORDS
+    return True                          # an operator/punctuator -> regex
+
+
+def _skip_regex_literal(text: str, start: int) -> int | None:
+    """Return the index just past a regex literal opening at `start`, or None if
+    this is not one after all (unterminated, or running past end of line).
+
+    A regex literal cannot contain a raw newline, so refusing to cross one bounds
+    the damage of a misclassification to a single line instead of the file.
+    """
+    i = start + 1
+    n = len(text)
+    in_class = False                     # inside `[...]`, where `/` is literal
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            return None
+        if c == "\\":
+            i += 2
+            continue
+        if c == "[":
+            in_class = True
+        elif c == "]":
+            in_class = False
+        elif c == "/" and not in_class:
+            i += 1
+            # Trailing flags (g, i, m, s, u, y, d, v).
+            while i < n and text[i].isalpha():
+                i += 1
+            return i
+        i += 1
+    return None
 
 
 def extract_referenced_hosts(text: str, base_url: str) -> set[str]:
