@@ -36,7 +36,10 @@ auth-decisions: ## Audit trail of allow/deny decisions
 bench: ## Measure detection-layer precision/recall on the labelled corpus (R2)
 	cd backend && SECRETNODE_API_KEY=bench $(PY) -m bench.run_bench
 
-bench-full: ## Ground-truth benchmark across all 63 detectors (offline)
+bench-external: ## External-validity recall vs. gitleaks' corpus (needs network)
+	cd backend && SECRETNODE_API_KEY=bench $(PY) -m bench.external
+
+bench-full: ## Ground-truth benchmark across every detector (offline)
 	cd backend && SECRETNODE_API_KEY=bench $(PY) -m bench.benchmark
 
 bench-http: ## Ground-truth benchmark end-to-end, discovery in scope (local lab)

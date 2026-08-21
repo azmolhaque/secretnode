@@ -359,7 +359,13 @@ class TestNeedsReviewSentinel:
     def test_severity_lookup_covers_all_patterns(self):
         for pattern in scanner.SECRET_PATTERNS:
             assert pattern.name in scanner.SECRET_TYPE_SEVERITY
-            assert scanner.SECRET_TYPE_SEVERITY[pattern.name] in ("CRITICAL", "HIGH", "MEDIUM")
+            # The full vocabulary the rest of the pipeline understands —
+            # report._SARIF_LEVEL and report._SEVERITY_RANK are keyed on exactly
+            # these. LOW was missing here only because no detector had used it
+            # yet, which made this an accidental ceiling on severity rather than
+            # the "is it a recognised value" check it is meant to be.
+            assert scanner.SECRET_TYPE_SEVERITY[pattern.name] in (
+                "CRITICAL", "HIGH", "MEDIUM", "LOW")
 
 
 @pytest.mark.asyncio

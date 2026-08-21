@@ -313,9 +313,29 @@ GENERIC_SECRET_TYPE = "Generic High-Entropy Secret"
 SECRET_PATTERNS: list[SecretPattern] = [
     SecretPattern(
         name="AWS Access Key",
-        regex=re.compile(r"\b(AKIA[0-9A-Z]{16})\b"),
-        description="AWS IAM Access Key ID",
+        # AKIA is only one of the prefixes AWS issues. ASIA is a temporary STS
+        # credential and is *more* common in shipped frontend code than a
+        # long-lived key, because that is exactly what a browser-side
+        # credential-vending flow hands out — so matching only AKIA missed the
+        # case most likely to appear on the surface this scanner reads.
+        # Measured against gitleaks' corpus, which is where the gap showed up.
+        regex=re.compile(r"\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16})\b"),
+        description="AWS IAM Access Key ID (long-lived, temporary/STS, or service-specific)",
         severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="AWS Bedrock API Key",
+        # A 2025 credential type: a long base64 blob prefixed ABSK. Nothing in
+        # the AKIA-shaped detectors comes close to matching it.
+        regex=re.compile(r"\b((?:ABSK|AXSK)[A-Za-z0-9+/]{109,269}={0,2})"),
+        description="Amazon Bedrock long-lived API key",
+        severity="CRITICAL",
+        remediation=(
+            "Delete this Bedrock API key in the AWS console and issue a "
+            "replacement held server-side. A leaked key bills model inference to "
+            "your account and reaches every foundation model the associated "
+            "identity may invoke; never ship one to a browser."
+        ),
     ),
     SecretPattern(
         name="AWS Secret Access Key",
@@ -361,9 +381,24 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Stripe Secret Key",
-        regex=re.compile(r"\b(sk_live_[0-9a-zA-Z]{24,})\b"),
+        # Stripe issues restricted keys (rk_) alongside secret keys, and labels
+        # the live environment both `live` and `prod`. Matching only sk_live_
+        # missed a restricted key, which is a real credential with a real scope.
+        regex=re.compile(r"\b((?:sk|rk)_(?:live|prod)_[0-9a-zA-Z]{24,})\b"),
         description="Stripe Live Secret Key",
         severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Stripe Test Key",
+        regex=re.compile(r"\b((?:sk|rk)_test_[0-9a-zA-Z]{24,})\b"),
+        description="Stripe test-mode secret/restricted key",
+        severity="LOW",
+        remediation=(
+            "Roll this test key in the Stripe dashboard and keep it server-side. "
+            "It cannot move real money, so this is not an emergency — but it "
+            "reveals account structure and is often committed beside the live "
+            "key it was copied from, which is the reason to look."
+        ),
     ),
     SecretPattern(
         name="Stripe Publishable Key",
@@ -444,6 +479,27 @@ SECRET_PATTERNS: list[SecretPattern] = [
         severity="CRITICAL",
     ),
     SecretPattern(
+        name="GitLab Token (non-PAT)",
+        # GitLab issues a whole family beyond glpat-: deploy, feed, runner,
+        # pipeline-trigger, OAuth-app, SCIM, agent, incoming-mail, feature-flag,
+        # CI job and runner-registration tokens. Only glpat- was matched, so a
+        # runner or deploy token — each of which grants real repository or CI
+        # access — read as an unrecognised string.
+        regex=re.compile(
+            r"\b((?:gldt|glft|glrt|glptt|gloas|glsoat|glagent|glimt|glffct|glcbt)"
+            r"-[0-9A-Za-z_\-]{20,64}|GR1348941[0-9A-Za-z_\-]{20})\b"
+        ),
+        description="GitLab deploy / feed / runner / trigger / OAuth / SCIM token",
+        severity="HIGH",
+        remediation=(
+            "Revoke this token in GitLab (Settings → Access Tokens, or the "
+            "project's CI/CD settings for runner and deploy tokens) and issue a "
+            "replacement stored in a masked CI variable. Depending on type it "
+            "grants repository read/write, runner registration, or CI pipeline "
+            "execution — none of which belongs in browser-delivered code."
+        ),
+    ),
+    SecretPattern(
         name="GitLab Personal Access Token",
         regex=re.compile(r"\b(glpat-[0-9A-Za-z_\-]{20})\b"),
         description="GitLab personal access token",
@@ -451,7 +507,22 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="OpenAI API Key",
-        regex=re.compile(r"\b(sk-(?:proj-)?[A-Za-z0-9_\-]{20}T3BlbkFJ[A-Za-z0-9_\-]{20})\b"),
+        # `T3BlbkFJ` is base64 "OpenAI" and sits inside every issued key — it is
+        # the discriminator, so the segments around it carry no length promise.
+        # Pinning them to exactly 20 was true of the original key format and is
+        # not true of the current ones: an `sk-proj-` key runs to ~164
+        # characters and an `sk-admin-` key to ~133, so both — the formats
+        # OpenAI issues today, and the most commonly leaked AI credential —
+        # went undetected. Found by measuring against gitleaks' corpus, whose
+        # specimens carry the real marker.
+        #
+        # The lookahead keeps service-account keys with the detector that names
+        # them; without it both would fire on one value and the report would
+        # double-count a single credential.
+        regex=re.compile(
+            r"\b(sk-(?!svcacct-)(?:proj-|admin-)?[A-Za-z0-9_\-]{20,}"
+            r"T3BlbkFJ[A-Za-z0-9_\-]{20,})\b"
+        ),
         description="OpenAI API key (project or user)",
         severity="CRITICAL",
     ),
@@ -483,6 +554,19 @@ SECRET_PATTERNS: list[SecretPattern] = [
         regex=re.compile(r"\b(gsk_[A-Za-z0-9]{52})\b"),
         description="Groq inference API key",
         severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Hugging Face Organization Token",
+        # api_org_ is an organisation-wide token; hf_ (below) is per-user. The
+        # organisation one has the wider blast radius and was the uncovered one.
+        regex=re.compile(r"\b(api_org_[A-Za-z]{34})\b"),
+        description="Hugging Face organization API token",
+        severity="HIGH",
+        remediation=(
+            "Revoke this organization token in the Hugging Face settings and "
+            "issue a replacement held server-side. It reaches every private "
+            "model, dataset and Space the organization owns."
+        ),
     ),
     SecretPattern(
         name="Hugging Face Access Token",
@@ -671,6 +755,34 @@ SECRET_PATTERNS: list[SecretPattern] = [
         severity="HIGH",
     ),
     SecretPattern(
+        name="Grafana Cloud Access Token",
+        # glc_ is Grafana Cloud's access-policy token; glsa_ (below) is a
+        # self-hosted service account. Different products, different prefixes —
+        # matching only glsa_ left the hosted product uncovered.
+        regex=re.compile(r"\b(glc_[A-Za-z0-9+/]{32,400}={0,3})"),
+        description="Grafana Cloud access-policy token",
+        severity="HIGH",
+        remediation=(
+            "Revoke this access policy token in Grafana Cloud and issue a "
+            "replacement held server-side. It can read and write metrics, logs "
+            "and traces for the stacks its policy covers."
+        ),
+    ),
+    SecretPattern(
+        name="Grafana Legacy API Key",
+        # Base64 of {"k":"… — a JWT-shaped token with no dots, so the JWT
+        # detector (which requires the header.payload.signature form) cannot see
+        # it. Still issued by older self-hosted installations.
+        regex=re.compile(r"\b(eyJrIjoi[A-Za-z0-9+/]{60,400}={0,3})"),
+        description="Grafana legacy API key",
+        severity="HIGH",
+        remediation=(
+            "Delete this API key in Grafana and replace it with a service "
+            "account token held server-side. Legacy keys carry a fixed role "
+            "(Viewer/Editor/Admin) over the whole organisation."
+        ),
+    ),
+    SecretPattern(
         name="Grafana Service Account Token",
         regex=re.compile(r"\b(glsa_[A-Za-z0-9]{32}_[a-f0-9]{8})\b"),
         description="Grafana service-account token",
@@ -732,6 +844,19 @@ SECRET_PATTERNS: list[SecretPattern] = [
         regex=re.compile(r"\b(figd_[A-Za-z0-9_\-]{40,})\b"),
         description="Figma personal access token",
         severity="HIGH",
+    ),
+    SecretPattern(
+        name="Cloudflare Origin CA Key",
+        # A distinct credential from the cfat/cfut/cfk API tokens: it issues
+        # origin certificates for any zone on the account.
+        regex=re.compile(r"\b(v1\.0-[0-9a-f]{24}-[0-9a-f]{146})\b"),
+        description="Cloudflare Origin CA key",
+        severity="CRITICAL",
+        remediation=(
+            "Revoke this Origin CA key in the Cloudflare dashboard and issue a "
+            "replacement server-side. It can mint origin certificates for zones "
+            "on the account, which enables impersonating your origin."
+        ),
     ),
     SecretPattern(
         name="Cloudflare API Token",

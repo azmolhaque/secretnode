@@ -3,6 +3,103 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.0] — The recall number is now measured from outside
+
+Asked to test against intentionally vulnerable targets. Two things made that
+question worth reframing rather than answering literally: hosted targets are
+unreachable from this environment, and Juice Shop / DVWA measure SQLi and XSS —
+which this tool does not claim to find. The equivalent for a secrets scanner is
+a labelled corpus of planted credentials that nobody here wrote.
+
+### Added — `make bench-external`, and the number it produced
+
+`bench/benchmark.py` has printed its own caveat on every run since it shipped:
+*"a detector matching its own canonical example proves the detector is wired up,
+not that it catches credentials in the wild."* Correct, and load-bearing — 71/71
+was never a recall claim. `bench/external.py` measures against gitleaks' rule
+definitions: literal specimens written by another project, for another scanner,
+owing nothing to these patterns.
+
+**80.6% of 108 specimens.** The report splits misses into the only two buckets
+that matter — a provider SecretNode covers and missed (a defect) versus one it
+never claimed (a roadmap fact, since gitleaks carries ~220 rules to this
+scanner's 71 and breadth was never the differentiator).
+
+The corpus is fetched on demand, never vendored: ~240 KB of third-party source
+whose whole purpose is to contain credential-shaped strings would trip push
+protection, which is the same trap `bench-corpus/` set two releases ago. With no
+network the run skips and says so — *"this is a skip, not a pass: no number was
+measured"* — and there is a test pinning that, because a benchmark that silently
+reports success when it measured nothing is worse than one that fails.
+
+### Fixed — the current OpenAI key formats were undetected
+
+The pattern required exactly 20 characters before the `T3BlbkFJ` marker. That
+was true of the original key format and is false of the `sk-proj-` (~164 char)
+and `sk-admin-` (~133 char) keys OpenAI issues today — so the most commonly
+leaked AI credential of 2026 was invisible. `T3BlbkFJ` is base64 "OpenAI" and is
+the actual discriminator; the segments around it carry no length promise and no
+longer pretend to.
+
+Every internal specimen passed throughout, because each was built to satisfy the
+pattern the code already had. This is precisely the failure an internally-derived
+benchmark cannot report.
+
+### Fixed — credential families the provider coverage implied but did not match
+
+- **AWS: only `AKIA`.** `ASIA` is a temporary STS credential and is *more*
+  likely to appear in shipped frontend code than a long-lived key — it is what a
+  browser-side credential-vending flow hands out. `A3T*`, `ABIA` and `ACCA` now
+  match too, and Amazon Bedrock keys (`ABSK`/`AXSK`) get their own detector.
+- **Stripe: only `sk_live_`.** Restricted keys (`rk_`) and the `prod` label were
+  missed. Test-mode keys now report at LOW — they cannot move money, but they
+  are routinely committed beside the live key they were copied from.
+- **GitLab: only `glpat-`.** Deploy, feed, runner, pipeline-trigger, OAuth-app,
+  SCIM, agent, incoming-mail, feature-flag and CI job tokens each grant real
+  repository or CI access and read as unrecognised strings.
+- **Grafana: only `glsa_`.** Cloud access-policy tokens (`glc_`) and legacy API
+  keys (`eyJrIjoi…`, JWT-shaped but without the dots the JWT detector needs).
+- **Cloudflare Origin CA keys** (`v1.0-…`), which mint origin certificates.
+- **Hugging Face organisation tokens** (`api_org_`), the wider-blast-radius
+  sibling of the per-user `hf_` token that was already covered.
+
+**64 → 71 detectors**, and the internal benchmarks held at **71/71 with zero
+false positives** both offline and end-to-end over HTTP. None of it cost
+precision.
+
+### Fixed — a corpus specimen that could not survive its own detector
+
+Adding a specimen shifted the shared RNG stream and the Terraform Cloud sample
+generated a trailing `-`, which its detector's own `\b` boundary excludes: the
+declared and captured values differed. The corpus self-validation caught it, as
+designed. Latent, RNG-position-dependent, and dormant until something unrelated
+was added — so the final character is now pinned to the word class rather than
+left to chance.
+
+### Fixed — a test that had become an accidental ceiling
+
+`test_severity_lookup_covers_all_patterns` asserted every detector's severity
+was CRITICAL, HIGH or MEDIUM. LOW was absent only because no detector had used
+it yet, so a check meant to ask *"is this a recognised value?"* had quietly
+become *"no detector may be low severity."* Aligned with the vocabulary
+`report._SARIF_LEVEL` and `report._SEVERITY_RANK` actually understand.
+
+### On the remaining 19.4%
+
+Ten in-scope misses, each checked by hand, none a defect: two placeholders
+(`XXXX…`), one degenerate all-ones value the entropy floor is right to reject,
+and seven entries in gitleaks' JWT rule file that are not JWTs (a timestamp, two
+DIDs, a Docker key fingerprint, a GitLab CI claim string). Eleven more are
+providers with no detector — atlassian, facebook, flyio, freemius, intra42,
+kubernetes, pulumi — which is a coverage decision, not a failure.
+
+The honest reading of 80.6% is that the denominator contains items no scanner
+should match. It is still the number to quote, because it is the only one
+measured against data this project did not write.
+
+**768 tests, ruff clean.** Ground truth 71/71 offline and over HTTP, zero false
+positives; labelled corpus precision 1.000 / recall 1.000.
+
 ## [2.13.2] — The redirect guard changed what posture measures
 
 A second live deep scan, of a domain whose apex and `www` both answer. Two

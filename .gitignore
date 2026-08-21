@@ -45,3 +45,4 @@ Thumbs.db
 !.github/**/*.sarif
 dist/
 build/
+backend/bench/.external-cache.json

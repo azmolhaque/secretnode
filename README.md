@@ -3,52 +3,48 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-758%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.13.2-blue)
+![Tests](https://img.shields.io/badge/tests-768%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.14.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
 Passive Attack Surface Management scanner for detecting credential leaks in public-facing infrastructure.
-Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (64 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
+Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (71 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.13.2 — the redirect guard changed what posture measures** ·
+> **v2.14.0 — the recall number is now measured from outside** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> Two defects from a second live deep scan, both reproduced against the real
-> pipeline in a local lab before a line was changed.
+> `bench/benchmark.py` has printed its own caveat since it shipped: a detector
+> matching its own canonical example proves the detector is wired up, not that it
+> catches credentials in the wild. 71/71 was never a recall claim.
+> **`make bench-external`** measures against gitleaks' rule definitions —
+> specimens written by another project, for another scanner, owing nothing to
+> these patterns. **80.6% of 108**, with misses split into the only two buckets
+> that matter: a provider this scanner covers and missed (a defect) versus one it
+> never claimed (a coverage decision).
 >
-> **Posture was measuring the redirect, not the page.** v2.13.0 stopped the shared
-> client following redirects so every hop could be address-checked — right, and it
-> silently changed what the posture check sees: on any host that redirects, it
-> analysed the **301**. The first real target hid this, because Cloudflare applies
-> header rules to redirects too and the wrong measurement agreed with the right
-> one. Against a lab server whose landing page sets six headers and whose redirect
-> hop sets none, it reported five missing headers for a page that has them all.
-> Posture now runs through the same validated hop-walk the fetch path uses.
+> It paid for itself on the first run. **The current OpenAI key formats were
+> undetected** — the pattern required exactly 20 characters before the `T3BlbkFJ`
+> marker, true of the original format and false of the `sk-proj-` and
+> `sk-admin-` keys OpenAI issues today. Every internal specimen passed
+> throughout, because each was built to satisfy the pattern the code already had.
+> Also found: AWS matched only `AKIA` and not `ASIA` (the temporary credential a
+> browser-side vending flow actually hands out), Stripe only `sk_live_` and not
+> restricted `rk_` keys, GitLab only `glpat-` and none of the deploy/runner/feed
+> family, plus Grafana Cloud, Cloudflare Origin CA and Hugging Face org tokens.
 >
-> **One site was being scanned twice.** `www.example.com` 301-ing to
-> `example.com` looked like two live hosts, so the deep scan crawled both — eleven
-> requests for four unique paths in the lab. Against a real domain that is double
-> the traffic aimed at a target and a report claiming twice the coverage it has.
-> A host is now collapsed only when its redirect lands on a host already being
-> scanned; one leaving that set is still scanned, because it may be the only route
-> to content nothing else reaches. Five requests after the fix.
+> **64 → 71 detectors**, internal benchmarks held at 71/71 with zero false
+> positives offline and end-to-end, so none of it cost precision.
 >
-> **And a collapsed host is not a failure.** The only way to record an unscanned
-> host was `error`, which renders red *and* counts as unexamined — so
-> de-duplicating a `www` alias would have hedged a fully-covered domain to
-> PARTIAL. `status`/`note` now carry that case.
->
-> The two releases before it: **v2.13.1** fixed a comment stripper defeated by a
-> single regex literal, posture findings that reached no deliverable, and a CLEAN
-> verdict over a domain the scan mostly did not read; **v2.13.0** closed an
-> unguarded redirect chain, an offline mode with no verdict, R7
-> composite/proximity rules, and public-by-design findings deleted rather than
-> reported.
+> The two releases before it: **v2.13.2** fixed posture measuring a redirect hop
+> instead of the page behind it, and one site being scanned twice via its `www`
+> alias; **v2.13.1** fixed a comment stripper defeated by a single regex literal,
+> posture findings that reached no deliverable, and a CLEAN verdict over a domain
+> the scan mostly did not read.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
@@ -82,7 +78,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 │    └─ extract_js_urls()  (regex HTML parse)                      │
 │                                                                  │
 │  extract_secrets()                                               │
-│    └─ 64 SECRET_PATTERNS  (AWS, GCP, Slack, JWT, GitHub…)       │
+│    └─ 71 SECRET_PATTERNS  (AWS, GCP, Slack, JWT, GitHub…)       │
 │    └─ shannon_entropy()   (filter < 3.5 bits)                   │
 │                                                                  │
 │  validate_with_gemini()  — two-tier engine (google-genai SDK)   │
@@ -116,7 +112,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 secretnode/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + WebSocket + static server + auth/SSRF guards
-│   ├── scanner.py           # Async scan engine (64 patterns, source maps, entropy, base64, Gemini, Discord)
+│   ├── scanner.py           # Async scan engine (71 patterns, source maps, entropy, base64, Gemini, Discord)
 │   ├── verifier.py          # Optional live credential verification (off by default)
 │   ├── netguard.py          # "May this scanner request this?" — pre-flight AND every redirect hop
 │   ├── triage.py            # Deterministic verdicts with no API key, no network, no model
