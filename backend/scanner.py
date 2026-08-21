@@ -28,6 +28,7 @@ from google import genai
 from google.genai import errors as genai_errors, types
 from pydantic import BaseModel, Field, ValidationError
 
+import composite
 import netguard
 import posture
 import surface
@@ -407,6 +408,21 @@ SECRET_PATTERNS: list[SecretPattern] = [
         description="Generic credential assignment",
         severity="MEDIUM",
         entropy_gated=True,   # loose keyword=value match — entropy keeps it quiet
+    ),
+    SecretPattern(
+        name="OAuth Client Secret",
+        regex=re.compile(
+            r"(?i)client[_-]?secret['\"]?\s*[=:]\s*['\"]([A-Za-z0-9\-_.~+/]{16,80})['\"]"
+        ),
+        description="OAuth 2.0 client secret",
+        severity="HIGH",
+        remediation=(
+            "An OAuth client secret in browser-delivered code lets anyone "
+            "impersonate the application to the identity provider and complete "
+            "the authorization-code exchange. Rotate the secret at the provider, "
+            "and move the exchange server-side — a public SPA client should use "
+            "PKCE with no secret at all."
+        ),
     ),
     SecretPattern(
         name="Mailgun API Key",
@@ -1436,6 +1452,12 @@ MAX_SOURCEMAP_SOURCES  = _env_int("MAX_SOURCEMAP_SOURCES", 200)
 # version disclosure, insecure cookies) on the target root. Pure analysis of the
 # response the target already serves — no exploitation, no third-party calls.
 SCAN_HTTP_POSTURE = os.environ.get("SCAN_HTTP_POSTURE", "true").lower() == "true"
+# R7: composite/proximity rules. A keyword-anchored detector (AWS Secret Access
+# Key, Twilio Auth Token) needs the provider's name beside the value, and
+# minification deletes it — so the shipped bundle keeps the credential and loses
+# the word the regex anchors on. Composite rules use a nearby high-precision
+# anchor (AKIA…, AC+32hex) to supply the identity instead. See composite.py.
+SCAN_COMPOSITE = os.environ.get("SCAN_COMPOSITE", "true").lower() == "true"
 
 
 def _same_scope(base_host: str, candidate_host: str) -> bool:
@@ -2081,6 +2103,56 @@ def _scan_text(
     return findings
 
 
+# Secret types that reached a finding through a composite rule rather than
+# through their own detector. Used by `_collapse_duplicates` to rank a composite
+# claim below a real detector's claim on the same value.
+COMPOSITE_TYPES: frozenset[str] = frozenset(r.name for r in composite.COMPOSITE_RULES)
+
+
+def _scan_composites(
+    scan_id: str, target_url: str, source_url: str, text: str,
+) -> list[RawFinding]:
+    """Findings a single regex cannot reach — see composite.py.
+
+    Every existing gate still applies. The composite rule supplies an *identity*
+    for a value whose own shape carries none; it is not a licence to skip the
+    placeholder allowlist or the entropy floor, and skipping them is how a
+    proximity rule turns into a false-positive engine.
+
+    The entropy floor used is the structural one, not the generic one: a value
+    that an AKIA vouches for is anchored by shape in the same sense a provider
+    prefix is, so holding it to the loose-match bar would drop genuinely
+    modest-entropy live keys for no gain.
+    """
+    if not SCAN_COMPOSITE:
+        return []
+    out: list[RawFinding] = []
+    for cm in composite.find_composites(text):
+        if is_benign_placeholder(cm.value):
+            continue
+        entropy = shannon_entropy(cm.value)
+        if entropy < MIN_STRUCTURAL_ENTROPY:
+            continue
+        start = max(0, cm.start - CONTEXT_WINDOW_CHARS)
+        end = min(len(text), cm.end + CONTEXT_WINDOW_CHARS)
+        snippet = text[start:end].replace("\n", " ").strip()
+        out.append(RawFinding(
+            scan_id=scan_id,
+            target_url=target_url,
+            source_url=source_url,
+            secret_type=cm.secret_type,
+            raw_match=cm.value,
+            # The rationale travels with the finding because a report otherwise
+            # has no way to explain why a shapeless 40-character string was
+            # called an AWS secret key. "Proximity to an AKIA ID" is the whole
+            # justification, and a finding that cannot show its reasoning is one
+            # an analyst is right to distrust.
+            context_snippet=f"[composite: {cm.rationale}] {snippet}",
+            entropy=entropy,
+        ))
+    return out
+
+
 def extract_secrets(
     scan_id: str,
     target_url: str,
@@ -2088,6 +2160,8 @@ def extract_secrets(
     text: str,
 ) -> list[RawFinding]:
     findings = _scan_text(scan_id, target_url, source_url, text)
+    # R7: values that only become identifiable because of what sits next to them.
+    findings.extend(_scan_composites(scan_id, target_url, source_url, text))
     # Also inspect base64-decoded blobs for secrets hidden inside encoded strings.
     for decoded in _decode_base64_blobs(text):
         findings.extend(_scan_text(scan_id, target_url, source_url, decoded, decoded=True))
@@ -2109,7 +2183,7 @@ def extract_secrets(
             continue
         seen.add(fp)
         unique.append(f)
-    return _collapse_generic_duplicates(unique)
+    return _collapse_duplicates(unique)
 
 
 def scan_asset(
@@ -2134,31 +2208,59 @@ def scan_asset(
     return [(source_url, extract_secrets(scan_id, target_url, source_url, body))]
 
 
-def _collapse_generic_duplicates(findings: list[RawFinding]) -> list[RawFinding]:
+def _claim_rank(secret_type: str) -> int:
+    """How authoritative a detector's claim on a value is. Higher wins.
+
+    2 — a provider detector matched the value by its own shape. Most specific:
+        it knows the provider, so it carries the right severity and the right
+        remediation text.
+    1 — a composite rule inferred the value's identity from a neighbouring
+        anchor. Correct often enough to be worth having, but it is a fallback
+        for what the registry missed, never a second opinion on what it caught.
+    0 — the generic keyword=value catch-all. Matched loosely; knows nothing
+        about the provider.
+    """
+    if secret_type == GENERIC_SECRET_TYPE:
+        return 0
+    return 1 if secret_type in COMPOSITE_TYPES else 2
+
+
+def _collapse_duplicates(findings: list[RawFinding]) -> list[RawFinding]:
     """Collapse one credential matched by several detectors into a single finding.
 
     The generic keyword=value catch-all matches loosely and therefore also fires on
     secrets a provider-specific detector already typed precisely. Reporting both is
     wrong three ways: it double-counts the exposure in client reports, spends a
     second AI-validation call on the same string, and leaves two conflicting
-    severities for one credential.
+    severities for one credential. R7's composite rules create the same collision
+    from the other direction — an AWS secret key that the keyword-anchored detector
+    *did* manage to see would also be claimed by the AKIA-proximity rule.
 
     Identity here is (source_url, raw_match) — the same value at the same location.
-    When several detectors claim it, the typed/structural one wins over the generic
-    catch-all, because it carries the accurate severity and provider-specific
-    remediation. Order is otherwise preserved.
+    The most authoritative claim on that value wins; order is otherwise preserved.
     """
-    typed_locations = {
-        (f.source_url, f.raw_match)
-        for f in findings
-        if f.secret_type != GENERIC_SECRET_TYPE
-    }
-    return [
-        f
-        for f in findings
-        if f.secret_type != GENERIC_SECRET_TYPE
-        or (f.source_url, f.raw_match) not in typed_locations
-    ]
+    best: dict[tuple[str, str], int] = {}
+    for f in findings:
+        key = (f.source_url, f.raw_match)
+        rank = _claim_rank(f.secret_type)
+        if rank > best.get(key, -1):
+            best[key] = rank
+
+    kept: list[RawFinding] = []
+    seen: set[tuple[str, str]] = set()
+    for f in findings:
+        key = (f.source_url, f.raw_match)
+        if _claim_rank(f.secret_type) < best[key] or key in seen:
+            continue
+        seen.add(key)
+        kept.append(f)
+    return kept
+
+
+# Retained under its original name: the v2.x tests and the benchmark harness
+# import it directly, and renaming a function is not a behaviour change worth
+# breaking a caller over.
+_collapse_generic_duplicates = _collapse_duplicates
 
 
 # ─────────────────────────────────────────────────────────────────────────────

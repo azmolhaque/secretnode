@@ -152,6 +152,10 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     add(plain("npm Access Token", "npm_" + r(ALNUM, 36)))
     add(plain("PyPI Upload Token", "pypi-AgEIcHlwaS" + r(URLSAFE, 56)))
 
+    v = r(ALNUM + "-_", 40)
+    add(Specimen("OAuth Client Secret", v,
+                 f'{{"client_id":"app-1234","client_secret":"{v}"}}'))
+
     # ── AI / ML providers ────────────────────────────────────────────────────
     add(plain("OpenAI API Key", "sk-" + r(URLSAFE, 20) + "T3BlbkFJ" + r(URLSAFE, 20)))
     add(plain("OpenAI Service Account Key", "sk-svcacct-" + r(URLSAFE, 28)))
