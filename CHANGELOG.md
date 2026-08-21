@@ -3,6 +3,97 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.13.1] — Three defects a live scan found that the suite could not
+
+A deep scan of a real company's domain produced an HTML report, a CSV and a
+SARIF file. Reading the three next to each other took about ninety seconds and
+turned up three defects, none of which any of the 708 tests could see, because
+each one needs input messier than a test fixture usually is.
+
+### Fixed — one regex literal disabled the whole comment stripper
+
+v2.12.6 added `surface.strip_js_comments()` so that `//console.log(…)` and a
+bundled library's documentation links would stop being reported as the client's
+"third-party / connected infrastructure". The report from this scan listed
+`i.test`, `.test`, `caniuse.com`, `stackoverflow.com` and
+`raw.githubusercontent.com`. Four of those five are named in the v2.12.6 entry
+as fixed.
+
+The stripper tracked string literals but not regex literals. A regex may contain
+a quote — `/['"]/g` is ordinary in any bundle that normalises quoting — and a
+scanner that only knows about strings reads that apostrophe as the *start* of
+one. From there the tracker is inverted for the rest of the file: real code
+counts as string content, and every subsequent comment survives. It fails open,
+silently, and only on input realistic enough that no unit test had used it. One
+regex early in a bundle was enough to disable the pass for the whole file.
+
+- Regex literals are now tracked. Telling one from division is the classic
+  JavaScript lexing ambiguity and cannot be resolved without knowing whether the
+  previous token ends an expression, so `_regex_may_follow` is that test, kept
+  conservative: when the preceding token can end a value — identifier, number,
+  `)`, `]`, `}`, or a closed string — the slash divides.
+- Two bounds keep a misread cheap. A regex cannot span a line, so an unterminated
+  one is re-read as division rather than swallowing the file; and guessing
+  "regex" too eagerly is the more expensive error, because it blanks real code
+  and drops hosts from the graph. The ambiguity resolves toward division.
+- Verified by sweep as well as by example: across 400 randomised bundles mixing
+  regex literals, division, template strings and comments, zero hosts inside
+  string literals were lost and length was preserved every time.
+
+### Fixed — `.test` is not a hostname
+
+`_valid_host` rejected a trailing dot but not a leading one, so `.test` — a
+by-product of the desync above — passed as a hostname and was printed in a
+client's external-host list. A label may not be empty; that is now what the
+check says.
+
+### Fixed — 143 posture issues reached no deliverable
+
+The scan found 143 security-header and misconfiguration issues. The HTML showed
+the number in a KPI tile and a per-host column and itemised none of them; the
+CSV was a bare header row; the SARIF was `"results": []`. Only
+`generate_html_report` — the single-target renderer, which a deep scan never
+calls — could itemise posture at all.
+
+Two deliverables built from one scan disagreeing about whether anything was
+found is worse than either being empty, because each looks authoritative on its
+own. A consumer gating on the SARIF was told the target was clean.
+
+- Posture issues are now written to CSV (`status=POSTURE`, so a reader sorting
+  the column cannot mistake them for leaked credentials) and emitted as SARIF
+  results under their own `secretnode/posture/*` rules, tagged `posture` rather
+  than `secret`. Their rules are declared on demand rather than catalogued
+  up-front: the detector registry is a fixed list, but posture checks are
+  generated per response, so there is no complete set to advertise.
+- The deep-scan HTML gains a section that names each issue, its evidence and its
+  remediation, grouped by issue rather than by host — one missing CSP across
+  twenty-six hosts is one fix, and a flat list reads as twenty-six problems.
+- Closes the R8 follow-up ("posture in CSV/SARIF export") the roadmap had carried
+  as open at [HIGH].
+
+### Fixed — a CLEAN verdict over a domain the scan mostly did not read
+
+`MAX_TARGETS` defaults to 25 and is applied as a prefix slice of an
+alphabetically sorted host list. The scan read 26 of 83 live hosts; everything
+after the letter "g" was never fetched. The banner said **"No confirmed
+credential exposures across the domain."**
+
+That claim is the product, and stating it from 31% of the surface is the same
+error v2.12.3 fixed for resolved findings — asserting an absence the scan's
+coverage does not support. It is worse here, because a domain verdict is the
+line a client reads first.
+
+- The verdict now reads PARTIAL when live hosts were discovered and not scanned,
+  states both counts, and adds a coverage note explaining that the unscanned
+  hosts are the tail of an alphabetical ordering rather than a random sample.
+- A confirmed exposure still outranks coverage: partial reading never softens a
+  credential that was actually found.
+- The cap is unchanged. Raising it silently multiplies traffic against a third
+  party; that is an operator's decision, not a reporting fix.
+
+**739 tests, ruff clean.** Labelled corpus precision 1.000 / recall 1.000;
+ground truth 64/64 with zero false positives.
+
 ## [2.13.0] — The SSRF guard ran once. Offline mode had no verdict.
 
 Four defects found by auditing the code against what it claims to do, each with

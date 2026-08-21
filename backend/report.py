@@ -517,6 +517,25 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
             f.get("confidence", 0), "", "", "", "", redact_finding(f),
             f.get("reason", ""), f.get("found_at", ""),
         ])
+    # R8 follow-up — passive security-posture issues (missing/weak headers,
+    # version disclosure, insecure cookies). These are findings the scan made and
+    # the client is paying for, and they were reaching no machine-readable
+    # export at all: a deep scan of pepsico.com counted 143 of them in an HTML
+    # tile while this CSV was a bare header row and the SARIF was `results: []`.
+    # Two deliverables built from one scan disagreeing about whether anything was
+    # found is worse than either being empty, because each looks authoritative.
+    #
+    # `secret_type` carries the issue name so the column keeps one meaning —
+    # "what was found" — across every row type; POSTURE in `status` is what stops
+    # a reader taking these for leaked credentials. There is no value to redact:
+    # a posture finding's evidence is a response header, not a secret.
+    for p in sorted(scan.get("posture_findings", []), key=_sort_key):
+        writer.writerow([
+            "POSTURE", _severity_of(p), p.get("cwe", ""), p.get("name", ""),
+            p.get("_host", "") or scan.get("target_url", ""),
+            "", "", "", "", "", "",
+            p.get("evidence", ""), p.get("found_at", ""),
+        ])
     return buf.getvalue()
 
 
@@ -656,6 +675,60 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
             },
         })
 
+    # R8 follow-up — posture issues as SARIF results. Without this the export is
+    # `results: []` on a scan whose HTML reports 143 problems, and a consumer
+    # gating on SARIF (GitHub code scanning, CI) is told the target is clean.
+    #
+    # Their rules are added on demand rather than catalogued up-front like the
+    # detectors: the detector registry is a fixed list that can be enumerated,
+    # whereas posture checks are generated per response, so there is no complete
+    # set to advertise. Every result still resolves to a rule declared in this
+    # same run, which is what SARIF requires.
+    for p in sorted(scan.get("posture_findings", []), key=_sort_key):
+        name = str(p.get("name", "") or "Security posture issue")
+        rule_id = "secretnode/posture/" + name.lower().replace(" ", "-").replace("/", "-")
+        severity = _severity_of(p)
+        cwe = str(p.get("cwe", "") or "CWE-693")
+        if rule_id not in rules:
+            rules[rule_id] = {
+                "id": rule_id,
+                "name": "Posture" + "".join(w.capitalize() for w in name.split()),
+                "shortDescription": {"text": name},
+                "fullDescription": {"text": str(p.get("remediation", "") or name)},
+                "help": {"text": str(p.get("remediation", "") or name)},
+                "helpUri": _TOOL_URI,
+                "defaultConfiguration": {"level": _SARIF_LEVEL.get(severity, "warning")},
+                "properties": {
+                    # "secret" is deliberately absent — these are configuration
+                    # weaknesses, and a consumer filtering on that tag is asking
+                    # for leaked credentials, which this is not.
+                    "tags": ["security", "posture", cwe],
+                    "cwe": cwe,
+                    "security-severity": _SARIF_SECURITY_SEVERITY.get(severity, "5.0"),
+                },
+            }
+        results.append({
+            "ruleId": rule_id,
+            "level": _SARIF_LEVEL.get(severity, "warning"),
+            "message": {"text": f"{name} ({severity}). {p.get('evidence', '')}".strip()},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {
+                        "uri": p.get("_host", "") or scan.get("target_url", "") or "unknown",
+                    },
+                }
+            }],
+            "properties": {
+                "severity": severity,
+                "cwe": cwe,
+                "evidence": str(p.get("evidence", "") or ""),
+                "remediation": str(p.get("remediation", "") or ""),
+                "found_at": str(p.get("found_at", "") or ""),
+                **({"host": str(p["_host"])} if p.get("_host") else {}),
+                "status": "posture",
+            },
+        })
+
     sarif = {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -705,9 +778,50 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     confirmed_total = int(totals.get("confirmed", 0))
-    pill_color = "#c53030" if confirmed_total else "#276749"
-    pill_text = (f"{confirmed_total} confirmed credential exposure(s) across the domain"
-                 if confirmed_total else "No confirmed credential exposures across the domain")
+
+    # Coverage: how much of the live surface this scan actually read. MAX_TARGETS
+    # (default 25) is applied as a prefix slice of an alphabetically sorted host
+    # list, so a domain with more live hosts than the cap is not merely sampled —
+    # it is truncated at a letter. A pepsico.com scan read 26 of 83 live hosts,
+    # everything past "gatorade-api" was never fetched, and the banner still said
+    # "No confirmed credential exposures across the domain".
+    #
+    # That claim is the product. Saying it from 31% of the surface is the same
+    # error v2.12.3 fixed for resolved findings — asserting an absence that the
+    # scan's coverage does not support — and it is worse here, because a domain
+    # verdict is the line a client reads first and quotes to their board. The cap
+    # stays where it is: raising it silently multiplies traffic against a third
+    # party. What changes is that the report stops overstating what it looked at.
+    live_total = int(totals.get("live_hosts", 0) or len(deep.get("live_hosts", []) or []))
+    scanned_total = len([h for h in hosts if not h.get("error")])
+    partial = live_total > 0 and scanned_total < live_total
+
+    if confirmed_total:
+        # A real exposure outranks coverage: partial reading never softens a
+        # credential that was actually found.
+        pill_label = "EXPOSURE"
+        pill_color = "#c53030"
+        pill_text = f"{confirmed_total} confirmed credential exposure(s) across the domain"
+    elif partial:
+        pill_label = "PARTIAL"
+        pill_color = "#d69e2e"
+        pill_text = (
+            f"No confirmed credential exposures in the {scanned_total} of {live_total} "
+            f"live host(s) examined — the remaining {live_total - scanned_total} were not scanned"
+        )
+    else:
+        pill_label = "CLEAN"
+        pill_color = "#276749"
+        pill_text = "No confirmed credential exposures across the domain"
+
+    coverage_note = (
+        f'<div class="small" style="margin-top:8px;"><b>Coverage:</b> {scanned_total} of '
+        f'{live_total} live host(s) were scanned — the per-run host limit was reached, and hosts '
+        f'are taken in alphabetical order, so the {live_total - scanned_total} not examined are '
+        f'the tail of that ordering rather than a random sample. This verdict covers the scanned '
+        f'hosts only. Re-run with a higher host limit for full coverage.</div>'
+        if partial else ""
+    )
 
     def host_row(h: dict[str, Any]) -> str:
         err = h.get("error")
@@ -790,6 +904,46 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
     takeover_rows = "\n".join(takeover_row(t) for t in takeovers) or \
         '<tr><td colspan="5" class="empty">None detected.</td></tr>'
 
+    # R8 follow-up — itemise the posture issues. The count already appeared in a
+    # KPI tile and a per-host column, so a pepsico.com report told the client it
+    # had 143 header/misconfiguration problems and gave them no way to learn what
+    # any of them were. A number a reader cannot act on is not a finding.
+    #
+    # Grouped by issue rather than by host, because these repeat: one missing CSP
+    # across twenty-six hosts is one remediation, and a flat list reads as
+    # twenty-six problems. The host list is what makes it actionable.
+    posture_findings = deep.get("posture_findings", [])
+    by_issue: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for p in posture_findings:
+        key = (str(p.get("name", "")), _severity_of(p), str(p.get("cwe", "")))
+        entry = by_issue.setdefault(key, {"hosts": [], "evidence": "", "remediation": ""})
+        host = str(p.get("_host", "") or "")
+        if host and host not in entry["hosts"]:
+            entry["hosts"].append(host)
+        entry["evidence"] = entry["evidence"] or str(p.get("evidence", "") or "")
+        entry["remediation"] = entry["remediation"] or str(p.get("remediation", "") or "")
+
+    def posture_row(key: tuple[str, str, str], entry: dict[str, Any]) -> str:
+        name, sev, cwe = key
+        hosts = entry["hosts"]
+        shown = ", ".join(html.escape(h) for h in hosts[:8])
+        if len(hosts) > 8:
+            shown += f" <span class=\"small\">(+{len(hosts) - 8} more)</span>"
+        return ("<tr>"
+                f'<td><span class="sev sev-{sev.lower()}">{html.escape(sev)}</span></td>'
+                f'<td>{html.escape(name)}<div class="small">{html.escape(cwe)}</div></td>'
+                f'<td style="text-align:center;">{len(hosts) or 1}</td>'
+                f'<td class="mono small">{shown or "—"}</td>'
+                f'<td class="small">{html.escape(entry["evidence"])}</td>'
+                f'<td class="small">{html.escape(entry["remediation"])}</td>'
+                "</tr>")
+
+    posture_rows = "\n".join(
+        posture_row(k, v) for k, v in sorted(
+            by_issue.items(), key=lambda kv: (_SEVERITY_RANK.get(kv[0][1], 2), kv[0][0])
+        )
+    ) or '<tr><td colspan="6" class="empty">No header/misconfiguration issues detected.</td></tr>'
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Domain Attack-Surface Report — {domain}</title>
@@ -823,8 +977,8 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
   footer {{ margin-top: 40px; font-size: 11px; color: #a0aec0; border-top: 1px solid #e2e8f0; padding-top: 12px; }}
 </style></head><body>
   <h1>Domain Attack-Surface Report — {domain}</h1>
-  <div class="verdict"><span class="risk-pill">{'EXPOSURE' if confirmed_total else 'CLEAN'}</span>
-    &nbsp;<b>{pill_text}.</b>
+  <div class="verdict"><span class="risk-pill">{pill_label}</span>
+    &nbsp;<b>{pill_text}.</b>{coverage_note}
     <div class="small" style="margin-top:8px;">Passive assessment — subdomains discovered from
     Certificate Transparency ({html.escape(sources)}); live hosts scanned for exposed credentials and
     security-header posture. No exploitation, brute-force, or write operations were performed.</div>
@@ -849,6 +1003,16 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
   <table>
     <thead><tr><th>Host</th><th>Severity</th><th>Service</th><th>CNAME</th><th>Evidence</th></tr></thead>
     <tbody>{takeover_rows}</tbody>
+  </table>
+
+  <h2>Security Posture Issues (all hosts)</h2>
+  <div class="small" style="margin-bottom:6px;">Missing or weak security headers, version
+  disclosure and insecure cookies, observed passively on responses the hosts already serve.
+  Grouped by issue: one missing header across many hosts is one fix, not many. These are
+  configuration weaknesses, not credential exposures.</div>
+  <table>
+    <thead><tr><th>Severity</th><th>Issue</th><th>Hosts</th><th>Affected hosts</th><th>Evidence</th><th>Remediation</th></tr></thead>
+    <tbody>{posture_rows}</tbody>
   </table>
 
   <h2>Per-host results</h2>
