@@ -20,14 +20,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import ipaddress
 import json
-import os
-import socket
 import sys
-from urllib.parse import urlparse
 
 import historical
+import netguard
 import orchestrator
 import recon
 import report
@@ -38,23 +35,17 @@ from ops import ledger
 def assert_public_target(url: str) -> None:
     """Refuse private/loopback/link-local/reserved targets (SSRF guard), unless
     ALLOW_PRIVATE_TARGETS=true is explicitly set for authorized lab testing.
-    Mirrors the guard the API server applies."""
-    if os.environ.get("ALLOW_PRIVATE_TARGETS", "false").lower() == "true":
-        return
-    host = urlparse(url).hostname
-    if not host:
-        raise SystemExit("Invalid target URL: no hostname")
+
+    Delegates to `netguard`, the same rule the API server applies pre-flight and
+    the fetch path applies to every redirect hop. This used to be a second,
+    hand-rolled copy; two copies of a security check are two things that can
+    disagree, and the interesting question is always which one the traffic
+    actually went through.
+    """
     try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror as exc:
-        raise SystemExit(f"Could not resolve target host: {host} ({exc})")
-    for _family, _t, _p, _c, sockaddr in infos:
-        ip = ipaddress.ip_address(sockaddr[0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            raise SystemExit(
-                f"Refusing to scan {host} — resolves to a private/internal address ({ip}). "
-                "Set ALLOW_PRIVATE_TARGETS=true only for authorized internal-lab testing."
-            )
+        netguard.assert_public_target(url)
+    except netguard.BlockedTarget as exc:
+        raise SystemExit(f"Refusing to scan — {exc}")
 
 
 def build_output(result: dict, fmt: str) -> str:

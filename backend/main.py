@@ -14,10 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import ipaddress
 import secrets
-import socket
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Depends, Request
@@ -42,6 +39,7 @@ load_dotenv()
 # 3.12+, and uvicorn already selects the event loop itself via --loop (auto/uvloop),
 # so the speed-up is preserved without a module-level global side effect.
 
+import netguard
 from scanner import run_scan, ScanState, load_asset_cache, drain_asset_cache
 import orchestrator
 from ops import ledger
@@ -90,26 +88,22 @@ ALLOW_PRIVATE_TARGETS = os.environ.get("ALLOW_PRIVATE_TARGETS", "false").lower()
 
 
 def assert_public_target(url: str) -> None:
-    if ALLOW_PRIVATE_TARGETS:
-        return
-    host = urlparse(url).hostname
-    if not host:
-        raise ValueError("Could not parse hostname from target_url")
+    """Pre-flight address check for an operator-supplied target.
+
+    The rule itself lives in `netguard`, which is also what validates every
+    redirect hop mid-scan. Three copies of this check existed — here, in
+    `cli.py`, and nowhere at all on the fetch path — and the one that was
+    missing is the one that mattered: a 302 walked straight past both of the
+    others into loopback and link-local space. One implementation means the
+    pre-flight answer and the in-flight answer cannot drift apart.
+
+    Still raises ValueError, because the endpoints translate that into HTTP 400
+    and their tests pin it.
+    """
     try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror as exc:
-        raise ValueError(f"Could not resolve target host: {host}") from exc
-    for family, _, _, _, sockaddr in infos:
-        ip = ipaddress.ip_address(sockaddr[0])
-        if (
-            ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast
-        ):
-            raise ValueError(
-                f"Target {host} resolves to a private/internal address ({ip}). "
-                "Refusing to scan — set ALLOW_PRIVATE_TARGETS=true in .env only "
-                "for authorized internal lab testing."
-            )
+        netguard.assert_public_target(url)
+    except netguard.BlockedTarget as exc:
+        raise ValueError(str(exc)) from exc
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -28,6 +28,7 @@ from google import genai
 from google.genai import errors as genai_errors, types
 from pydantic import BaseModel, Field, ValidationError
 
+import netguard
 import posture
 import surface
 import verifier
@@ -886,6 +887,20 @@ _asset_cache_out: dict[str, dict[str, Any]] = {}
 # "0 assets", which reads to a client as "nothing was scanned".
 _asset_cache_hits: set[str] = set()
 
+# final URL -> the URL originally requested, for assets that redirected.
+#
+# The cache is keyed on the URL we *ask for*, because that is the stable key
+# across scans: it is what discovery produces, and it is what the next scan will
+# look up. But `fetch_url` now returns the URL that actually answered (see the
+# redirect guard), so `mark_asset_dirty` is called with the final URL — and
+# without this map it would find no entry and mark nothing.
+#
+# That silent miss is the dangerous direction. An asset that redirected and held
+# a credential would stay recorded as `was_clean=True`, so the next scan's 304
+# would skip it and the finding would vanish from the report. A finding that
+# disappears reads as "resolved". This map is what keeps the two keyings in step.
+_asset_redirect_alias: dict[str, str] = {}
+
 
 def load_asset_cache(entries: dict[str, dict[str, Any]]) -> None:
     """Prime the conditional-GET cache for a scan."""
@@ -893,6 +908,7 @@ def load_asset_cache(entries: dict[str, dict[str, Any]]) -> None:
     _asset_cache_in.update(entries or {})
     _asset_cache_out.clear()
     _asset_cache_hits.clear()
+    _asset_redirect_alias.clear()
 
 
 def cached_clean_count() -> int:
@@ -921,9 +937,15 @@ def _usable_body(body: str | None) -> bool:
 
 def mark_asset_dirty(url: str) -> None:
     """Record that `url` yielded a finding, so a future 304 refetches it
-    instead of skipping — a finding must never silently vanish."""
-    if url in _asset_cache_out:
-        _asset_cache_out[url]["was_clean"] = False
+    instead of skipping — a finding must never silently vanish.
+
+    `url` may be either the URL requested or the URL that answered after a
+    redirect, because callers hold the latter. Resolve through the alias map so
+    a redirected asset's entry is marked too.
+    """
+    key = url if url in _asset_cache_out else _asset_redirect_alias.get(url, url)
+    if key in _asset_cache_out:
+        _asset_cache_out[key]["was_clean"] = False
 
 
 def _backoff_delay(attempt: int) -> float:
@@ -1000,7 +1022,12 @@ def build_client(user_agent: str | None = None) -> httpx.AsyncClient:
         http2 = False
     return httpx.AsyncClient(
         timeout=httpx.Timeout(FETCH_TIMEOUT, connect=10.0),
-        follow_redirects=True,
+        # Redirects are followed by `_get_following_redirects`, one hop at a
+        # time, with every hop validated. httpx's own follow_redirects=True
+        # resolves and connects internally, which leaves no seam to check an
+        # address at — so a 302 to 169.254.169.254 was simply followed, and the
+        # instance-metadata response was scanned for credentials. See netguard.
+        follow_redirects=False,
         http2=http2,
         limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
         headers=_browser_headers(ua),
@@ -1028,6 +1055,67 @@ def _looks_scannable(content_type: str) -> bool:
     }
 
 
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+
+
+async def _get_following_redirects(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str] | None,
+    broadcast: Broadcaster | None = None,
+) -> tuple[httpx.Response, str]:
+    """GET `url`, following redirects one validated hop at a time.
+
+    Returns ``(response, final_url)``. Raises `netguard.BlockedTarget` if any hop
+    is refused — the caller turns that into a logged, non-fatal skip for that
+    asset, because one refused redirect must not abort a whole scan.
+
+    Hops are walked here rather than by httpx because httpx resolves and
+    connects internally: with ``follow_redirects=True`` there is no point at
+    which the next hop's address can be inspected before the request goes out.
+    Checking the chain afterwards is not equivalent — by then the request has
+    already been made, which for an internal address is the entire harm.
+
+    A 303, and a 301/302 answering anything other than GET/HEAD, become a GET by
+    specification. Everything this scanner issues is already a GET, so the rule
+    is noted rather than implemented: there is no method to downgrade.
+    """
+    current = url
+    for hop in range(netguard.MAX_REDIRECTS + 1):
+        response = await client.get(current, headers=headers)
+        if response.status_code not in _REDIRECT_CODES:
+            return response, current
+
+        location = response.headers.get("location")
+        if not location:
+            # A redirect status with no Location is a broken server, not a
+            # redirect. Hand back the response as-is and let the ordinary
+            # status handling deal with it.
+            return response, current
+
+        # Resolve against the hop we are on, which is what a browser does.
+        # Scope, though, is judged against the URL originally requested — see
+        # check_redirect_hop for why chaining scope hop-to-hop is unsafe.
+        nxt = urljoin(current, location.strip())
+        netguard.check_redirect_hop(url, nxt, enforce_scope=SCOPE_SAME_DOMAIN)
+
+        if hop >= netguard.MAX_REDIRECTS:
+            raise netguard.BlockedTarget(
+                f"Redirect chain exceeded {netguard.MAX_REDIRECTS} hops starting at {url} "
+                "— treating as a loop."
+            )
+        if broadcast:
+            await broadcast({
+                "type": "log", "level": "INFO",
+                "message": f"Redirect {response.status_code}: {current} → {nxt}",
+            })
+        current = nxt
+
+    # Unreachable: the loop either returns a response or raises. Kept explicit
+    # so a future edit to the bounds cannot fall out of the function with None.
+    raise netguard.BlockedTarget(f"Redirect handling fell through for {url}")
+
+
 async def fetch_url(
     client: httpx.AsyncClient,
     url: str,
@@ -1043,7 +1131,15 @@ async def fetch_url(
     Resilience for authorized testing (v2.4.0): on a WAF/CDN challenge
     (401/403/406/429/503) we retry with a different browser fingerprint before
     giving up, and emit a diagnostic that names the likely cause instead of a
-    bare "failed". Respects 429 Retry-After. Returns (url, body) or (url, None).
+    bare "failed". Respects 429 Retry-After.
+
+    Returns ``(final_url, body)`` or ``(final_url, None)``. The first element is
+    the URL that **answered**, which after a redirect is not the URL requested.
+    Returning the requested URL, as this did before, mis-stated provenance in
+    two ways that both reach the client's report: a finding served from the
+    redirect's destination was attributed to the original host, and relative
+    asset URLs in a redirected page were resolved against the pre-redirect base,
+    producing 404s and a quietly under-covered scan.
 
     `allow_cache_skip=False` still sends the conditional GET and still records
     the validators, but never returns CACHED_CLEAN — the caller gets a real
@@ -1095,7 +1191,14 @@ async def fetch_url(
                     if len(cond) > len(extra_headers or {}):
                         extra_headers = cond
 
-                response = await client.get(url, headers=extra_headers)
+                response, final_url = await _get_following_redirects(
+                    client, url, extra_headers, broadcast
+                )
+                if final_url != url:
+                    # Keep the cache keyed on the requested URL (the stable key
+                    # discovery will produce again next scan) while callers work
+                    # with the URL that answered.
+                    _asset_redirect_alias[final_url] = url
 
                 if response.status_code == 304:
                     _throttle_reward(host)
@@ -1103,7 +1206,7 @@ async def fetch_url(
                         # Unchanged and previously clean -> nothing to re-scan.
                         _cout[url] = dict(entry)
                         _asset_cache_hits.add(url)
-                        return url, CACHED_CLEAN
+                        return final_url, CACHED_CLEAN
                     # Either the asset yielded a finding last time, or the server
                     # sent 304 unprompted. Both need the body: a finding that
                     # vanished from a report reads as "resolved", which would be
@@ -1112,13 +1215,17 @@ async def fetch_url(
                     # RETRY_ATTEMPTS=1 the refetch never happens and the asset is
                     # silently lost.
                     revalidate = False
-                    response = await client.get(
-                        url, headers=extract_headers_without_validators(extra_headers)
+                    response, final_url = await _get_following_redirects(
+                        client, url,
+                        extract_headers_without_validators(extra_headers),
+                        broadcast,
                     )
+                    if final_url != url:
+                        _asset_redirect_alias[final_url] = url
                     if response.status_code == 304:
                         # Server insists nothing changed even unconditionally —
                         # treat as unreachable rather than spin.
-                        return url, None
+                        return final_url, None
 
                 if response.status_code == 429:
                     retry_after = _parse_retry_after(
@@ -1138,7 +1245,7 @@ async def fetch_url(
                     continue
 
                 if response.status_code in (404, 410):
-                    return url, None
+                    return final_url, None
 
                 if response.status_code in _WAF_BLOCK_CODES:
                     waf_block_status = response.status_code
@@ -1168,13 +1275,23 @@ async def fetch_url(
                                 f"scanner's source IP or set SECRETNODE_USER_AGENT to an approved value."
                             ),
                         })
-                    return url, None
+                    return final_url, None
 
                 response.raise_for_status()
                 # Clean response — let this host's pacing relax back toward zero.
                 _throttle_reward(host)
 
-                cl = int(response.headers.get("content-length", 0))
+                # A malformed or duplicated Content-Length ("512, 512", as some
+                # proxies emit) raised ValueError here, which the catch-all
+                # handler below turned into a silent asset drop with no retry —
+                # an unread asset is an unscanned asset, and the scan still
+                # reported CLEAN. The body-size cap below already bounds what we
+                # read, so an unparseable header is a reason to fall through to
+                # it, not to abandon the asset.
+                try:
+                    cl = int(response.headers.get("content-length", 0) or 0)
+                except (TypeError, ValueError):
+                    cl = 0
                 if cl > MAX_ASSET_BYTES:
                     if broadcast:
                         await broadcast({
@@ -1182,10 +1299,10 @@ async def fetch_url(
                             "level": "WARN",
                             "message": f"Skipping oversized asset ({cl/1024/1024:.1f} MB): {url}",
                         })
-                    return url, None
+                    return final_url, None
 
                 if not _looks_scannable(response.headers.get("content-type", "")):
-                    return url, None
+                    return final_url, None
 
                 # Guard against a chunked/undeclared body that exceeds the cap.
                 text = response.text
@@ -1205,7 +1322,7 @@ async def fetch_url(
                             # corrects this once the asset has been scanned.
                             "was_clean": True,
                         }
-                return url, text
+                return final_url, text
 
             except httpx.TimeoutException:
                 msg = f"Timeout (attempt {attempt}/{RETRY_ATTEMPTS}): {url}"
@@ -1218,6 +1335,19 @@ async def fetch_url(
                 logger.warning(msg)
                 if broadcast:
                     await broadcast({"type": "log", "level": "WARN", "message": msg})
+
+            except netguard.BlockedTarget as exc:
+                # A refused hop is a skipped asset, never an aborted scan: one
+                # bad redirect on one bundle must not cost the whole engagement.
+                # It is logged at ERROR rather than swallowed, because this is
+                # the branch where coverage is deliberately given up, and a
+                # coverage loss nobody is told about is how a scan that read
+                # almost nothing still reports CLEAN.
+                msg = f"Refused to follow redirect from {url} — {exc}"
+                logger.error(msg)
+                if broadcast:
+                    await broadcast({"type": "log", "level": "ERROR", "message": msg})
+                return url, None
 
             except httpx.HTTPStatusError as exc:
                 msg = f"HTTP {exc.response.status_code} for {url}"
@@ -1724,11 +1854,20 @@ async def spider_target(
     html_pages: list[tuple[str, str]] = [(root_url, html_body)]
     visited_pages: set[str] = {root_url}
     scope_rejected: list[str] = []
-    all_js_urls: set[str] = set(extract_js_urls(html_body, target_url, scope_rejected))
+    # Relative URLs in the root document resolve against the URL that ANSWERED,
+    # not the one that was asked for. `https://example.com` answering as
+    # `https://example.com/en/` means `src="app.js"` is `/en/app.js`; resolving
+    # it against the pre-redirect base produced `/app.js`, a 404, and a bundle
+    # that silently never entered the scan. Every redirecting target — an apex
+    # sending traffic to `www`, a locale prefix, a trailing-slash normalisation —
+    # was losing coverage this way, and nothing in the output said so.
+    all_js_urls: set[str] = set(extract_js_urls(html_body, root_url, scope_rejected))
 
     # ── Shallow same-domain crawl for additional HTML pages ─────────────────
     if max_pages > 1:
-        queue = [u for u in extract_page_links(html_body, target_url) if u not in visited_pages]
+        # Same reason as the asset base above: link hrefs resolve against the
+        # URL that answered.
+        queue = [u for u in extract_page_links(html_body, root_url) if u not in visited_pages]
         while queue and len(visited_pages) < max_pages:
             batch = queue[: max_pages - len(visited_pages)]
             queue = queue[len(batch):]
