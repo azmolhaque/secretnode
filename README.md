@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-787%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.14.1-blue)
+![Tests](https://img.shields.io/badge/tests-805%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.14.2-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,41 +14,38 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.14.1 — three limits that were documented, asserted, or implied** ·
+> **v2.14.2 — the fix removed one cause and left another standing** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> An audit for this codebase's recurring shape: a guarantee stated somewhere a
-> reader will believe it, with nothing behind it.
+> A live deep scan of a 258-subdomain estate. v2.13.1's coverage verdict and
+> posture section both worked on it; reading the report against its own CSV
+> turned up three defects anyway.
 >
-> **The documented RAM bound was not one.** The table below credited
-> `Semaphore(20)` with bounding RAM during deep JS analysis; it bounds concurrent
-> *fetches*. Every body was held until the scan ended with no aggregate cap, and
-> the JS asset list had no cap at all — so source maps alone could reach 200 MB
-> on the 16 GB Pi this targets. `MAX_TOTAL_ASSET_BYTES` now bounds what a scan
-> *keeps*, and engaging it is reported as partial coverage rather than a silent
-> shortfall.
+> **`i.test` was still there, from a construct the earlier fix never saw.** The
+> bundle supplied with the report came back *clean* when tested directly, which
+> pointed at a different shape: `/^https?:\/\//i.test(u)`, the idiomatic
+> absolute-URL test. v2.13.1 taught the stripper to recognise a regex literal but
+> left its text in place — and that literal's own escaped slashes spell
+> `//i.test`. Bodies are now blanked; a host inside a pattern has escaped dots
+> and was never extractable anyway.
 >
-> **Credentials were retained in memory indefinitely.** The scan registry was
-> appended to and never pruned, so a long-running dashboard held every credential
-> it had ever found in RAM — the same argument the asset cache already makes
-> about disk, applied where nothing enforced it. Scan history had no retention
-> either, at ~16.7 KB per scan.
+> **Blanking then turned a harmless misparse into a dropped finding**, caught by a
+> test predating all of this work. `</script>` opens with a slash exactly where a
+> literal would, so scanning on swallowed a real external host out of the graph.
+> Latent and free for two releases; a false negative only once an unrelated
+> improvement changed what happened to the text it mis-tokenised.
 >
-> **A credential could reach a log.** Telegram's API requires the token in the
-> URL, and an `HTTPStatusError` renders that URL into a message the verifier
-> logged verbatim. Latent — no verifier calls `raise_for_status()` today — and
-> fixed anyway, because a docstring invariant with no mechanism behind it is how
-> the authorization ledger came to be a comment.
+> **One host's evidence was printed for a whole posture group** — `server:
+> AmazonS3` shown against a host actually disclosing `Microsoft-IIS/10.0`. For
+> version disclosure the evidence *is* the finding. And **`AmazonS3` is not a
+> version disclosure**: the check was `any(c.isdigit())`, and the 3 is part of a
+> product name.
 >
-> **Measured and not shipped:** WAL journaling looked like an obvious win and
-> made this workload **2.8x slower** with zero errors either way. A regression
-> sold as an improvement is worse than leaving it alone.
->
-> The two releases before it: **v2.14.0** gave recall a number measured against a
-> corpus this project did not write (80.6%), which immediately found that the
-> current OpenAI key formats were undetected; **v2.13.2** fixed posture measuring
-> a redirect hop instead of the page behind it.
+> The two releases before it: **v2.14.1** bounded three limits that were
+> documented, asserted or implied but unenforced; **v2.14.0** gave recall a number
+> measured against a corpus this project did not write (80.6%), which immediately
+> found the current OpenAI key formats undetected.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.

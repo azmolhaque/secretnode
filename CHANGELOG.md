@@ -3,6 +3,80 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.2] — The fix removed one cause and left another standing
+
+A live deep scan of a 258-subdomain estate. v2.13.1's coverage verdict and
+posture section both worked on it — PARTIAL fired correctly at 25 of 127 live
+hosts, and 133 posture issues reached all three deliverables. Reading the report
+against its own CSV turned up three defects anyway, and the first is the one
+worth keeping.
+
+### Fixed — `i.test` was still in the report, from a construct v2.13.1 never saw
+
+That release fixed `i.test` reaching a client's "external hosts" list. The new
+report listed it again. The bundle supplied with the report came back **clean**
+when tested directly, which ruled out the construct v2.13.1 was written for and
+pointed at a different one:
+
+```
+/^https?:\/\//i.test(u)
+```
+
+the idiomatic absolute-URL test, in more or less every bundle. v2.13.1 taught
+the stripper to *recognise* a regex literal but deliberately left its text in
+place — "a regex is code, not a comment". Correct for finding comments, wrong
+for what runs next: that literal's own escaped slashes and terminator spell
+`//i.test`, and `_ABS_URL` reads it as a protocol-relative host.
+
+Regex bodies are now blanked. Nothing is lost: a host written inside a pattern
+carries escaped dots, and `_valid_host` rejects a backslash, so such a host was
+never extractable in the first place.
+
+### Fixed — blanking turned a harmless misparse into a dropped finding
+
+Caught immediately by a test that predates all of this work, and the more
+instructive half of the change. `strip_js_comments` runs over whole HTTP
+responses, so it sees HTML as well as JavaScript — and `</script>` opens with a
+slash exactly where a regex literal would. Scanning on from there swallows
+everything up to the next `/`, which in `</script><img src="https://…` is the
+one inside the URL.
+
+That misparse already existed and cost nothing, because the text was left in
+place and still matched. Blanking is what made it destructive: a real external
+host disappeared from the graph. A candidate literal containing `<` or `>` is
+now not treated as one, which falls back to the previous behaviour for that
+single literal and loses no host either way.
+
+The lesson is narrower than "test your changes": the same mis-tokenisation was
+latent and harmless for two releases, and became a false negative only when an
+unrelated improvement changed what happened to the text it mis-tokenised.
+
+### Fixed — one host's evidence was printed for a whole posture group
+
+v2.14.0's grouping took the first evidence it saw and rendered it against every
+host in the group. The report grouped `china.pop` (`server: AmazonS3`) with
+`falconapp.fres` (`server: Microsoft-IIS/10.0`) and printed **AmazonS3 for
+both**. The CSV had the truth; the HTML the client reads did not.
+
+For version disclosure the evidence *is* the finding — which software leaked —
+so collapsing it destroyed the only actionable content while still looking
+authoritative. Evidence is now kept per host: identical evidence still renders
+once, so grouping still means "one fix, not many"; differing evidence is
+attributed to the host it came from.
+
+### Fixed — `Server: AmazonS3` is not a version disclosure
+
+The check was `any(c.isdigit())`. The 3 in S3 is part of a product name, and a
+client was told their server leaked a software version. A version is a number
+identifying a *release*, which is what makes the disclosure useful against a CVE
+list, so the test is now for a release-shaped token: a dotted number
+(`4.0.30319`) or a slash-prefixed one (`nginx/1.18`). `cloudflare`, `Apache`,
+`gws`, `openresty` and `AmazonS3` match neither, which is correct for all five;
+`Microsoft-IIS/10.0` and `Apache/2.4.41 (Ubuntu)` still match.
+
+**805 tests, ruff clean.** Ground truth 71/71 with zero false positives;
+external-validity recall unchanged at 80.6%.
+
 ## [2.14.1] — Three limits that were documented, asserted, or implied
 
 An audit for this codebase's recurring shape: a guarantee stated somewhere a

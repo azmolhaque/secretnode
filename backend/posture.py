@@ -15,6 +15,8 @@ discovery (crt.sh), DNS resolution + dangling-CNAME takeover checks.
 
 from __future__ import annotations
 
+import re
+
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -39,6 +41,22 @@ class PostureFinding:
             "evidence": self.evidence, "remediation": self.remediation,
             "category": self.category, "found_at": self.found_at,
         }
+
+
+# A version is a number that identifies a *release*, which is what makes the
+# disclosure useful to an attacker matching against a CVE list. "any digit"
+# does not test that: `Server: AmazonS3` contains a 3, and S3 is a product name.
+# A real scan reported it to a client as a leaked software version, in the one
+# section of the report meant to be purely factual.
+#
+# Two shapes carry a release: a dotted number (1.18.0, 4.0.30319) and a
+# slash-prefixed one (nginx/1.18, IIS/10.0). `cloudflare`, `AmazonS3` and
+# `Apache` match neither, which is the correct answer for all three.
+_VERSION_TOKEN = re.compile(r"\d+\.\d+|/\s*\d")
+
+
+def _discloses_a_version(value: str) -> bool:
+    return bool(_VERSION_TOKEN.search(value))
 
 
 def analyze_security_headers(headers: dict[str, Any] | None, final_url: str) -> list[PostureFinding]:
@@ -85,7 +103,7 @@ def analyze_security_headers(headers: dict[str, Any] | None, final_url: str) -> 
 
     for hdr in ("server", "x-powered-by", "x-aspnet-version"):
         val = h.get(hdr, "")
-        if val and any(c.isdigit() for c in val):
+        if val and _discloses_a_version(val):
             add(f"Version disclosure via {hdr}", "LOW", "CWE-200",
                 f"{hdr}: {val}",
                 f"Remove or obscure the '{hdr}' header so it does not reveal software versions.")

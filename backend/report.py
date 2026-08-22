@@ -927,11 +927,20 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
     by_issue: dict[tuple[str, str, str], dict[str, Any]] = {}
     for p in posture_findings:
         key = (str(p.get("name", "")), _severity_of(p), str(p.get("cwe", "")))
-        entry = by_issue.setdefault(key, {"hosts": [], "evidence": "", "remediation": ""})
+        entry = by_issue.setdefault(
+            key, {"hosts": [], "evidence_by_host": {}, "remediation": ""})
         host = str(p.get("_host", "") or "")
         if host and host not in entry["hosts"]:
             entry["hosts"].append(host)
-        entry["evidence"] = entry["evidence"] or str(p.get("evidence", "") or "")
+        # Evidence is kept PER HOST, not collapsed to the first one seen.
+        # Grouping originally took `entry["evidence"] or ...`, which printed one
+        # host's evidence against every host in the group. On a real report that
+        # put "server: AmazonS3" beside a host actually disclosing
+        # "Microsoft-IIS/10.0" — and for version disclosure the evidence *is*
+        # the finding, so collapsing it destroyed the only actionable content
+        # while still looking authoritative. Identical evidence still renders
+        # once; only genuinely differing evidence is attributed.
+        entry["evidence_by_host"][host or "—"] = str(p.get("evidence", "") or "")
         entry["remediation"] = entry["remediation"] or str(p.get("remediation", "") or "")
 
     def posture_row(key: tuple[str, str, str], entry: dict[str, Any]) -> str:
@@ -940,12 +949,24 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
         shown = ", ".join(html.escape(h) for h in hosts[:8])
         if len(hosts) > 8:
             shown += f" <span class=\"small\">(+{len(hosts) - 8} more)</span>"
+        ev_map = entry["evidence_by_host"]
+        distinct = sorted(set(ev_map.values()))
+        if len(distinct) <= 1:
+            evidence_cell = html.escape(distinct[0] if distinct else "")
+        else:
+            # Differing evidence is attributed to the host it came from, so a
+            # reader can act on it. Capped like the host list.
+            pairs = [f"{html.escape(h)}: {html.escape(e)}"
+                     for h, e in sorted(ev_map.items())][:8]
+            evidence_cell = "<br>".join(pairs)
+            if len(ev_map) > 8:
+                evidence_cell += f' <span class="small">(+{len(ev_map) - 8} more)</span>'
         return ("<tr>"
                 f'<td><span class="sev sev-{sev.lower()}">{html.escape(sev)}</span></td>'
                 f'<td>{html.escape(name)}<div class="small">{html.escape(cwe)}</div></td>'
                 f'<td style="text-align:center;">{len(hosts) or 1}</td>'
                 f'<td class="mono small">{shown or "—"}</td>'
-                f'<td class="small">{html.escape(entry["evidence"])}</td>'
+                f'<td class="small">{evidence_cell}</td>'
                 f'<td class="small">{html.escape(entry["remediation"])}</td>'
                 "</tr>")
 

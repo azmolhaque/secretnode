@@ -63,10 +63,17 @@ class TestStripperSurvivesRegexLiterals:
         hosts = surface.extract_referenced_hosts(self.BUNDLE, "https://acme.test/a.js")
         assert "api.real.example.com" in hosts
 
-    def test_regex_literal_text_is_left_in_place(self):
-        """A regex is code, not a comment. Only its extent matters."""
+    def test_the_regex_literal_is_consumed_not_left_in_place(self):
+        """v2.13.1 left the literal's text alone, reasoning that a regex is code
+        rather than a comment. v2.14.2 reversed that: the literal's own escaped
+        slashes were being read as a protocol-relative host. Its extent is still
+        what stops a quote inside it opening a string — the length and the line
+        count are unchanged."""
         src = "var re = /['\"]/g;\nvar y = 1;\n"
-        assert surface.strip_js_comments(src) == src
+        out = surface.strip_js_comments(src)
+        assert len(out) == len(src)
+        assert out.count("\n") == src.count("\n")
+        assert "var y = 1;" in out
 
 
 class TestDivisionIsNotMistakenForARegex:
