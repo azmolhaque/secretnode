@@ -26,6 +26,11 @@ venv/
 # deterministic from a fixed seed, so it costs nothing to regenerate and there
 # is no reason to track it.
 backend/bench-corpus/
+# Unanchored as well: the corpus lands relative to the working directory
+# the benchmark was invoked from, so running it from the repo root writes
+# ./bench-corpus/ instead — which the path-anchored entry above does not
+# cover, leaving the same push-protection trap one `cd` away.
+bench-corpus/
 
 # Runtime data / SQLite
 backend/data/*.db

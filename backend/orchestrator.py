@@ -68,6 +68,12 @@ class HostScan:
     url: str
     confirmed: int = 0
     needs_review: int = 0
+    # Public-by-design values (a Firebase web apiKey, a Stripe pk_, a Sentry
+    # DSN) are examined and cleared, not dropped — v2.13.0 made that the rule
+    # for a single-target scan. The deep scan counted them nowhere and carried
+    # them nowhere, so a domain-wide run silently lost the one bucket whose
+    # whole purpose is to show its work.
+    informational: int = 0
     posture_issues: int = 0
     assets: int = 0
     error: str | None = None
@@ -84,7 +90,8 @@ class HostScan:
     def to_dict(self) -> dict:
         return {
             "host": self.host, "url": self.url, "confirmed": self.confirmed,
-            "needs_review": self.needs_review, "posture_issues": self.posture_issues,
+            "needs_review": self.needs_review, "informational": self.informational,
+            "posture_issues": self.posture_issues,
             "assets": self.assets, "error": self.error,
             "status": self.status, "note": self.note,
         }
@@ -111,6 +118,10 @@ class DeepScanResult:
     @property
     def total_needs_review(self) -> int:
         return sum(h.needs_review for h in self.hosts)
+
+    @property
+    def total_informational(self) -> int:
+        return sum(h.informational for h in self.hosts)
 
     @property
     def total_posture(self) -> int:
@@ -148,6 +159,14 @@ class DeepScanResult:
             "historical_urls": self.historical_urls,
             "confirmed_findings": self._aggregate("confirmed_findings"),
             "needs_review_findings": self._aggregate("needs_review_findings"),
+            # Omitting this is why a Firebase web apiKey sitting in plain sight
+            # in a client's bundle appeared in no deep-scan deliverable at all.
+            # It was detected, triaged and correctly classed public-by-design at
+            # INFO on its host — then discarded here, so the CSV and SARIF (both
+            # of which already render this bucket) had nothing to render. An
+            # absent finding and an examined-and-cleared one look identical to
+            # the reader, and only one of them is true.
+            "informational_findings": self._aggregate("informational_findings"),
             "posture_findings": self._aggregate("posture_findings"),
             # Filtered against the scanned domain, not just each host's own base:
             # a sibling subdomain is the target's own infrastructure, and listing
@@ -188,6 +207,7 @@ class DeepScanResult:
                 "assets_scanned": self.total_assets_scanned,
                 "confirmed": self.total_confirmed,
                 "needs_review": self.total_needs_review,
+                "informational": self.total_informational,
                 "posture_issues": self.total_posture,
                 "takeover_risks": len(self.takeover_findings),
                 # Present here as well as at the top level because `totals` is
@@ -317,6 +337,7 @@ def _summarise_scan(host: str, url: str, scan: dict) -> HostScan:
         url=url,
         confirmed=len(scan.get("confirmed_findings", [])),
         needs_review=len(scan.get("needs_review_findings", [])),
+        informational=len(scan.get("informational_findings", [])),
         posture_issues=len(scan.get("posture_findings", [])),
         assets=int(scan.get("assets_fetched", 0) or 0),
         error=scan.get("error"),

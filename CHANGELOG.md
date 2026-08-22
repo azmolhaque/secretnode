@@ -3,6 +3,63 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.3] — The finding was found, then dropped on the way to the report
+
+A deep scan of an authorized bug-bounty target. `mtw-pwa-test.telenor.se/js/index.js`
+ships a Firebase web config in plain sight — `apiKey:"AIzaSy…"` immediately beside
+`authDomain`, `projectId`, `storageBucket` and `appId`. The scanner's CSV, SARIF and
+HTML all showed nothing about it. Not INFO, not "cleared": nothing.
+
+Every stage before the report was correct. The detector matched the key, the offline
+triage tier called it public-by-design with 95% confidence and a sentence explaining
+why, `effective_severity()` returned INFO and `classify_validated()` routed it to
+`informational`. Then `DeepScanResult.to_dict()` aggregated three buckets —
+`confirmed_findings`, `needs_review_findings`, `posture_findings` — and not the fourth.
+Every reporter already knew how to render that bucket. None of them was ever handed it.
+
+### Fixed — public-by-design findings reached no deep-scan deliverable
+
+This is the same defect as v2.13.0, one level up. There, public-by-design findings were
+*deleted* during validation; here they are computed correctly and discarded during
+aggregation. The argument against both is the one that justifies the bucket existing at
+all: **an absent finding and an examined-and-cleared one look identical to the reader,
+and only one of them is true.** A client who greps a report for the Firebase key they
+know is in their bundle and finds nothing concludes the scanner missed it — the opposite
+of what happened, and a worse impression than reporting a real exposure would have made.
+
+A single-target scan of the same host reported it correctly throughout. Only the
+domain-wide path lost it, which is why 805 passing tests and a live single-target scan
+had both said everything was fine.
+
+`informational_findings` is now aggregated with host provenance like the other three
+buckets, counted in `totals` and in the per-host table, and given its own section in the
+deep-scan HTML — matching the single-target report's wording, because a reader comparing
+the two should not have to work out whether they mean the same thing.
+
+### Fixed — the SARIF and the CSV disagreed about the same finding
+
+Found while verifying the fix above. One `is_review` boolean served two different
+questions, and both places it was read then said the wrong thing about a public-by-design
+value: the message asserted `Manual review required — see note.` on a value that requires
+no action, and `properties.status` — the field a consumer actually filters on — came out
+as `needs_review`. The CSV called the same finding `INFORMATIONAL`.
+
+Two deliverables built from one scan contradicting each other is the failure v2.13.1
+fixed for posture, in a different place: each looks authoritative read alone, so whichever
+one the consumer automated against silently decided the answer. The SARIF now carries
+three states rather than two. `level` stays `note` — a pipeline that goes red on a
+publishable key is a pipeline someone disables, and then the AWS key goes unnoticed too.
+
+### Fixed — the benchmark corpus could still trip push protection
+
+`.gitignore` covered `backend/bench-corpus/`. The corpus is written relative to the
+working directory the benchmark runs from, so invoking it from the repo root produces
+`./bench-corpus/` — synthetic but correctly-shaped credentials, untracked and one
+`git add -A` from the blocked push that entry exists to prevent. Now ignored unanchored.
+
+**818 tests** (+13), ruff clean. Ground truth 71/71 with zero false positives, precision
+1.000 / recall 1.000, unchanged.
+
 ## [2.14.2] — The fix removed one cause and left another standing
 
 A live deep scan of a 258-subdomain estate. v2.13.1's coverage verdict and
