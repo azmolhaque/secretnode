@@ -596,12 +596,19 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
     a Firebase web apiKey). They belong in the export precisely because they must
     NOT fail a gate: a pipeline that goes red on a publishable key is a pipeline
     someone disables, and then the AWS key goes unnoticed too."""
+    # Three states, not two. A single `is_review` flag collapsed "needs review"
+    # and "public by design" into one bucket, and both places it was read then
+    # said the wrong thing about the latter: the message asserted "manual review
+    # required" for a value that requires no action, and `properties.status` came
+    # out as `needs_review` — which is what a consumer filters on. The CSV called
+    # the same finding INFORMATIONAL, so two deliverables built from one scan
+    # disagreed about whether the reader had work to do.
     all_findings = [
-        (f, False) for f in scan.get("confirmed_findings", [])
+        (f, "confirmed") for f in scan.get("confirmed_findings", [])
     ] + [
-        (f, True) for f in scan.get("needs_review_findings", [])
+        (f, "needs_review") for f in scan.get("needs_review_findings", [])
     ] + [
-        (f, True) for f in scan.get("informational_findings", [])
+        (f, "informational") for f in scan.get("informational_findings", [])
     ]
 
     # Advertise the full detector catalog; add finding-specific rules for any
@@ -609,7 +616,9 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
     rules: dict[str, dict[str, Any]] = _catalog_rules()
     results: list[dict[str, Any]] = []
 
-    for f, is_review in all_findings:
+    for f, status in all_findings:
+        is_review = status == "needs_review"
+        is_info = status == "informational"
         secret_type = f.get("secret_type", "Unknown")
         rule_id = _rule_id(secret_type)
         severity = _severity_of(f)
@@ -630,7 +639,7 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
                 },
             }
 
-        level = "note" if is_review else _SARIF_LEVEL.get(severity, "warning")
+        level = "note" if (is_review or is_info) else _SARIF_LEVEL.get(severity, "warning")
         location_uri = f.get("source_url") or f.get("target_url") or "unknown"
         verified = str(f.get("verified", "disabled"))
         verified_detail = str(f.get("verified_detail", "") or "")
@@ -644,6 +653,7 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
         msg = (
             vprefix + f"{secret_type} ({severity}) detected. "
             f"{'Manual review required — see note. ' if is_review else ''}"
+            f"{'Public by design — no action required. ' if is_info else ''}"
             f"{('Impact: ' + impact + ' ') if impact else ''}"
             f"{f.get('reason','')}"
         )
@@ -671,7 +681,7 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
                 "found_at": str(f.get("found_at", "") or ""),
                 # Present only on deep scans: which host in the domain served it.
                 **({"host": str(f["_host"])} if f.get("_host") else {}),
-                "status": "needs_review" if is_review else "confirmed",
+                "status": status,
             },
         })
 
@@ -847,13 +857,14 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
             f'<td style="text-align:center;">{int(h.get("assets", 0))}</td>'
             f'<td style="text-align:center;">{conf_cell}</td>'
             f'<td style="text-align:center;">{int(h.get("needs_review", 0))}</td>'
+            f'<td style="text-align:center;">{int(h.get("informational", 0))}</td>'
             f'<td style="text-align:center;">{int(h.get("posture_issues", 0))}</td>'
             f'<td class="small">{note}</td>'
             "</tr>"
         )
 
     rows = "\n".join(host_row(h) for h in hosts) or \
-        '<tr><td colspan="7" class="empty">No live hosts were scanned.</td></tr>'
+        '<tr><td colspan="8" class="empty">No live hosts were scanned.</td></tr>'
     subs = ", ".join(html.escape(s) for s in deep.get("subdomains", [])) or "—"
 
     # Findings aggregated across every host, each tagged with its host of origin.
@@ -892,6 +903,14 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
                 f'<td class="mono small">{_loc(f)}</td>'
                 f'<td class="small">{html.escape(str(f.get("reason", "")))}</td>'
                 "</tr>")
+
+    # Public-by-design values, aggregated across hosts. `review_row` already
+    # renders exactly the columns this needs (host, severity, type, location,
+    # why) — the reason field carries the triage sentence explaining why the
+    # value is not an exposure.
+    info_findings = deep.get("informational_findings", [])[:_MAX_ROWS]
+    info_rows = "\n".join(review_row(f) for f in info_findings) or \
+        '<tr><td colspan="5" class="empty">None.</td></tr>'
 
     conf_rows = "\n".join(conf_row(f) for f in confirmed_findings) or \
         '<tr><td colspan="8" class="empty">No confirmed credential exposures.</td></tr>'
@@ -1024,6 +1043,7 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
     <div class="stat"><div class="num">{int(totals.get('historical_urls', 0))}</div><div class="label">Historical URLs</div></div>
     <div class="stat"><div class="num">{confirmed_total}</div><div class="label">Confirmed exposures</div></div>
     <div class="stat"><div class="num">{int(totals.get('needs_review', 0))}</div><div class="label">Needs review</div></div>
+    <div class="stat"><div class="num">{int(totals.get('informational', len(deep.get('informational_findings', []))))}</div><div class="label">Cleared (public by design)</div></div>
     <div class="stat"><div class="num">{int(totals.get('posture_issues', 0))}</div><div class="label">Posture issues</div></div>
     <div class="stat"><div class="num">{int(totals.get('takeover_risks', 0))}</div><div class="label">Takeover risks</div></div>
   </div>
@@ -1049,7 +1069,7 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
 
   <h2>Per-host results</h2>
   <table>
-    <thead><tr><th>Host</th><th>Status</th><th>Assets</th><th>Confirmed</th><th>Needs review</th><th>Posture</th><th>Note</th></tr></thead>
+    <thead><tr><th>Host</th><th>Status</th><th>Assets</th><th>Confirmed</th><th>Needs review</th><th>Info</th><th>Posture</th><th>Note</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
 
@@ -1069,6 +1089,17 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
   <table>
     <thead><tr><th>Host</th><th>Severity</th><th>Type</th><th>Location</th><th>Note</th></tr></thead>
     <tbody>{review_rows}</tbody>
+  </table>
+
+  <h2>Examined and Cleared — Public by Design ({len(info_findings)})</h2>
+  <div class="small" style="margin-bottom:6px;">Credential-shaped values that are <b>meant</b> to ship in
+  client code and are <b>not</b> exposures: publishable payment keys, Sentry DSNs, Firebase web
+  <span class="mono">apiKey</span> values, browser Maps keys. They are listed because their absence would be
+  ambiguous — a reader who sees nothing cannot tell whether these were examined and cleared, or never looked at.
+  <b>No action is required for anything in this table.</b></div>
+  <table>
+    <thead><tr><th>Host</th><th>Severity</th><th>Type</th><th>Location</th><th>Why it is not an exposure</th></tr></thead>
+    <tbody>{info_rows}</tbody>
   </table>
 
   <h2>Discovered subdomain surface</h2>
