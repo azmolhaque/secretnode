@@ -3,6 +3,329 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.2] — The fix removed one cause and left another standing
+
+A live deep scan of a 258-subdomain estate. v2.13.1's coverage verdict and
+posture section both worked on it — PARTIAL fired correctly at 25 of 127 live
+hosts, and 133 posture issues reached all three deliverables. Reading the report
+against its own CSV turned up three defects anyway, and the first is the one
+worth keeping.
+
+### Fixed — `i.test` was still in the report, from a construct v2.13.1 never saw
+
+That release fixed `i.test` reaching a client's "external hosts" list. The new
+report listed it again. The bundle supplied with the report came back **clean**
+when tested directly, which ruled out the construct v2.13.1 was written for and
+pointed at a different one:
+
+```
+/^https?:\/\//i.test(u)
+```
+
+the idiomatic absolute-URL test, in more or less every bundle. v2.13.1 taught
+the stripper to *recognise* a regex literal but deliberately left its text in
+place — "a regex is code, not a comment". Correct for finding comments, wrong
+for what runs next: that literal's own escaped slashes and terminator spell
+`//i.test`, and `_ABS_URL` reads it as a protocol-relative host.
+
+Regex bodies are now blanked. Nothing is lost: a host written inside a pattern
+carries escaped dots, and `_valid_host` rejects a backslash, so such a host was
+never extractable in the first place.
+
+### Fixed — blanking turned a harmless misparse into a dropped finding
+
+Caught immediately by a test that predates all of this work, and the more
+instructive half of the change. `strip_js_comments` runs over whole HTTP
+responses, so it sees HTML as well as JavaScript — and `</script>` opens with a
+slash exactly where a regex literal would. Scanning on from there swallows
+everything up to the next `/`, which in `</script><img src="https://…` is the
+one inside the URL.
+
+That misparse already existed and cost nothing, because the text was left in
+place and still matched. Blanking is what made it destructive: a real external
+host disappeared from the graph. A candidate literal containing `<` or `>` is
+now not treated as one, which falls back to the previous behaviour for that
+single literal and loses no host either way.
+
+The lesson is narrower than "test your changes": the same mis-tokenisation was
+latent and harmless for two releases, and became a false negative only when an
+unrelated improvement changed what happened to the text it mis-tokenised.
+
+### Fixed — one host's evidence was printed for a whole posture group
+
+v2.14.0's grouping took the first evidence it saw and rendered it against every
+host in the group. The report grouped `china.pop` (`server: AmazonS3`) with
+`falconapp.fres` (`server: Microsoft-IIS/10.0`) and printed **AmazonS3 for
+both**. The CSV had the truth; the HTML the client reads did not.
+
+For version disclosure the evidence *is* the finding — which software leaked —
+so collapsing it destroyed the only actionable content while still looking
+authoritative. Evidence is now kept per host: identical evidence still renders
+once, so grouping still means "one fix, not many"; differing evidence is
+attributed to the host it came from.
+
+### Fixed — `Server: AmazonS3` is not a version disclosure
+
+The check was `any(c.isdigit())`. The 3 in S3 is part of a product name, and a
+client was told their server leaked a software version. A version is a number
+identifying a *release*, which is what makes the disclosure useful against a CVE
+list, so the test is now for a release-shaped token: a dotted number
+(`4.0.30319`) or a slash-prefixed one (`nginx/1.18`). `cloudflare`, `Apache`,
+`gws`, `openresty` and `AmazonS3` match neither, which is correct for all five;
+`Microsoft-IIS/10.0` and `Apache/2.4.41 (Ubuntu)` still match.
+
+**805 tests, ruff clean.** Ground truth 71/71 with zero false positives;
+external-validity recall unchanged at 80.6%.
+
+## [2.14.1] — Three limits that were documented, asserted, or implied
+
+An audit for this codebase's recurring shape: a guarantee stated somewhere a
+reader will believe it, with no mechanism behind it. Three found, all measured
+before being fixed — and one proposal measured and then dropped.
+
+### Fixed — the documented RAM bound was not one
+
+The architecture table credited `asyncio.Semaphore(20)` with *"bounds RAM on Pi
+5 during deep JS analysis"*. It bounds concurrent **fetches**, which is a
+different thing: every fetched body was appended to one list held until the scan
+ended, with no aggregate cap. `js_urls` had no cap at all — every `<script src>`
+across every crawled page was gathered at once — so source maps alone could
+reach 200 MB and archived seed assets 1 GB, on the 16 GB Pi this project targets.
+
+- `MAX_TOTAL_ASSET_BYTES` (256 MB) bounds what a scan **keeps**, charged at every
+  accumulation point: root, crawled pages, JS bundles, source maps, archive
+  seeds and the deeper endpoint crawl. `MAX_JS_ASSETS` (400) bounds the count.
+- Advisory, not fatal: a scan that stops collecting still reports everything it
+  read, where one killed by the OOM killer reports nothing. Engaging the cap is
+  a WARN **and** `assets_skipped_over_budget` on the result — reading less than
+  the operator asked for is a coverage statement, and a coverage statement only
+  in a log line nobody keeps is how a clean verdict comes to mean nothing.
+- A crawled page is still parsed for links when the budget is spent; only its
+  body is dropped. A page is a link graph as well as something to grep.
+- Verified end to end: eight ~9 KB bundles against a 20 KB budget kept four,
+  skipped ten, and completed cleanly with the count on the result.
+- The README row now says what the semaphore actually does.
+
+### Fixed — credentials were retained in memory indefinitely
+
+`main._registry` was appended to and never pruned — no `del`, no `pop`, no
+eviction anywhere — and each completed entry holds the full result, matched
+values included. Measured at ~16 KB for a scan of ten findings, ~156 MB at
+10,000 scans. The memory is the lesser problem: a long-running dashboard held
+every credential it had ever found in process memory, indefinitely, long after
+any use for them. That is the same argument the `asset_cache` schema already
+makes about not keeping a client's secrets on disk, applied to RAM, where
+nothing enforced it.
+
+`MAX_REGISTRY_ENTRIES` (200) bounds it. Eviction is safe because `_resolve_scan`
+already falls back to SQLite, so a report requested afterwards is served from
+the durable store; running scans are never evicted, since they hold live state.
+
+### Fixed — scan history grew without limit
+
+Measured at ~16.7 KB per scan, which under continuous monitoring is on the order
+of a gigabyte a year onto an SD card. `SCAN_HISTORY_LIMIT` (1000, `0` disables)
+prunes at the point the table grows, so retention needs no separate schedule.
+By count rather than age: an operator who scans monthly should not lose their
+history to a 90-day rule, and one who scans hourly should not accumulate forever.
+
+### Fixed — a credential could reach a log
+
+`verifier.py` states it *"never reveals or transmits the secret anywhere except
+to its own issuer"*, and nothing enforced it. Telegram's API requires the token
+in the URL path, and `httpx.HTTPStatusError` renders the full URL into its
+message, which `verify_finding_detailed` logged verbatim on any failure — a live
+bot token in cleartext, reproduced with a synthetic one.
+
+Latent rather than live: no verifier calls `raise_for_status()` today, so
+nothing reaches that path. It is fixed anyway, because a docstring invariant with
+no mechanism behind it is precisely how the authorization ledger came to be a
+comment. The scrub covers the percent-encoded form too — a token containing `:`
+or `/` arrives encoded, so matching only the literal would let exactly the
+tokens that need encoding through.
+
+### Measured and deliberately not shipped: WAL journaling
+
+SQLite runs in `delete` journal mode with no explicit PRAGMAs, which looked like
+an obvious win for an async app writing from concurrent host scans. Measured
+first: 30 concurrent writes plus 30 concurrent reads ran in **0.28 s as shipped
+and 0.77 s with WAL, with zero errors either way**. `busy_timeout` already
+defaults to 5 s, and every call opens its own connection, so WAL's per-connection
+cost lands without its cross-connection benefit. A 2.8x regression sold as a
+performance improvement is worse than leaving it alone.
+
+**787 tests, ruff clean.** Ground truth 71/71 offline and over HTTP, zero false
+positives; external-validity recall unchanged at 80.6%.
+
+## [2.14.0] — The recall number is now measured from outside
+
+Asked to test against intentionally vulnerable targets. Two things made that
+question worth reframing rather than answering literally: hosted targets are
+unreachable from this environment, and Juice Shop / DVWA measure SQLi and XSS —
+which this tool does not claim to find. The equivalent for a secrets scanner is
+a labelled corpus of planted credentials that nobody here wrote.
+
+### Added — `make bench-external`, and the number it produced
+
+`bench/benchmark.py` has printed its own caveat on every run since it shipped:
+*"a detector matching its own canonical example proves the detector is wired up,
+not that it catches credentials in the wild."* Correct, and load-bearing — 71/71
+was never a recall claim. `bench/external.py` measures against gitleaks' rule
+definitions: literal specimens written by another project, for another scanner,
+owing nothing to these patterns.
+
+**80.6% of 108 specimens.** The report splits misses into the only two buckets
+that matter — a provider SecretNode covers and missed (a defect) versus one it
+never claimed (a roadmap fact, since gitleaks carries ~220 rules to this
+scanner's 71 and breadth was never the differentiator).
+
+The corpus is fetched on demand, never vendored: ~240 KB of third-party source
+whose whole purpose is to contain credential-shaped strings would trip push
+protection, which is the same trap `bench-corpus/` set two releases ago. With no
+network the run skips and says so — *"this is a skip, not a pass: no number was
+measured"* — and there is a test pinning that, because a benchmark that silently
+reports success when it measured nothing is worse than one that fails.
+
+### Fixed — the current OpenAI key formats were undetected
+
+The pattern required exactly 20 characters before the `T3BlbkFJ` marker. That
+was true of the original key format and is false of the `sk-proj-` (~164 char)
+and `sk-admin-` (~133 char) keys OpenAI issues today — so the most commonly
+leaked AI credential of 2026 was invisible. `T3BlbkFJ` is base64 "OpenAI" and is
+the actual discriminator; the segments around it carry no length promise and no
+longer pretend to.
+
+Every internal specimen passed throughout, because each was built to satisfy the
+pattern the code already had. This is precisely the failure an internally-derived
+benchmark cannot report.
+
+### Fixed — credential families the provider coverage implied but did not match
+
+- **AWS: only `AKIA`.** `ASIA` is a temporary STS credential and is *more*
+  likely to appear in shipped frontend code than a long-lived key — it is what a
+  browser-side credential-vending flow hands out. `A3T*`, `ABIA` and `ACCA` now
+  match too, and Amazon Bedrock keys (`ABSK`/`AXSK`) get their own detector.
+- **Stripe: only `sk_live_`.** Restricted keys (`rk_`) and the `prod` label were
+  missed. Test-mode keys now report at LOW — they cannot move money, but they
+  are routinely committed beside the live key they were copied from.
+- **GitLab: only `glpat-`.** Deploy, feed, runner, pipeline-trigger, OAuth-app,
+  SCIM, agent, incoming-mail, feature-flag and CI job tokens each grant real
+  repository or CI access and read as unrecognised strings.
+- **Grafana: only `glsa_`.** Cloud access-policy tokens (`glc_`) and legacy API
+  keys (`eyJrIjoi…`, JWT-shaped but without the dots the JWT detector needs).
+- **Cloudflare Origin CA keys** (`v1.0-…`), which mint origin certificates.
+- **Hugging Face organisation tokens** (`api_org_`), the wider-blast-radius
+  sibling of the per-user `hf_` token that was already covered.
+
+**64 → 71 detectors**, and the internal benchmarks held at **71/71 with zero
+false positives** both offline and end-to-end over HTTP. None of it cost
+precision.
+
+### Fixed — a corpus specimen that could not survive its own detector
+
+Adding a specimen shifted the shared RNG stream and the Terraform Cloud sample
+generated a trailing `-`, which its detector's own `\b` boundary excludes: the
+declared and captured values differed. The corpus self-validation caught it, as
+designed. Latent, RNG-position-dependent, and dormant until something unrelated
+was added — so the final character is now pinned to the word class rather than
+left to chance.
+
+### Fixed — a test that had become an accidental ceiling
+
+`test_severity_lookup_covers_all_patterns` asserted every detector's severity
+was CRITICAL, HIGH or MEDIUM. LOW was absent only because no detector had used
+it yet, so a check meant to ask *"is this a recognised value?"* had quietly
+become *"no detector may be low severity."* Aligned with the vocabulary
+`report._SARIF_LEVEL` and `report._SEVERITY_RANK` actually understand.
+
+### On the remaining 19.4%
+
+Ten in-scope misses, each checked by hand, none a defect: two placeholders
+(`XXXX…`), one degenerate all-ones value the entropy floor is right to reject,
+and seven entries in gitleaks' JWT rule file that are not JWTs (a timestamp, two
+DIDs, a Docker key fingerprint, a GitLab CI claim string). Eleven more are
+providers with no detector — atlassian, facebook, flyio, freemius, intra42,
+kubernetes, pulumi — which is a coverage decision, not a failure.
+
+The honest reading of 80.6% is that the denominator contains items no scanner
+should match. It is still the number to quote, because it is the only one
+measured against data this project did not write.
+
+**768 tests, ruff clean.** Ground truth 71/71 offline and over HTTP, zero false
+positives; labelled corpus precision 1.000 / recall 1.000.
+
+## [2.13.2] — The redirect guard changed what posture measures
+
+A second live deep scan, of a domain whose apex and `www` both answer. Two
+defects, both reproduced against the real pipeline in a local lab before a line
+was changed — the lab reproduces the shapes the real reports exhibited, because
+this environment cannot reach an external target.
+
+### Fixed — posture was measuring the redirect, not the page
+
+v2.13.0 set `follow_redirects=False` on the shared client so every hop could be
+address-checked before a request went out. That was right, and it silently
+changed what `posture.fetch_posture` sees: its single `client.get()` now
+returned whatever answered *first*. On any host that redirects, that is the
+**301**, not the page a browser ends up on.
+
+A redirect hop is not the site. The first real target hid this — Cloudflare
+applies header rules to redirects too, so the wrong measurement and the right
+one agreed. Against a lab server whose landing page sets six security headers
+and whose redirect hop sets none:
+
+```
+landing page (headers present) : 1 issue   (the Python Server: banner)
+redirect hop (headers ABSENT)  : 6 issues  -> 5 of them fabricated
+```
+
+Five missing headers reported for a page that sets all five.
+
+- `fetch_posture` takes a `get_final` callable and `scanner` passes it the same
+  validated hop-walk the fetch path uses, so posture measures the landing page
+  and a redirect into internal space is still refused rather than read for
+  headers. Injected rather than imported: the only implementation lives in
+  `scanner`, which imports `posture`, so a parameter keeps the dependency
+  one-way and the function unit-testable with no network.
+- The landing page's URL also decides the HTTPS-only checks, so an `http://`
+  start that lands on `https://` is judged on where it ended.
+
+### Fixed — one site was being scanned twice
+
+`www.example.com` 301-ing to `example.com` looked like two independent live
+hosts. `_probe_one` returned the URL it asked for on any HTTP response —
+including a 301 — and never recorded where it pointed, so `run_deep_scan`
+crawled both. In the lab: **eleven requests for four unique paths**, both
+"hosts" reporting the same three assets. Against a real domain that is double
+the traffic aimed at a target, and a client report claiming twice the coverage
+it has.
+
+- The probe now captures the redirect destination — it is the only place that
+  sees it, since the client stopped following redirects in v2.13.0.
+- `collapse_redirect_duplicates` drops a host only when its redirect lands on a
+  host **already being scanned**. A redirect leaving that set is scanned
+  normally: it may be the only route to content nothing else reaches, so
+  dropping it would lose coverage rather than remove duplicate work. A mutual
+  redirect loop falls back to scanning both — duplicate work beats a scan that
+  reads nothing and still prints a verdict.
+- Lab after the fix: **five requests, one duplicate** (posture's own root GET).
+
+### Fixed — a collapsed host is not a failure
+
+Found while wiring the above, and it would have been wrong twice over. The only
+way to record a host that was not scanned was `HostScan.error`, which renders
+red as **error** in the per-host table *and* is what the v2.13.1 coverage check
+counts as unexamined — so de-duplicating a `www` alias would have hedged a
+fully-covered domain to PARTIAL, the mirror image of the overstatement that
+verdict exists to prevent.
+
+`status` and `note` now carry that case without overloading a field that means
+"this failed". The alias appears in the table, labelled `redirect`, with the
+host it points to; a genuinely failed host still reads as an error.
+
+**758 tests, ruff clean.** Labelled corpus precision 1.000 / recall 1.000;
+ground truth 64/64 with zero false positives.
+
 ## [2.13.1] — Three defects a live scan found that the suite could not
 
 A deep scan of a real company's domain produced an HTML report, a CSV and a

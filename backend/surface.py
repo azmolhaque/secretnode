@@ -184,11 +184,26 @@ def strip_js_comments(text: str) -> str:
             if _regex_may_follow(text, i, prev):
                 end = _skip_regex_literal(text, i)
                 if end is not None:
-                    # Leave the literal's text in place — it is code, not a
-                    # comment. Only its extent matters, so that a quote inside
-                    # it never opens a string.
+                    # Blank the literal, delimiters included.
+                    #
+                    # v2.13.1 left it in place, reasoning that a regex is code
+                    # rather than a comment and only its extent mattered. That
+                    # was right for finding comments and wrong for what runs
+                    # next: the idiomatic absolute-URL test, in more or less
+                    # every bundle, spells a protocol-relative `//` out of its
+                    # own escaped slashes and terminator, and `_ABS_URL` reads
+                    # that as a hostname. It is why `i.test` survived that
+                    # release and reached a client's "external hosts" list.
+                    #
+                    # Nothing is lost by blanking. A host written inside a
+                    # pattern carries escaped dots, and `_valid_host` rejects a
+                    # backslash, so such a host was never extractable anyway.
+                    for k in range(i, end):
+                        out[k] = " "
                     i = end
-                    prev = "/"
+                    # A completed regex literal is a value, so a `/` after it
+                    # divides rather than opening another literal.
+                    prev = ")"
                     continue
         if not ch.isspace():
             prev = ch
@@ -243,6 +258,25 @@ def _skip_regex_literal(text: str, start: int) -> int | None:
     while i < n:
         c = text[i]
         if c == "\n":
+            return None
+        if c in "<>":
+            # Markup, not a pattern. `strip_js_comments` runs over whole HTTP
+            # responses, so it sees HTML as well as JavaScript, and `</script>`
+            # opens with a slash exactly where a regex literal would. Scanning
+            # on from there swallows everything up to the next `/` — which in
+            # `</script><img src="https://…` is the one inside the URL, so a
+            # real external host was blanked out of the graph.
+            #
+            # That misparse existed before the body was blanked and cost
+            # nothing, because the text was left in place and still matched.
+            # Blanking is what made it destructive: it turned a harmless
+            # mis-tokenisation into a dropped finding, which is the direction
+            # this scanner treats as unacceptable. Caught by a test that
+            # predates all of this work.
+            #
+            # A genuine JS regex containing `<` or `>` simply falls back to the
+            # old behaviour for that one literal: left in place, matched as
+            # before. No host is lost either way.
             return None
         if c == "\\":
             i += 2

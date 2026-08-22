@@ -1,4 +1,54 @@
 # SecretNode — Technical Audit & Enhancement Roadmap
+
+## Update — 21 Aug 2026 (current: v2.14.0): the recall number is now external
+
+Every previous version of this document, and every benchmark run it cites,
+measured recall against specimens built to satisfy SecretNode's own regexes.
+`bench/benchmark.py` said so on every run, in as many words: *"a detector
+matching its own canonical example proves the detector is wired up, not that it
+catches credentials in the wild."* That caveat was correct and it was load-
+bearing — 71/71 was never a recall claim.
+
+`bench/external.py` (`make bench-external`) closes it, using gitleaks' rule
+definitions: literal specimens written by another project, for another scanner,
+owing nothing to these patterns. **80.6% of 108 specimens**, and the report
+splits the misses into the only two buckets that matter — a provider SecretNode
+covers and missed (a defect) versus one it never claimed (a roadmap fact).
+
+It paid for itself on the first run, finding gaps no internal benchmark could:
+
+- **The current OpenAI key formats were undetected.** The pattern required
+  exactly 20 characters before the `T3BlbkFJ` marker — true of the original
+  format, false of the `sk-proj-` (~164 char) and `sk-admin-` (~133 char) keys
+  OpenAI issues today. The most commonly leaked AI credential of 2026 was
+  invisible, and every internal specimen passed because it was built to the
+  pattern the code already had.
+- **AWS: only `AKIA`.** `ASIA` is a temporary STS credential and is *more*
+  likely to appear in shipped frontend code than a long-lived key, because that
+  is exactly what a browser-side credential-vending flow hands out.
+- **Stripe: only `sk_live_`.** Restricted keys (`rk_`) and the `prod` label
+  were missed; test keys now report at LOW.
+- Whole credential families elsewhere: GitLab beyond `glpat-` (deploy, runner,
+  feed, trigger, OAuth, SCIM), Grafana Cloud (`glc_`) and legacy (`eyJrIjoi`),
+  Cloudflare Origin CA, Hugging Face organisation tokens, AWS Bedrock.
+
+**64 → 71 detectors**, and the internal benchmarks held at 71/71 with zero false
+positives offline and end-to-end, so none of it cost precision.
+
+The remaining ten "in-scope misses" were each checked by hand and none is a
+defect: two placeholders (`XXXX…`), one degenerate all-ones value the entropy
+floor is right to reject, and seven entries in gitleaks' JWT rule file that are
+not JWTs (a timestamp, two DIDs, a Docker key fingerprint, a GitLab CI claim
+string). The honest reading of 80.6% is that the denominator contains items no
+scanner should match.
+
+**The lesson worth carrying forward** is the same one this document keeps
+relearning, one level up: it previously said to verify each *gap* against the
+current code rather than trusting the list. The stronger discipline is to
+verify each *measurement* against a corpus you did not write. A benchmark built
+from your own assumptions cannot fail in the direction of those assumptions —
+it will report 100% right up until someone else's data disagrees.
+
 *Prepared 18 Jul 2026 · baseline: v2.5.4 · grounded in 2026 secret-scanning SOTA (TruffleHog, Gitleaks, GitHub Secret Scanning).*
 
 ## Update — 21 Aug 2026 (current: v2.13.0)
@@ -140,7 +190,7 @@ repo scanning; win the *web-surface* niche.
    Verifiers now return the *identity + scopes + billing surface* a live key maps to — e.g.
    "ElevenLabs · creator tier · quota 12,345/100,000" — the strongest impact statement available,
    and the one Cindrasec reports are built to sell. 29 secret types now have verifiers.
-2. **No FP/FN measurement harness.** There's good FP *handling* but no labeled corpus + precision/recall
+2. ~~**No FP/FN measurement harness.**~~ ✅ **CLOSED** — R2 shipped the labelled corpus, and v2.14.0 added the external-validity harness (`make bench-external`) that gives recall a number from outside this repository. See the 21 Aug 2026 update at the top. There's good FP *handling* but no labeled corpus + precision/recall
    report, so changes aren't measured. Industrial tools track precision/recall on a benchmark.
 3. **Regex robustness.** No ReDoS/catastrophic-backtracking audit or regex timeout; a hostile minified
    bundle could stall a detector. No composite/proximity rules (a Gitleaks 2026 feature) for generic

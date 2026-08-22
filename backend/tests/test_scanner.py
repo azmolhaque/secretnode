@@ -273,13 +273,13 @@ class TestSeedUrlInjection:
             return False
 
     def _patch(self, monkeypatch):
-        async def fake_spider(client, url, sem, broadcast, max_pages=1):
+        async def fake_spider(client, url, sem, broadcast, max_pages=1, **kw):   # **kw absorbs budget
             return [("https://ex.com/base.js", "const base = 1;")]
 
         async def fake_fetch(client, url, sem, broadcast=None):
             return (url, "// clean seed body, no secrets")
 
-        async def fake_posture(client, url):
+        async def fake_posture(client, url, **kw):   # **kw absorbs get_final
             return []
 
         monkeypatch.setattr(scanner, "spider_target", fake_spider)
@@ -320,7 +320,7 @@ class TestSurfaceExtraction:
 
     def _patch(self, monkeypatch):
         # Base asset references a same-site JS endpoint and an external host.
-        async def fake_spider(client, url, sem, broadcast, max_pages=1):
+        async def fake_spider(client, url, sem, broadcast, max_pages=1, **kw):   # **kw absorbs budget
             body = ('fetch("/api/v1/session");'
                     'src="/static/deep.js";'
                     'x="https://cdn.thirdparty.net/lib.js";')
@@ -329,7 +329,7 @@ class TestSurfaceExtraction:
         async def fake_fetch(client, url, sem, broadcast=None):
             return (url, "// deep bundle, no secrets")
 
-        async def fake_posture(client, url):
+        async def fake_posture(client, url, **kw):   # **kw absorbs get_final
             return []
 
         monkeypatch.setattr(scanner, "spider_target", fake_spider)
@@ -359,7 +359,13 @@ class TestNeedsReviewSentinel:
     def test_severity_lookup_covers_all_patterns(self):
         for pattern in scanner.SECRET_PATTERNS:
             assert pattern.name in scanner.SECRET_TYPE_SEVERITY
-            assert scanner.SECRET_TYPE_SEVERITY[pattern.name] in ("CRITICAL", "HIGH", "MEDIUM")
+            # The full vocabulary the rest of the pipeline understands —
+            # report._SARIF_LEVEL and report._SEVERITY_RANK are keyed on exactly
+            # these. LOW was missing here only because no detector had used it
+            # yet, which made this an accidental ceiling on severity rather than
+            # the "is it a recognised value" check it is meant to be.
+            assert scanner.SECRET_TYPE_SEVERITY[pattern.name] in (
+                "CRITICAL", "HIGH", "MEDIUM", "LOW")
 
 
 @pytest.mark.asyncio

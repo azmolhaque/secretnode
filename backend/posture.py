@@ -15,6 +15,8 @@ discovery (crt.sh), DNS resolution + dangling-CNAME takeover checks.
 
 from __future__ import annotations
 
+import re
+
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -39,6 +41,22 @@ class PostureFinding:
             "evidence": self.evidence, "remediation": self.remediation,
             "category": self.category, "found_at": self.found_at,
         }
+
+
+# A version is a number that identifies a *release*, which is what makes the
+# disclosure useful to an attacker matching against a CVE list. "any digit"
+# does not test that: `Server: AmazonS3` contains a 3, and S3 is a product name.
+# A real scan reported it to a client as a leaked software version, in the one
+# section of the report meant to be purely factual.
+#
+# Two shapes carry a release: a dotted number (1.18.0, 4.0.30319) and a
+# slash-prefixed one (nginx/1.18, IIS/10.0). `cloudflare`, `AmazonS3` and
+# `Apache` match neither, which is the correct answer for all three.
+_VERSION_TOKEN = re.compile(r"\d+\.\d+|/\s*\d")
+
+
+def _discloses_a_version(value: str) -> bool:
+    return bool(_VERSION_TOKEN.search(value))
 
 
 def analyze_security_headers(headers: dict[str, Any] | None, final_url: str) -> list[PostureFinding]:
@@ -85,7 +103,7 @@ def analyze_security_headers(headers: dict[str, Any] | None, final_url: str) -> 
 
     for hdr in ("server", "x-powered-by", "x-aspnet-version"):
         val = h.get(hdr, "")
-        if val and any(c.isdigit() for c in val):
+        if val and _discloses_a_version(val):
             add(f"Version disclosure via {hdr}", "LOW", "CWE-200",
                 f"{hdr}: {val}",
                 f"Remove or obscure the '{hdr}' header so it does not reveal software versions.")
@@ -105,13 +123,34 @@ def analyze_security_headers(headers: dict[str, Any] | None, final_url: str) -> 
     return out
 
 
-async def fetch_posture(client: Any, target_url: str) -> list[PostureFinding]:
+async def fetch_posture(
+    client: Any, target_url: str, *, get_final: Any = None,
+) -> list[PostureFinding]:
     """One passive GET to the target root; analyse its response headers. Fully
-    defensive — any error yields no findings rather than failing the scan."""
+    defensive — any error yields no findings rather than failing the scan.
+
+    `get_final` resolves redirects and returns ``(response, final_url)``. It is
+    injected rather than imported because the only implementation lives in
+    `scanner`, which imports this module — taking it as a parameter keeps the
+    dependency one-way and leaves this function unit-testable with no network.
+
+    Passing it matters. v2.13.0 set ``follow_redirects=False`` on the shared
+    client so every hop could be address-checked, which silently changed what a
+    bare ``client.get`` returns here: on any host that redirects, this analysed
+    the **301**, not the page a browser ends up on. A redirect hop is not the
+    site. Cloudflare and similar edges apply header rules to redirects too, so
+    the numbers often agreed by luck and the defect stayed invisible; where they
+    do not, this reported five missing headers for a page that sets all of them.
+    Posture describes what a visitor receives, so it must be measured on the
+    response a visitor actually renders.
+    """
     try:
-        r = await client.get(target_url)
+        if get_final is not None:
+            r, final_url = await get_final(client, target_url, None)
+        else:
+            r = await client.get(target_url)
+            final_url = str(getattr(r, "url", "") or target_url)
         headers = dict(getattr(r, "headers", {}) or {})
-        final_url = str(getattr(r, "url", "") or target_url)
         return analyze_security_headers(headers, final_url)
     except Exception as exc:  # noqa: BLE001 — best-effort, never break a scan
         logger.warning("posture check failed for %s: %s", target_url, exc)

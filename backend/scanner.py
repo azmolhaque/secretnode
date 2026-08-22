@@ -117,6 +117,17 @@ MAX_RAW_FINDINGS_PER_SCAN = _env_int("MAX_RAW_FINDINGS_PER_SCAN", 500)  # safety
 MAX_MATCHES_PER_PATTERN = _env_int("MAX_MATCHES_PER_PATTERN", 100)  # R3 defence-in-depth: bound the
                                      # matches examined for ANY single pattern on ANY single text, so a
                                      # crafted blob cannot spawn millions of matches for one detector.
+# Every fetched body is held in one list until the scan ends, so the ceiling on
+# a scan's memory is the SUM of what it collects, not the per-asset cap. The
+# README credits CONCURRENCY_LIMIT with "bounds RAM on Pi 5 during deep JS
+# analysis"; it bounds concurrent *fetches*, which is a different thing and does
+# nothing about accumulation. Nothing capped the total, and js_urls is not capped
+# either — every <script src> across every crawled page is fetched — so a site
+# with many large bundles could push a 16 GB Pi into swap or the OOM killer, and
+# a scan that dies is worth less than a scan that says what it could not read.
+MAX_TOTAL_ASSET_BYTES = _env_int("MAX_TOTAL_ASSET_BYTES", 256 * 1024 * 1024)  # 256 MB
+MAX_JS_ASSETS = _env_int("MAX_JS_ASSETS", 400)
+
 MAX_SEED_URLS = _env_int("MAX_SEED_URLS", 200)  # cap externally-supplied seed assets fetched per scan
                                      # (e.g. historical JS bundles from public archives) — bounds the
                                      # extra fetches a deep scan does beyond the live crawl.
@@ -313,9 +324,29 @@ GENERIC_SECRET_TYPE = "Generic High-Entropy Secret"
 SECRET_PATTERNS: list[SecretPattern] = [
     SecretPattern(
         name="AWS Access Key",
-        regex=re.compile(r"\b(AKIA[0-9A-Z]{16})\b"),
-        description="AWS IAM Access Key ID",
+        # AKIA is only one of the prefixes AWS issues. ASIA is a temporary STS
+        # credential and is *more* common in shipped frontend code than a
+        # long-lived key, because that is exactly what a browser-side
+        # credential-vending flow hands out — so matching only AKIA missed the
+        # case most likely to appear on the surface this scanner reads.
+        # Measured against gitleaks' corpus, which is where the gap showed up.
+        regex=re.compile(r"\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16})\b"),
+        description="AWS IAM Access Key ID (long-lived, temporary/STS, or service-specific)",
         severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="AWS Bedrock API Key",
+        # A 2025 credential type: a long base64 blob prefixed ABSK. Nothing in
+        # the AKIA-shaped detectors comes close to matching it.
+        regex=re.compile(r"\b((?:ABSK|AXSK)[A-Za-z0-9+/]{109,269}={0,2})"),
+        description="Amazon Bedrock long-lived API key",
+        severity="CRITICAL",
+        remediation=(
+            "Delete this Bedrock API key in the AWS console and issue a "
+            "replacement held server-side. A leaked key bills model inference to "
+            "your account and reaches every foundation model the associated "
+            "identity may invoke; never ship one to a browser."
+        ),
     ),
     SecretPattern(
         name="AWS Secret Access Key",
@@ -361,9 +392,24 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Stripe Secret Key",
-        regex=re.compile(r"\b(sk_live_[0-9a-zA-Z]{24,})\b"),
+        # Stripe issues restricted keys (rk_) alongside secret keys, and labels
+        # the live environment both `live` and `prod`. Matching only sk_live_
+        # missed a restricted key, which is a real credential with a real scope.
+        regex=re.compile(r"\b((?:sk|rk)_(?:live|prod)_[0-9a-zA-Z]{24,})\b"),
         description="Stripe Live Secret Key",
         severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Stripe Test Key",
+        regex=re.compile(r"\b((?:sk|rk)_test_[0-9a-zA-Z]{24,})\b"),
+        description="Stripe test-mode secret/restricted key",
+        severity="LOW",
+        remediation=(
+            "Roll this test key in the Stripe dashboard and keep it server-side. "
+            "It cannot move real money, so this is not an emergency — but it "
+            "reveals account structure and is often committed beside the live "
+            "key it was copied from, which is the reason to look."
+        ),
     ),
     SecretPattern(
         name="Stripe Publishable Key",
@@ -444,6 +490,27 @@ SECRET_PATTERNS: list[SecretPattern] = [
         severity="CRITICAL",
     ),
     SecretPattern(
+        name="GitLab Token (non-PAT)",
+        # GitLab issues a whole family beyond glpat-: deploy, feed, runner,
+        # pipeline-trigger, OAuth-app, SCIM, agent, incoming-mail, feature-flag,
+        # CI job and runner-registration tokens. Only glpat- was matched, so a
+        # runner or deploy token — each of which grants real repository or CI
+        # access — read as an unrecognised string.
+        regex=re.compile(
+            r"\b((?:gldt|glft|glrt|glptt|gloas|glsoat|glagent|glimt|glffct|glcbt)"
+            r"-[0-9A-Za-z_\-]{20,64}|GR1348941[0-9A-Za-z_\-]{20})\b"
+        ),
+        description="GitLab deploy / feed / runner / trigger / OAuth / SCIM token",
+        severity="HIGH",
+        remediation=(
+            "Revoke this token in GitLab (Settings → Access Tokens, or the "
+            "project's CI/CD settings for runner and deploy tokens) and issue a "
+            "replacement stored in a masked CI variable. Depending on type it "
+            "grants repository read/write, runner registration, or CI pipeline "
+            "execution — none of which belongs in browser-delivered code."
+        ),
+    ),
+    SecretPattern(
         name="GitLab Personal Access Token",
         regex=re.compile(r"\b(glpat-[0-9A-Za-z_\-]{20})\b"),
         description="GitLab personal access token",
@@ -451,7 +518,22 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="OpenAI API Key",
-        regex=re.compile(r"\b(sk-(?:proj-)?[A-Za-z0-9_\-]{20}T3BlbkFJ[A-Za-z0-9_\-]{20})\b"),
+        # `T3BlbkFJ` is base64 "OpenAI" and sits inside every issued key — it is
+        # the discriminator, so the segments around it carry no length promise.
+        # Pinning them to exactly 20 was true of the original key format and is
+        # not true of the current ones: an `sk-proj-` key runs to ~164
+        # characters and an `sk-admin-` key to ~133, so both — the formats
+        # OpenAI issues today, and the most commonly leaked AI credential —
+        # went undetected. Found by measuring against gitleaks' corpus, whose
+        # specimens carry the real marker.
+        #
+        # The lookahead keeps service-account keys with the detector that names
+        # them; without it both would fire on one value and the report would
+        # double-count a single credential.
+        regex=re.compile(
+            r"\b(sk-(?!svcacct-)(?:proj-|admin-)?[A-Za-z0-9_\-]{20,}"
+            r"T3BlbkFJ[A-Za-z0-9_\-]{20,})\b"
+        ),
         description="OpenAI API key (project or user)",
         severity="CRITICAL",
     ),
@@ -483,6 +565,19 @@ SECRET_PATTERNS: list[SecretPattern] = [
         regex=re.compile(r"\b(gsk_[A-Za-z0-9]{52})\b"),
         description="Groq inference API key",
         severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Hugging Face Organization Token",
+        # api_org_ is an organisation-wide token; hf_ (below) is per-user. The
+        # organisation one has the wider blast radius and was the uncovered one.
+        regex=re.compile(r"\b(api_org_[A-Za-z]{34})\b"),
+        description="Hugging Face organization API token",
+        severity="HIGH",
+        remediation=(
+            "Revoke this organization token in the Hugging Face settings and "
+            "issue a replacement held server-side. It reaches every private "
+            "model, dataset and Space the organization owns."
+        ),
     ),
     SecretPattern(
         name="Hugging Face Access Token",
@@ -671,6 +766,34 @@ SECRET_PATTERNS: list[SecretPattern] = [
         severity="HIGH",
     ),
     SecretPattern(
+        name="Grafana Cloud Access Token",
+        # glc_ is Grafana Cloud's access-policy token; glsa_ (below) is a
+        # self-hosted service account. Different products, different prefixes —
+        # matching only glsa_ left the hosted product uncovered.
+        regex=re.compile(r"\b(glc_[A-Za-z0-9+/]{32,400}={0,3})"),
+        description="Grafana Cloud access-policy token",
+        severity="HIGH",
+        remediation=(
+            "Revoke this access policy token in Grafana Cloud and issue a "
+            "replacement held server-side. It can read and write metrics, logs "
+            "and traces for the stacks its policy covers."
+        ),
+    ),
+    SecretPattern(
+        name="Grafana Legacy API Key",
+        # Base64 of {"k":"… — a JWT-shaped token with no dots, so the JWT
+        # detector (which requires the header.payload.signature form) cannot see
+        # it. Still issued by older self-hosted installations.
+        regex=re.compile(r"\b(eyJrIjoi[A-Za-z0-9+/]{60,400}={0,3})"),
+        description="Grafana legacy API key",
+        severity="HIGH",
+        remediation=(
+            "Delete this API key in Grafana and replace it with a service "
+            "account token held server-side. Legacy keys carry a fixed role "
+            "(Viewer/Editor/Admin) over the whole organisation."
+        ),
+    ),
+    SecretPattern(
         name="Grafana Service Account Token",
         regex=re.compile(r"\b(glsa_[A-Za-z0-9]{32}_[a-f0-9]{8})\b"),
         description="Grafana service-account token",
@@ -732,6 +855,19 @@ SECRET_PATTERNS: list[SecretPattern] = [
         regex=re.compile(r"\b(figd_[A-Za-z0-9_\-]{40,})\b"),
         description="Figma personal access token",
         severity="HIGH",
+    ),
+    SecretPattern(
+        name="Cloudflare Origin CA Key",
+        # A distinct credential from the cfat/cfut/cfk API tokens: it issues
+        # origin certificates for any zone on the account.
+        regex=re.compile(r"\b(v1\.0-[0-9a-f]{24}-[0-9a-f]{146})\b"),
+        description="Cloudflare Origin CA key",
+        severity="CRITICAL",
+        remediation=(
+            "Revoke this Origin CA key in the Cloudflare dashboard and issue a "
+            "replacement server-side. It can mint origin certificates for zones "
+            "on the account, which enables impersonating your origin."
+        ),
     ),
     SecretPattern(
         name="Cloudflare API Token",
@@ -1849,12 +1985,45 @@ async def check_robots_txt(
         return True  # robots.txt missing/unreachable is not an error condition
 
 
+class _AssetBudget:
+    """Tracks the bytes a scan is holding and says when to stop collecting.
+
+    Deliberately advisory rather than a hard failure: a scan that stops reading
+    new assets still reports everything it read, whereas one killed by the OOM
+    killer reports nothing at all. The cap engaging is broadcast at WARN and
+    recorded on the result, because silently reading less than the operator
+    asked for is the failure mode this scanner treats as unacceptable — a
+    clean verdict over assets nobody fetched means nothing.
+    """
+
+    __slots__ = ("used", "limit", "skipped")
+
+    def __init__(self, limit: int = 0) -> None:
+        self.limit = limit or MAX_TOTAL_ASSET_BYTES
+        self.used = 0
+        self.skipped = 0
+
+    def exhausted(self) -> bool:
+        return self.used >= self.limit
+
+    def take(self, body: str | None) -> bool:
+        """Charge `body` against the budget. False means do not keep it."""
+        if not _usable_body(body):
+            return False
+        if self.exhausted():
+            self.skipped += 1
+            return False
+        self.used += len(body)
+        return True
+
+
 async def spider_target(
     client: httpx.AsyncClient,
     target_url: str,
     semaphore: asyncio.Semaphore,
     broadcast: Broadcaster | None = None,
     max_pages: int = 1,
+    budget: "_AssetBudget | None" = None,
 ) -> list[tuple[str, str]]:
     """
     Fetch the root HTML (and, if max_pages > 1, shallow-crawl same-domain
@@ -1888,8 +2057,9 @@ async def spider_target(
             })
         return []
 
+    budget = budget or _AssetBudget()
     assets: list[tuple[str, str]] = (
-        [(root_url, html_body)] if _usable_body(html_body) else []
+        [(root_url, html_body)] if budget.take(html_body) else []
     )
     html_pages: list[tuple[str, str]] = [(root_url, html_body)]
     visited_pages: set[str] = {root_url}
@@ -1918,8 +2088,12 @@ async def spider_target(
                 visited_pages.add(page_url)
                 if not _usable_body(page_body):
                     continue
+                # A page is a link graph as well as something to grep, so it is
+                # still parsed for assets even when the budget is spent — only
+                # its body is dropped from the scan set.
                 html_pages.append((page_url, page_body))
-                assets.append((page_url, page_body))
+                if budget.take(page_body):
+                    assets.append((page_url, page_body))
                 for js in extract_js_urls(page_body, page_url, scope_rejected):
                     all_js_urls.add(js)
         if broadcast and len(visited_pages) > 1:
@@ -1929,6 +2103,20 @@ async def spider_target(
             })
 
     js_urls = sorted(all_js_urls)
+    if len(js_urls) > MAX_JS_ASSETS:
+        # Fail loud: a truncated asset list is a truncated scan, and a clean
+        # verdict over assets nobody fetched is the failure this tool exists to
+        # avoid reporting.
+        if broadcast:
+            await broadcast({
+                "type": "log", "level": "WARN",
+                "message": (
+                    f"{len(js_urls)} JS assets discovered — scanning the first "
+                    f"{MAX_JS_ASSETS} (MAX_JS_ASSETS). Coverage is partial; raise "
+                    f"the cap to scan the rest."
+                ),
+            })
+        js_urls = js_urls[:MAX_JS_ASSETS]
 
     # Fail loud, never silent. The scope check rejecting a script served by the
     # target's OWN host cannot be correct under any scope policy — it means the
@@ -1968,7 +2156,7 @@ async def spider_target(
         tasks = [fetch_url(client, u, semaphore, broadcast) for u in js_urls]
         fetched = await asyncio.gather(*tasks, return_exceptions=False)
         for js_url, js_body in fetched:
-            if _usable_body(js_body):
+            if budget.take(js_body):
                 assets.append((js_url, js_body))
                 js_bodies.append((js_url, js_body))
 
@@ -1991,7 +2179,7 @@ async def spider_target(
             map_tasks = [fetch_url(client, u, semaphore, broadcast) for u in map_urls]
             fetched_maps = await asyncio.gather(*map_tasks, return_exceptions=False)
             for map_url, map_body in fetched_maps:
-                if _usable_body(map_body):
+                if budget.take(map_body):
                     assets.append((map_url, map_body))
 
     # Broadcast every non-HTML asset we actually collected (JS + source maps),
@@ -2934,7 +3122,9 @@ async def run_scan(
         # ── 1. Spider ──────────────────────────────────────────────────────
         state.check()
         try:
-            assets = await spider_target(client, target_url, semaphore, broadcast, max_pages=max_crawl_pages)
+            budget = _AssetBudget()
+            assets = await spider_target(client, target_url, semaphore, broadcast,
+                                         max_pages=max_crawl_pages, budget=budget)
         except asyncio.CancelledError:
             result["status"] = "cancelled"
             await emit({"type": "scan_cancelled", "scan_id": scan_id})
@@ -2965,7 +3155,8 @@ async def run_scan(
                 added = 0
                 for u, body in fetched:
                     if _usable_body(body):
-                        assets.append((u, body))
+                        if budget.take(body):
+                            assets.append((u, body))
                         added += 1
                 await emit({
                     "type": "log", "level": "INFO",
@@ -3002,7 +3193,8 @@ async def run_scan(
                 )
                 for u, body in fetched:
                     if _usable_body(body):
-                        assets.append((u, body))
+                        if budget.take(body):
+                            assets.append((u, body))
 
             result["discovered_endpoints"] = same_eps[:MAX_DISCOVERED_ENDPOINTS]
             # Scope-aware, not exact-string: `h != base_host` filed the target's
@@ -3017,6 +3209,20 @@ async def run_scan(
                     "message": (f"Surface intel: {len(result['discovered_endpoints'])} endpoint(s), "
                                 f"{len(result['associated_hosts'])} associated host(s)"),
                 })
+
+        # The budget engaging means this scan deliberately read less than the
+        # target offered. That is a coverage statement, and a coverage statement
+        # belongs on the result rather than only in a log line nobody keeps.
+        if budget.skipped:
+            result["assets_skipped_over_budget"] = budget.skipped
+            await emit({
+                "type": "log", "level": "WARN",
+                "message": (
+                    f"Asset budget reached ({budget.limit // (1024 * 1024)} MB) — "
+                    f"{budget.skipped} asset(s) fetched but not retained. Coverage "
+                    f"is partial; raise MAX_TOTAL_ASSET_BYTES to scan them."
+                ),
+            })
 
         # Three distinct numbers, because conflating them misreports coverage:
         #   assets_fetched — bodies actually downloaded this run
@@ -3040,7 +3246,13 @@ async def run_scan(
         # security controls. Best-effort: never blocks or fails the scan.
         if SCAN_HTTP_POSTURE:
             state.check()
-            pfindings = await posture.fetch_posture(client, target_url)
+            # Inject the validated hop-walk so posture measures the page a
+            # visitor lands on, not a 301 pointing at it. The same walk the
+            # fetch path uses, so a redirect into internal space is refused here
+            # too rather than being read for headers.
+            pfindings = await posture.fetch_posture(
+                client, target_url, get_final=_get_following_redirects,
+            )
             result["posture_findings"] = [p.to_dict() for p in pfindings]
             if pfindings:
                 await emit({

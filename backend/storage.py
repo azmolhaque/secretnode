@@ -8,6 +8,7 @@ results survive a server restart — needed for agency-grade audit trails.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -260,6 +261,39 @@ async def save_asset_cache(target_url: str, entries: dict[str, dict[str, Any]]) 
             ],
         )
         await db.commit()
+
+
+# Nothing ever pruned the scans table. Measured at ~16.7 KB per scan of ten
+# findings, continuous monitoring of a handful of targets writes on the order of
+# a gigabyte a year — onto the SD card of the Raspberry Pi this project targets,
+# where that is a real operational limit rather than a rounding error. Each row
+# also holds the matched values, so unbounded history is unbounded credential
+# retention, which is the argument the asset_cache schema above already makes.
+#
+# Retention is by count rather than age: an operator who scans once a month
+# should not lose their history to a 90-day rule, and one who scans hourly
+# should not accumulate forever. 0 disables pruning entirely.
+SCAN_HISTORY_LIMIT = int(os.environ.get("SCAN_HISTORY_LIMIT", "1000") or 1000)
+
+
+async def prune_scan_history(limit: int | None = None) -> int:
+    """Delete the oldest scans beyond `limit`, newest kept. Returns rows removed."""
+    keep = SCAN_HISTORY_LIMIT if limit is None else limit
+    if keep <= 0:
+        return 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            DELETE FROM scans WHERE scan_id IN (
+                SELECT scan_id FROM scans
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (keep,),
+        )
+        await db.commit()
+        return cursor.rowcount or 0
 
 
 async def purge_asset_cache(target_url: str | None = None) -> int:

@@ -125,6 +125,7 @@ def _specimens(rng: random.Random) -> list[Specimen]:
 
     # ── Cloud / infrastructure ───────────────────────────────────────────────
     add(plain("AWS Access Key", "AKIA" + r(UPPER + DIGITS, 16)))
+    add(plain("AWS Bedrock API Key", "ABSK" + r(B64, 140)))
     v = r(ALNUM + "/+", 40)
     add(Specimen("AWS Secret Access Key", v, f'const awsSecretAccessKey = "{v}";'))
     add(plain("Google Cloud API Key", "AIza" + r(ALNUM + "-_", 35)))
@@ -137,8 +138,10 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     add(plain("DigitalOcean PAT", "dop_v1_" + r(HEX, 64)))
     add(plain("HashiCorp Vault Token", "hvs." + r(URLSAFE, 28)))
     add(plain("Terraform Cloud Token",
-              r(LOWER + DIGITS, 14) + ".atlasv1." + r(URLSAFE, 62)))
+              r(LOWER + DIGITS, 14) + ".atlasv1." + r(URLSAFE, 61) + r(ALNUM, 1)))
     add(plain("Cloudflare API Token", "cfat_" + r(URLSAFE, 36)))
+    add(plain("Cloudflare Origin CA Key",
+              "v1.0-" + r(HEX, 24) + "-" + r(HEX, 146)))
     add(plain("Heroku API Key",
               f"{r(HEX, 8)}-{r(HEX, 4)}-{r(HEX, 4)}-{r(HEX, 4)}-{r(HEX, 12)}",
               tmpl='const herokuApiKey = "{v}";'))
@@ -148,7 +151,10 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     add(plain("GitHub OAuth Token", "gho_" + r(ALNUM, 36)))
     add(plain("GitHub Fine-Grained PAT", "github_pat_" + r(ALNUM + "_", 82)))
     add(plain("GitHub Server/Refresh Token", "ghs_" + r(ALNUM, 36)))
-    add(plain("GitLab Personal Access Token", "glpat-" + r(ALNUM + "_-", 20)))
+    add(plain("GitLab Personal Access Token",
+              "glpat-" + r(ALNUM + "_-", 19) + r(ALNUM, 1)))
+    add(plain("GitLab Token (non-PAT)",
+              "glrt-" + r(ALNUM + "_-", 19) + r(ALNUM, 1)))
     add(plain("npm Access Token", "npm_" + r(ALNUM, 36)))
     add(plain("PyPI Upload Token", "pypi-AgEIcHlwaS" + r(URLSAFE, 56)))
 
@@ -162,6 +168,8 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     add(plain("Anthropic API Key", "sk-ant-" + r(URLSAFE, 40)))
     add(plain("Groq API Key", "gsk_" + r(ALNUM, 52)))
     add(plain("Hugging Face Access Token", "hf_" + r(ALNUM, 36)))
+    add(plain("Hugging Face Organization Token",
+              "api_org_" + r(string.ascii_letters, 34)))
     add(plain("Replicate API Token", "r8_" + r(ALNUM, 40)))
     add(plain("Perplexity API Key", "pplx-" + r(ALNUM, 40)))
     add(plain("xAI API Key", "xai-" + r(ALNUM, 72)))
@@ -195,6 +203,8 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     add(plain("Supabase Secret Key", "sb_secret_" + r(URLSAFE, 28)))
     add(plain("Databricks Token", "dapi" + r(HEX, 32)))
     add(plain("Grafana Service Account Token", "glsa_" + r(ALNUM, 32) + "_" + r(HEX, 8)))
+    add(plain("Grafana Cloud Access Token", "glc_" + r(B64, 48)))
+    add(plain("Grafana Legacy API Key", "eyJrIjoi" + r(B64, 80)))
     add(plain("New Relic API Key", "NRAK-" + r(UPPER + DIGITS, 27)))
     v = r(HEX, 32)
     add(Specimen("Datadog API Key", v, f'datadog: {{ apiKey: "{v}" }},'))
@@ -224,6 +234,7 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     add(Specimen("Generic High-Entropy Secret", v, f'const sessionSecret = "{v}";'))
 
     # ── Public-by-design: detected, but must not be reported as CRITICAL ─────
+    add(plain("Stripe Test Key", "sk_test_" + r(ALNUM, 32)))
     add(plain("Stripe Publishable Key", "pk_live_" + r(ALNUM, 28), kind="public",
               note="Publishable key: designed to ship in the browser."))
     v = f"https://{r(HEX, 32)}@o4504.ingest.sentry.io/4506"

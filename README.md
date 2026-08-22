@@ -3,54 +3,49 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-739%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.13.1-blue)
+![Tests](https://img.shields.io/badge/tests-805%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.14.2-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
 Passive Attack Surface Management scanner for detecting credential leaks in public-facing infrastructure.
-Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (64 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
+Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (71 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.13.1 — three defects a live scan found that the suite could not** ·
+> **v2.14.2 — the fix removed one cause and left another standing** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> A deep scan of a real domain produced an HTML report, a CSV and a SARIF file.
-> Reading the three next to each other turned up three defects that none of the
-> 708 tests could see, because each needs input messier than a fixture usually is.
+> A live deep scan of a 258-subdomain estate. v2.13.1's coverage verdict and
+> posture section both worked on it; reading the report against its own CSV
+> turned up three defects anyway.
 >
-> **One regex literal disabled the whole comment stripper.** v2.12.6 stripped
-> comments so a bundled library's documentation links would stop being reported as
-> the client's "connected infrastructure". The report still listed `i.test`,
-> `caniuse.com`, `stackoverflow.com` and `raw.githubusercontent.com` — four of the
-> five strings that entry names as fixed. The stripper tracked strings but not
-> regex literals, and `/['"]/g` is ordinary in any bundle that normalises quoting:
-> the apostrophe inside it opened a string that never closed, so every comment in
-> the rest of the file survived. It failed open, silently, on input no test used.
+> **`i.test` was still there, from a construct the earlier fix never saw.** The
+> bundle supplied with the report came back *clean* when tested directly, which
+> pointed at a different shape: `/^https?:\/\//i.test(u)`, the idiomatic
+> absolute-URL test. v2.13.1 taught the stripper to recognise a regex literal but
+> left its text in place — and that literal's own escaped slashes spell
+> `//i.test`. Bodies are now blanked; a host inside a pattern has escaped dots
+> and was never extractable anyway.
 >
-> **143 posture issues reached no deliverable.** The HTML showed the count in a
-> tile and itemised none; the CSV was a bare header row; the SARIF was
-> `"results": []`. Two deliverables built from one scan disagreeing about whether
-> anything was found is worse than either being empty, because each looks
-> authoritative alone — a consumer gating on the SARIF was told the target was
-> clean. Posture now reaches all three, closing the R8 follow-up the roadmap
-> carried at [HIGH].
+> **Blanking then turned a harmless misparse into a dropped finding**, caught by a
+> test predating all of this work. `</script>` opens with a slash exactly where a
+> literal would, so scanning on swallowed a real external host out of the graph.
+> Latent and free for two releases; a false negative only once an unrelated
+> improvement changed what happened to the text it mis-tokenised.
 >
-> **A CLEAN verdict over a domain the scan mostly did not read.** `MAX_TARGETS`
-> is a prefix slice of an alphabetically sorted host list, so the scan read 26 of
-> 83 live hosts — everything after "g" was never fetched — and the banner still
-> said "across the domain". The verdict now reads PARTIAL and states both counts.
-> The cap is unchanged: raising it silently multiplies traffic against a third
-> party, which is an operator's decision, not a reporting fix.
+> **One host's evidence was printed for a whole posture group** — `server:
+> AmazonS3` shown against a host actually disclosing `Microsoft-IIS/10.0`. For
+> version disclosure the evidence *is* the finding. And **`AmazonS3` is not a
+> version disclosure**: the check was `any(c.isdigit())`, and the 3 is part of a
+> product name.
 >
-> The previous release, **v2.13.0**, closed four defects of the same shape — a
-> documented feature the code path meant to reach it did not reach: an unguarded
-> redirect chain (SSRF, out-of-scope fetches, misattributed findings), an offline
-> mode that rendered no verdict, R7 composite/proximity rules, and public-by-design
-> findings deleted rather than reported.
+> The two releases before it: **v2.14.1** bounded three limits that were
+> documented, asserted or implied but unenforced; **v2.14.0** gave recall a number
+> measured against a corpus this project did not write (80.6%), which immediately
+> found the current OpenAI key formats undetected.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
@@ -84,7 +79,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 │    └─ extract_js_urls()  (regex HTML parse)                      │
 │                                                                  │
 │  extract_secrets()                                               │
-│    └─ 64 SECRET_PATTERNS  (AWS, GCP, Slack, JWT, GitHub…)       │
+│    └─ 71 SECRET_PATTERNS  (AWS, GCP, Slack, JWT, GitHub…)       │
 │    └─ shannon_entropy()   (filter < 3.5 bits)                   │
 │                                                                  │
 │  validate_with_gemini()  — two-tier engine (google-genai SDK)   │
@@ -105,7 +100,8 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 |---|---|---|
 | Event loop | `uvloop` | 2–4× faster than default asyncio on ARM64 |
 | HTTP | `httpx.AsyncClient` | Native async, connection pooling, retries |
-| Concurrency | `asyncio.Semaphore(20)` | Bounds RAM on Pi 5 during deep JS analysis |
+| Concurrency | `asyncio.Semaphore(20)` | Bounds *in-flight fetches* — not retained bytes |
+| Memory ceiling | `MAX_TOTAL_ASSET_BYTES` (256 MB) | Bounds what a scan *keeps*; the semaphore never did |
 | AI | Two-tier Gemini (`google-genai`): 3.5-flash-lite → 3.6-flash | Cheap pre-filter kills noise; strong tier deep-validates real/critical findings with structured output |
 | Transport | WebSocket fan-out | Browser gets live logs without polling |
 | Frontend | Vanilla JS, self-hosted CSS + fonts | Zero build step, deployable immediately, fully offline-capable (no Tailwind CDN — removed; see `frontend/index.html`) |
@@ -118,7 +114,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 secretnode/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + WebSocket + static server + auth/SSRF guards
-│   ├── scanner.py           # Async scan engine (64 patterns, source maps, entropy, base64, Gemini, Discord)
+│   ├── scanner.py           # Async scan engine (71 patterns, source maps, entropy, base64, Gemini, Discord)
 │   ├── verifier.py          # Optional live credential verification (off by default)
 │   ├── netguard.py          # "May this scanner request this?" — pre-flight AND every redirect hop
 │   ├── triage.py            # Deterministic verdicts with no API key, no network, no model
