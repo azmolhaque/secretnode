@@ -53,9 +53,16 @@ VERIFY_SECRETS: bool       = os.environ.get("VERIFY_SECRETS", "false").lower() =
 #
 # Defaults track Google's current lineup: Tier 1 on 3.5 Flash-Lite (fastest /
 # most cost-effective 3.5-class, ideal for the high-volume pre-filter) and Tier 2
-# on 3.6 Flash (stronger coding/reasoning workhorse). For security-focused
-# deployments, set GEMINI_TIER2_MODEL to the security-specialised 3.5 Flash Cyber
-# model (tuned to reason about vulnerabilities) once your key can call it.
+# on 3.6 Flash (stronger coding/reasoning workhorse).
+#
+# This comment used to recommend the security-specialised "Flash Cyber" model
+# for Tier 2 "once your key can call it". No ordinary key ever will: the Cyber
+# models are not published to the public API at any tier, and access is an
+# organisational grant under Google's Fairwind Program. Worse, taking that
+# advice does not merely fail one call — the 404 is a permanent config error,
+# so _describe_ai_config_error latches _ai_disabled_reason and AI validation is
+# off for the ENTIRE scan, silently demoting every finding to offline triage.
+# See .env.example for the full note.
 _LEGACY_MODEL              = os.environ.get("GEMINI_MODEL", "").strip()
 GEMINI_TIER1_MODEL: str    = os.environ.get("GEMINI_TIER1_MODEL", _LEGACY_MODEL or "gemini-3.5-flash-lite")
 GEMINI_TIER2_MODEL: str    = os.environ.get("GEMINI_TIER2_MODEL", "gemini-3.6-flash")
