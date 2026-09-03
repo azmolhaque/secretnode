@@ -80,9 +80,38 @@ excluded every three-letter provider — aws, npm, pgp, gcp, xai — so a missed
 Key** was filed as "provider never claimed". That is the one misclassification this split
 must never make: it moves a defect into the bucket labelled not-a-defect.
 
-**860 tests** (+27), ruff clean. **72 detectors**; ground truth 72/72 with zero false
-positives, precision 1.000 / recall 1.000. External recall unchanged at 80.6% — gitleaks
-has no framework-prefix rule, so there was nothing there for the new detector to move.
+### Fixed — two precision defects the QA pass found, neither caused by this release
+
+Running the new detector through the real pipeline rather than a fixture reported a HIGH
+credential from a bundle that contains none:
+
+```
+{"homepage":"https://acme.com","author":"dev@acme.com"}
+  -> https://acme.com","author":"dev@acme.com      [Basic-Auth URL Credentials, HIGH]
+```
+
+The Basic-Auth URL pattern's character classes excluded only `/` and whitespace, so a
+match could begin inside one JS string and end inside another. That is the shape of every
+`package.json`, and of any path-less base URL in a config object sitting near a support
+address. It survived this long because a `/` in the URL's path breaks the run — so every
+obvious test case passed, and only a path-less base URL exposes it. The classes now
+exclude JS/JSON string boundaries, which RFC 3986 excludes from userinfo anyway.
+
+Then scanning this project's **own diff** with this scanner reported the literal
+`{_STRIPE_LIVE}` — an f-string placeholder in a test fixture — as a credential. The
+placeholder allowlist covered `<PLACEHOLDER>` and no interpolation form at all. `${VAR}`,
+`{{VAR}}`, `{VAR}` and `%(name)s` now join it, at the allowlist rather than in one
+detector, because the failure belongs to every detector that reads a quoted value. These
+ship for real: a broken build, a template that never rendered, a failed entrypoint
+substitution.
+
+Both are pre-existing and neither is a regression. Both are locked in — the first by a new
+ground-truth decoy, both by tests.
+
+**871 tests** (+38), ruff clean. **72 detectors**; ground truth 72/72 with zero false
+positives, precision 1.000 / recall 1.000, offline and end-to-end over HTTP. Labelled
+corpus quality gate PASS. External recall unchanged at 80.6% — gitleaks has no
+framework-prefix rule, so there was nothing there for the new detector to move.
 
 ## [2.14.4] — A host that was never read reported as scanned
 

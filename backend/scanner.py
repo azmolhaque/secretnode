@@ -774,7 +774,27 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Basic-Auth URL Credentials",
-        regex=re.compile(r"\b(https?://[^:@/\s]+:[^@/\s]{3,}@[^\s'\"<>]+)"),
+        # The character classes exclude JS/JSON string boundaries, not just
+        # whitespace. Excluding only `/` and space let a match start inside one
+        # string literal and finish inside another:
+        #
+        #   {"homepage":"https://acme.com","author":"dev@acme.com"}
+        #    -> https://acme.com","author":"dev@acme.com   [HIGH, fabricated]
+        #
+        # That is the shape of every package.json, and any path-less base URL in
+        # a config object followed by a support email does the same. A `/` in the
+        # URL's path happened to break the run, which is why this survived — the
+        # false positive needs a base URL with no path, which is the commonest
+        # form a config object holds.
+        #
+        # RFC 3986 userinfo is unreserved / pct-encoded / sub-delims / ":", so
+        # quotes, angle brackets, braces and backslash are excluded by the spec
+        # anyway. Comma and semicolon are sub-delims in principle; in shipped
+        # JavaScript they mean "the string ended" far more often than they mean
+        # "part of a password", and that trade buys back the whole false positive.
+        regex=re.compile(
+            r"\b(https?://[^:@/\s'\"<>{},;\\]+:[^@/\s'\"<>{},;\\]{3,}@[^\s'\"<>{},;\\]+)"
+        ),
         description="Credentials embedded in an HTTP(S) URL",
         severity="HIGH",
         cwe="CWE-522",
@@ -2298,7 +2318,18 @@ _KNOWN_EXAMPLE_SECRETS = frozenset({
 })
 _PLACEHOLDER_RE = re.compile(
     r"(?i)(your[_-]?(?:api|key|token|secret|id)|placeholder|changeme|"
-    r"redacted|x{8,}|0{8,}|<[^>]{2,}>)"
+    r"redacted|x{8,}|0{8,}|<[^>]{2,}>|"
+    # Un-interpolated template syntax. `<…>` was already here; the interpolation
+    # forms were not, and they ship for real — a broken build, a server-rendered
+    # template that never ran, a Docker entrypoint that failed to substitute.
+    # Found by scanning this project's own diff with this scanner, which
+    # reported the literal `{_STRIPE_LIVE}` out of a test fixture as a
+    # credential. Placed here rather than in one detector because the failure
+    # belongs to every detector that reads a quoted value.
+    r"\$\{[^}]{1,80}\}|"          # ${VAR} — shell, JS template literal
+    r"\{\{[^}]{1,80}\}\}|"        # {{VAR}} — Handlebars, Jinja, Vue, Go
+    r"^\{[A-Za-z_][A-Za-z0-9_]{0,60}\}$|"   # {VAR} alone — str.format, f-string
+    r"%\([A-Za-z_][A-Za-z0-9_]*\)s)"        # %(name)s — Python printf mapping
 )
 _B64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
 _MAX_B64_BLOBS = 200

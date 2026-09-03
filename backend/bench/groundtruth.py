@@ -302,6 +302,19 @@ def _decoys(rng: random.Random) -> list[Decoy]:
               "Base64 config the decoder will open — contains no credential"),
         Decoy("lorem-high-entropy", f'const nonce = "{r(ALNUM, 32)}";',
               "A genuine high-entropy value that is not a secret: a CSP nonce"),
+        # Appended last: decoys draw from the same RNG as the specimens, so an
+        # insertion higher up shifts every value after it.
+        #
+        # The Basic-Auth URL detector used to match ACROSS a string boundary,
+        # because its character classes excluded only `/` and whitespace. This
+        # is the shape of every package.json, and it produced a fabricated HIGH
+        # finding: `https://acme.com","author":"dev@acme.com`. It survived
+        # because the false positive needs a base URL with NO path — which is
+        # exactly the form a config object holds.
+        Decoy("url-then-email",
+              '{"homepage":"https://acme.com","author":"dev@acme.com",'
+              '"apiBase":"https://api.acme.com","support":"help@acme.com"}',
+              "Path-less base URLs beside emails — must not read as basic-auth credentials"),
     ]
 
 

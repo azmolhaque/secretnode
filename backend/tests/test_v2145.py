@@ -218,3 +218,81 @@ class TestMeasurement:
         out = capsys.readouterr().out
         assert "skip, not a pass" in out
         assert "data protection agreement" in out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3 · Basic-Auth URL credentials must not be assembled across string boundaries
+# ─────────────────────────────────────────────────────────────────────────────
+
+BASIC_AUTH = "Basic-Auth URL Credentials"
+
+
+class TestBasicAuthUrlDoesNotCrossStringBoundaries:
+    """Found by QA, not by the suite: running the new detector through the real
+    pipeline surfaced a fabricated HIGH finding from a bundle that contains no
+    credential at all.
+
+    The character classes excluded only `/` and whitespace, so a match could
+    start inside one JS string and end inside another. It needed a base URL with
+    no path — which is exactly the form a config object holds — and that is why
+    it survived this long: a `/` in the path breaks the run, so the obvious test
+    cases all passed.
+    """
+
+    def test_a_package_json_shape_is_not_a_credential(self):
+        assert BASIC_AUTH not in _types(
+            '{"homepage":"https://acme.com","author":"dev@acme.com"}')
+
+    def test_a_config_object_beside_a_support_email_is_not_a_credential(self):
+        assert BASIC_AUTH not in _types(
+            '{apiBase:"https://api.acme.com",support:"help@acme.com"}')
+
+    def test_a_base_url_beside_any_later_at_sign_is_not_a_credential(self):
+        assert BASIC_AUTH not in _types(
+            'window.__env={A:"https://api.acme.test",P:"Qx7!vR2m@Lp9Zt4W"};')
+
+    def test_a_genuine_basic_auth_url_is_still_found(self):
+        """The fix must not buy precision with recall."""
+        assert BASIC_AUTH in _types(
+            'fetch("https://deploy:s3cretPassw0rd@artifacts.acme.test/latest.tar.gz")')
+
+    def test_a_genuine_basic_auth_url_with_a_port_is_still_found(self):
+        assert BASIC_AUTH in _types(
+            'https://admin:hunter2horse@internal.acme.test:8443/api')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4 · Un-interpolated template syntax is not a credential
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTemplatePlaceholdersAreRejected:
+    """Found by scanning this project's own diff with this scanner — it reported
+    the literal `{_STRIPE_LIVE}` out of a test fixture as a credential.
+
+    These ship for real: a broken build, a server-rendered template that never
+    ran, a Docker entrypoint whose substitution failed. The allowlist already
+    covered `<PLACEHOLDER>` and missed every interpolation form.
+    """
+
+    def test_shell_and_js_interpolation_is_rejected(self):
+        assert scanner.is_benign_placeholder("${NEXT_PUBLIC_API_SECRET}")
+        assert scanner.is_benign_placeholder("${process.env.DB_PASSWORD}")
+
+    def test_handlebars_and_jinja_are_rejected(self):
+        assert scanner.is_benign_placeholder("{{ API_SECRET }}")
+        assert scanner.is_benign_placeholder("{{DATABASE_PASSWORD}}")
+
+    def test_a_bare_brace_placeholder_is_rejected(self):
+        assert scanner.is_benign_placeholder("{_STRIPE_LIVE}")
+
+    def test_python_printf_mapping_is_rejected(self):
+        assert scanner.is_benign_placeholder("%(client_secret)s")
+
+    def test_real_values_are_still_accepted(self):
+        """The fix must not buy precision with recall."""
+        for v in ("Qx7!vR2m@Lp9Zt4W", "a7Kd93MzQp1XvR4TbN8LcYeWq2Zx",
+                  "hunter2Correct!Horse9Battery"):
+            assert not scanner.is_benign_placeholder(v)
+
+    def test_an_uninterpolated_template_is_not_reported_end_to_end(self):
+        assert FW not in _types('NEXT_PUBLIC_APP_SECRET="${BUILD_SECRET}"')
