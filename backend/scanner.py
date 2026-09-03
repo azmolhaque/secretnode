@@ -462,6 +462,61 @@ SECRET_PATTERNS: list[SecretPattern] = [
         severity="MEDIUM",
         entropy_gated=True,   # loose keyword=value match — entropy keeps it quiet
     ),
+    # A secret hiding behind a build-time "public" prefix.
+    #
+    # Every SPA bundler inlines a whitelisted env prefix into the shipped bundle:
+    # NEXT_PUBLIC_ (Next.js), REACT_APP_ (CRA), VITE_ (Vite), VUE_APP_ (Vue CLI),
+    # NUXT_PUBLIC_, GATSBY_, EXPO_PUBLIC_, PUBLIC_ (SvelteKit). The prefix IS the
+    # opt-in — it means "ship this to every browser" — and the failure this
+    # catches is a developer reading it as a naming convention and putting a real
+    # secret behind it. `NEXT_PUBLIC_STRIPE_SECRET_KEY` is not a hypothetical
+    # shape; it is the single most common way a live key reaches a bundle today.
+    #
+    # The name is the whole signal, so this is keyword-anchored and lives here
+    # rather than in composite.py — per that module's own rule, a companion
+    # carrying its own keyword is an ordinary detector wearing a composite's
+    # clothes.
+    #
+    # WHERE IT IS ACTUALLY FINDABLE, honestly: a fully minified Next.js bundle
+    # has already substituted the literal for `process.env.NEXT_PUBLIC_…`, so the
+    # name is gone and only the value ships. This detector fires on the forms
+    # where the name survives — Angular `environment.ts` object literals compiled
+    # verbatim, source maps' `sourcesContent`, unminified and dev builds, served
+    # `.env` files, and any config object that enumerates the vars rather than
+    # dereferencing them one by one. That is a real and large share of what a
+    # crawler meets, but it is not all of it, and claiming otherwise would be the
+    # kind of overstatement the benchmark caveat exists to prevent.
+    #
+    # Only names that DECLARE a secret qualify. `NEXT_PUBLIC_MAPBOX_TOKEN` and
+    # `NEXT_PUBLIC_POSTHOG_KEY` are public by design and correctly ignored —
+    # matching on "TOKEN" or "KEY" alone would turn this into a false-positive
+    # engine on exactly the values the informational bucket exists to clear.
+    SecretPattern(
+        name="Framework Public Env Secret",
+        regex=re.compile(
+            r"(?:NEXT_PUBLIC|REACT_APP|VUE_APP|VITE|NUXT_PUBLIC|GATSBY|EXPO_PUBLIC|PUBLIC)"
+            r"_[A-Z0-9_]{0,40}"
+            r"(?:SECRET|PRIVATE|PASSWORD|PASSWD|SERVICE_ROLE|CLIENT_SECRET)"
+            r"[A-Z0-9_]{0,40}"
+            # Value charset excludes only quotes, whitespace and angle brackets
+            # rather than allowlisting base64: a `_PASSWORD` is routinely full of
+            # punctuation, and `hunter2Correct!Horse9Battery` was invisible while
+            # this allowlisted `[A-Za-z0-9-_.~+/=]`. The name anchor is strong
+            # enough to carry a permissive value — a bundle does not casually
+            # contain `REACT_APP_..._SECRET=` beside something harmless.
+            r"['\"]?\s*[=:]\s*['\"]([^'\"\s<>]{12,200})['\"]"
+        ),
+        description="Secret-named value behind a framework's public env prefix",
+        severity="HIGH",
+        remediation=(
+            "This value is inlined into the browser bundle by the build — the "
+            "NEXT_PUBLIC_/REACT_APP_/VITE_ prefix is precisely the instruction to "
+            "publish it, so every visitor already has it. Treat it as compromised: "
+            "rotate it at the provider, then move the call server-side (an API "
+            "route or backend-for-frontend) and re-introduce the value WITHOUT the "
+            "public prefix so the bundler cannot inline it again."
+        ),
+    ),
     SecretPattern(
         name="OAuth Client Secret",
         regex=re.compile(

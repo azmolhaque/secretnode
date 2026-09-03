@@ -242,6 +242,17 @@ def _specimens(rng: random.Random) -> list[Specimen]:
                  note="DSN is a public write-only endpoint; allows event injection only."))
     add(plain("PostHog Project API Key", "phc_" + r(ALNUM, 43), kind="public",
               note="Project key is published to every browser by design."))
+
+    # Appended LAST on purpose. Every specimen draws from one shared RNG, so
+    # inserting one mid-list shifts every value after it — which is how adding a
+    # detector once pushed the Terraform sample onto a trailing `-` its own \b
+    # excludes, and broke a corpus that had nothing to do with the change.
+    #
+    # Not `plain()`: the value is nothing on its own. The name is the entire
+    # signal, so the specimen has to carry the assignment that a build inlines.
+    v = r(ALNUM, 30)
+    add(Specimen("Framework Public Env Secret", v,
+                 f'NEXT_PUBLIC_APP_CLIENT_SECRET="{v}"'))
     return out
 
 

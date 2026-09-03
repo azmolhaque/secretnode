@@ -39,6 +39,9 @@ bench: ## Measure detection-layer precision/recall on the labelled corpus (R2)
 bench-external: ## External-validity recall vs. gitleaks' corpus (needs network)
 	cd backend && SECRETNODE_API_KEY=bench $(PY) -m bench.external
 
+bench-secretbench: ## Precision AND recall vs. SecretBench (needs your own licensed export)
+	cd backend && SECRETNODE_API_KEY=bench $(PY) -m bench.secretbench
+
 bench-full: ## Ground-truth benchmark across every detector (offline)
 	cd backend && SECRETNODE_API_KEY=bench $(PY) -m bench.benchmark
 

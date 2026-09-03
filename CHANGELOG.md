@@ -3,6 +3,87 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.5] — The leak pattern that dominates real bundles, and a corpus that can measure precision
+
+Research question: what does a leaked credential in browser-delivered JavaScript actually
+look like in 2026? The answer is not an exotic format. Every SPA bundler inlines a
+whitelisted env prefix into the shipped bundle — `NEXT_PUBLIC_` (Next.js), `REACT_APP_`
+(CRA), `VITE_`, `VUE_APP_`, `NUXT_PUBLIC_`, `GATSBY_`, `EXPO_PUBLIC_`, `PUBLIC_`
+(SvelteKit) — and the prefix *is* the instruction to publish. The failure is a developer
+reading it as a naming convention and putting a real secret behind it.
+
+SecretNode had no awareness of any of them:
+
+```
+grep -ni "NEXT_PUBLIC|REACT_APP|VUE_APP|VITE_|environment.ts" scanner.py triage.py
+→ (no matches)
+```
+
+### Added — `Framework Public Env Secret` (detector 72)
+
+Fires on a value whose *name* declares a secret sitting behind a public prefix:
+`NEXT_PUBLIC_STRIPE_SECRET_KEY`, `REACT_APP_DB_PASSWORD`, `VITE_SUPABASE_SERVICE_ROLE_KEY`.
+
+It is keyword-anchored, so it lives in the registry rather than `composite.py` — per that
+module's own rule, *"a companion carrying its own keyword is an ordinary detector wearing
+a composite's clothes."*
+
+Only names that **declare** a secret qualify. `NEXT_PUBLIC_MAPBOX_TOKEN`,
+`NEXT_PUBLIC_POSTHOG_KEY` and `PUBLIC_SUPABASE_ANON_KEY` are public by design and stay
+clear: matching on TOKEN or KEY alone would aim a false-positive engine at exactly the
+values the informational bucket exists to clear.
+
+**Where it is findable, stated honestly:** a fully minified Next.js bundle has already
+substituted the literal for `process.env.NEXT_PUBLIC_…`, so the name is gone and only the
+value ships. This detector fires where the name survives — Angular `environment.ts`
+objects compiled verbatim, source maps' `sourcesContent`, unminified and dev builds,
+served `.env` files, and config objects that enumerate the vars. That is a large share of
+what a crawler meets, and it is not all of it.
+
+Two corrections during the work. The first value charset allowlisted base64, so
+`hunter2Correct!Horse9Battery` was invisible — a `_PASSWORD` is exactly where punctuation
+lives, and the name anchor is strong enough to carry a permissive value. And when a real
+provider detector also matches, it wins: `NEXT_PUBLIC_STRIPE_SECRET_KEY="sk_live_…"` is
+reported as a **Stripe Secret Key**, CRITICAL with Stripe's own remediation, which is
+strictly more useful than a generic framework verdict.
+
+### Added — `bench.secretbench`: external precision, not just external recall
+
+`bench.benchmark` measures precision against decoys this project invented.
+`bench.external` measures recall against another scanner's samples. Neither measures
+precision against **values a human examined and ruled out**, which is what a client is
+really asking when they ask how noisy the tool is.
+
+[SecretBench](https://github.com/setu1421/SecretBench) carries both labels: 97,479
+candidate secrets mined from 818 public GitHub repositories, 15,084 of them labelled
+TRUE by hand. So recall, precision and false-alarm rate all come from one corpus that
+owes nothing to these patterns.
+
+**There is no downloader, and there will not be one.** The authors gate the dataset
+deliberately — *"a data protection agreement has to be signed with us"* — because the
+true-labelled rows are real credentials belonging to real people. Writing a fetcher would
+route around an agreement someone else signed, and shipping one open-source would invite
+every user to do the same. Obtain access yourself, export what you are permitted to hold,
+and pass `--export`. The same applies to FPSecretBench, which this module reads through
+the same path.
+
+Three rules on the data, enforced rather than documented: the export is never copied or
+cached; an export located **inside the repository is refused** (one `git add -A` publishes
+real credentials, and this project has been bitten by that exact shape twice); and nothing
+secret reaches stdout — misses print provider, category and a masked fragment.
+
+With no export it prints *"this is a skip, not a pass: no number was measured"* and exits
+0, matching `bench.external`.
+
+One bug found in the new code by its own test: `_has_detector` used `len(head) > 3`, which
+excluded every three-letter provider — aws, npm, pgp, gcp, xai — so a missed **AWS Access
+Key** was filed as "provider never claimed". That is the one misclassification this split
+must never make: it moves a defect into the bucket labelled not-a-defect.
+
+**860 tests** (+27), ruff clean. **72 detectors**; ground truth 72/72 with zero false
+positives, precision 1.000 / recall 1.000. External recall unchanged at 80.6% — gitleaks
+has no framework-prefix rule, so there was nothing there for the new detector to move.
+
 ## [2.14.4] — A host that was never read reported as scanned
 
 Four live deep scans of intentionally vulnerable targets — vulnweb.com, nmap.org,
