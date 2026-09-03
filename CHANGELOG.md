@@ -3,6 +3,72 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.4] — A host that was never read reported as scanned
+
+Four live deep scans of intentionally vulnerable targets — vulnweb.com, nmap.org,
+badssl.com, testfire.net. No credentials to find on any of them (they are XSS/SQLi/TLS
+testbeds, and their secrets live server-side), so zero confirmed was the correct answer
+throughout. What the scans exercised was orchestration and reporting, and that is where
+both defects are.
+
+### Fixed — every single-target failure rendered as a clean host
+
+nmap.org's report said **CLEAN across 5 of 5 hosts**. One of the five, `issues.nmap.org`,
+redirects to github.com; the scope guard correctly refused to follow it, so the root
+document was never fetched. The per-host table showed:
+
+```
+issues.nmap.org | scanned | 0 assets | 0 confirmed | 0 posture | (no note)
+```
+
+The spider logged the failure and returned an empty asset list, so the scan "completed"
+with nothing in it. But the cause was wider than that host: `run_scan` reports failure
+through `status` and `errors` (plural), while `_summarise_scan` read `scan["error"]` — a
+key `run_scan` never sets. **Every** single-target failure, a fatal spider crash included,
+arrived in the deep-scan table as `scanned`.
+
+That also disabled the v2.13.1 coverage verdict, which counts only hosts carrying an
+error: a host the scanner explicitly said it could not read still counted as covered, so
+the verdict could not hedge to PARTIAL. An unreadable host and a host read and found clean
+were the same thing to every deliverable.
+
+An unfetchable root now raises `RootUnreachable` rather than returning an empty list, so
+the scan is `failed` with a reason at single-target level too; and `_scan_failure()` reads
+the signals `run_scan` actually sets. A host that was not read now says so, and hedges the
+domain verdict.
+
+### Fixed — the host budget could be swallowed whole by a generated fleet
+
+The per-run host cap is a prefix slice of an alphabetically sorted candidate list. Under
+wildcard DNS that is the worst available ordering: whatever sorts first takes everything.
+badssl.com surfaced 646 live hosts, of which all but a handful were generated
+`wowmoarhost1000…1441` names returning zero assets each.
+
+**An honest correction to the first reading of that scan:** badssl was not actually harmed.
+Its fleet sorts *last*, so the alphabetical slice already reached all six distinct hosts,
+and the 19 remaining slots had nothing better to spend on. The defect it exposed is latent
+rather than realised — a fleet whose stem sorts *before* the real hosts takes every slot
+and none of them is ever read. Measured on that shape: **0 of 5 distinct hosts reached
+before, 5 of 5 after.**
+
+`prioritise_hosts()` bands candidates — apex first, then hosts with no large same-stem
+family, then the remainder of each family after keeping two representatives. It reorders
+and never drops, so a run whose cap exceeds the candidate count still reaches everything.
+Raising `MAX_TARGETS` was never the fix; it just buys more `wowmoarhost`.
+
+### Known and not fixed here
+
+Three smaller findings from the same four scans, recorded rather than silently carried:
+`?.badssl.com` reached the probe list because the deep-scan candidate filter checks scope
+but not hostname validity (`surface._valid_host` already rejects it and is not called
+here); the "Subdomains found" and "Live hosts" tiles count different populations (CT only
+versus CT ∪ archive ∪ target), which reads as `0 found / 3 live` on vulnweb; and the
+deep-scan deliverables carry no screening funnel, so vulnweb's two examined-and-dismissed
+JWTs appear nowhere outside the dashboard.
+
+**833 tests** (+15), ruff clean. Ground truth 71/71 with zero false positives, precision
+1.000 / recall 1.000, unchanged.
+
 ## [2.14.3] — The finding was found, then dropped on the way to the report
 
 A deep scan of an authorized bug-bounty target. `mtw-pwa-test.telenor.se/js/index.js`

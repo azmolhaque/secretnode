@@ -25,6 +25,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass, field
@@ -331,6 +332,87 @@ def collapse_redirect_duplicates(
     return targets, collapsed
 
 
+def _scan_failure(scan: dict) -> str | None:
+    """The reason this host's scan did not complete, or None if it did.
+
+    `run_scan` reports failure through `status` and `errors` (plural). This read
+    `scan.get("error")` — a key `run_scan` never sets — so EVERY single-target
+    failure arrived here as None and rendered in the per-host table as
+    `scanned`. A host whose root was never fetched was indistinguishable from
+    one that was read and found clean, and because the coverage verdict counts
+    only hosts carrying an error, it could not hedge to PARTIAL either: a deep
+    scan of nmap.org reported CLEAN across 5 of 5 hosts while issues.nmap.org
+    was never read at all (its root redirected out of scope).
+
+    `error` is still honoured first: `_scan_host` sets it directly when the scan
+    call raises, which `status`/`errors` cannot describe.
+    """
+    direct = scan.get("error")
+    if direct:
+        return str(direct)
+    status = str(scan.get("status", "") or "")
+    if status in ("failed", "cancelled"):
+        errs = [str(e) for e in (scan.get("errors") or []) if e]
+        return f"{status}: {errs[0]}" if errs else status
+    return None
+
+
+# A label that is just a word plus digits — `wowmoarhost1042`, `web07`, `n3` —
+# reduces to its stem. Enough of them sharing a stem is the signature of
+# wildcard DNS or a generated fleet rather than of distinct sites.
+_NUMERIC_TAIL = re.compile(r"\d+$")
+FAMILY_MIN  = _env_int("HOST_FAMILY_MIN", 8)   # siblings before a stem is a "family"
+FAMILY_KEEP = _env_int("HOST_FAMILY_KEEP", 2)  # representatives kept in the priority band
+
+
+def prioritise_hosts(urls: list[str], domain: str) -> list[str]:
+    """Order candidate hosts so a truncated run spends its budget on distinct
+    sites rather than on a generated fleet.
+
+    The host cap is applied as a prefix slice, and the candidate list arrives
+    alphabetically sorted — which is the worst possible ordering under wildcard
+    DNS, because whatever sorts first wins. A deep scan of badssl.com spent 19 of
+    its 25 host slots on `wowmoarhost1000…1014.badssl.com`, every one of them
+    returning zero assets and zero posture, while 621 hosts — including the
+    subdomains anyone would actually want read — were never examined. Raising
+    the cap does not fix that; it buys more `wowmoarhost`.
+
+    Nothing is dropped: this REORDERS, so a run whose cap exceeds the candidate
+    count still reaches every host. Three bands, stable within each:
+
+      0. the apex, and the host the caller typed — always read first
+      1. hosts with no large same-stem family
+      2. the rest of each family, after keeping FAMILY_KEEP representatives —
+         a fleet is worth sampling, not worth exhausting
+    """
+    hosts = [(u, (recon._host_of(u) or "").lower()) for u in urls]
+
+    stems: dict[str, int] = {}
+    for _u, h in hosts:
+        label = h.split(".", 1)[0]
+        stem = _NUMERIC_TAIL.sub("", label)
+        # A bare number is not a stem worth grouping on, and an unsuffixed label
+        # is its own stem only if some sibling actually carries digits.
+        if stem and stem != label:
+            stems[stem] = stems.get(stem, 0) + 1
+
+    seen_of_stem: dict[str, int] = {}
+    banded: list[tuple[int, int, str]] = []
+    for i, (u, h) in enumerate(hosts):
+        label = h.split(".", 1)[0]
+        stem = _NUMERIC_TAIL.sub("", label)
+        if h == domain or not label or label == "www":
+            band = 0
+        elif stem != label and stems.get(stem, 0) >= FAMILY_MIN:
+            seen_of_stem[stem] = seen_of_stem.get(stem, 0) + 1
+            band = 1 if seen_of_stem[stem] <= FAMILY_KEEP else 2
+        else:
+            band = 1
+        banded.append((band, i, u))
+
+    return [u for _b, _i, u in sorted(banded, key=lambda t: (t[0], t[1]))]
+
+
 def _summarise_scan(host: str, url: str, scan: dict) -> HostScan:
     return HostScan(
         host=host,
@@ -340,7 +422,7 @@ def _summarise_scan(host: str, url: str, scan: dict) -> HostScan:
         informational=len(scan.get("informational_findings", [])),
         posture_issues=len(scan.get("posture_findings", [])),
         assets=int(scan.get("assets_fetched", 0) or 0),
-        error=scan.get("error"),
+        error=_scan_failure(scan),
     )
 
 
@@ -492,7 +574,7 @@ async def run_deep_scan(
             await emit({"type": "deep_scan_complete", "totals": result.to_dict()["totals"]})
             return result
 
-        targets = scan_urls[:max(1, max_targets)]
+        targets = prioritise_hosts(scan_urls, domain)[:max(1, max_targets)]
         n = len(targets)
         await emit(log(f"{len(result.live_hosts)} host(s) live — scanning {n} "
                        f"(concurrency {HOST_SCAN_CONCURRENCY})"))

@@ -1992,6 +1992,18 @@ async def check_robots_txt(
         return True  # robots.txt missing/unreachable is not an error condition
 
 
+class RootUnreachable(RuntimeError):
+    """The target's root document could not be fetched, so there was nothing to
+    scan.
+
+    A distinct type because the caller must be able to tell this apart from a
+    genuine crash: it is an expected outcome (a WAF block, an out-of-scope
+    redirect, a dead host) that has to reach the report as a *failure* rather
+    than as an empty-but-successful scan. Silence here is what let a deep scan
+    call a host `scanned` when its root was never read.
+    """
+
+
 class _AssetBudget:
     """Tracks the bytes a scan is holding and says when to stop collecting.
 
@@ -2062,7 +2074,20 @@ async def spider_target(
                     f"The scan cannot proceed without the root document."
                 ),
             })
-        return []
+        # Raise rather than return []. Returning an empty asset list made an
+        # unreachable target indistinguishable from a reachable one that simply
+        # had nothing in it: the scan completed, reported 0 assets and 0
+        # findings, and every deliverable then said "clean". A deep scan of
+        # nmap.org showed the cost — issues.nmap.org redirected out of scope,
+        # its root was never fetched, and the per-host table still read
+        # `scanned` with no note while the domain verdict said CLEAN across
+        # 5 of 5 hosts. The coverage verdict cannot hedge to PARTIAL either,
+        # because that counts hosts carrying an error and this one carried none.
+        raise RootUnreachable(
+            f"could not fetch the target root ({target_url}) — commonly a WAF/CDN "
+            f"block (HTTP 403/503), an out-of-scope redirect, an unresolved host, "
+            f"or a timeout"
+        )
 
     budget = budget or _AssetBudget()
     assets: list[tuple[str, str]] = (
@@ -3135,6 +3160,14 @@ async def run_scan(
         except asyncio.CancelledError:
             result["status"] = "cancelled"
             await emit({"type": "scan_cancelled", "scan_id": scan_id})
+            return result
+        except RootUnreachable as exc:
+            # Expected and reportable, not a crash — no stack trace. What matters
+            # is that `status` and `errors` say so, because that is what a deep
+            # scan reads to decide whether this host counts as covered.
+            result["status"] = "failed"
+            result["errors"].append(str(exc))
+            await emit({"type": "scan_error", "error": str(exc)})
             return result
         except Exception as exc:
             logger.exception("Fatal spider error")
