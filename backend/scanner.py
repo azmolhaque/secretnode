@@ -369,6 +369,48 @@ SECRET_PATTERNS: list[SecretPattern] = [
         description="Google Cloud / Firebase API Key",
         severity="HIGH",
     ),
+    # Google's CURRENT key format, and the one that actually matters.
+    #
+    # AI Studio now issues `AQ.`-prefixed keys instead of `AIzaSy…`, and the
+    # legacy format is being retired. That inverted this scanner's value on
+    # Google: the `AIza` keys it reliably catches are, in real web bundles,
+    # overwhelmingly Firebase *web config* keys — public by design, correctly
+    # downgraded to INFO — while the `AQ.` keys it could not see at all are live
+    # credentials with billing attached. It found the harmless ones and was blind
+    # to the dangerous ones.
+    #
+    # Kept separate from the `AIza` detector rather than folded into it, because
+    # the two differ in the way that decides a report: an `AIza` value may be
+    # public by design and routinely is, an `AQ.` key never is. One severity and
+    # one remediation cannot serve both.
+    #
+    # SIZING, honestly: Google has published no specification for this format.
+    # The bound comes from an observed key — `AQ.` plus 50 base64url characters,
+    # mixed case and digits — widened deliberately rather than pinned to that
+    # length. Pinning an observed length is exactly what left the OpenAI pattern
+    # demanding twenty characters before `T3BlbkFJ` and blind to every `sk-proj-`
+    # key Google's counterpart issues today. The 30-character floor is what keeps
+    # the short `AQ.` prefix from matching ordinary text; the ceiling is slack.
+    #
+    # `\b` before `AQ` is load-bearing, not decoration. It is what stops a JWT
+    # whose segment happens to end in `AQ` from reading as a key: in
+    # `…HUzI1NiAQ.eyJzdWI…` the `A` follows a word character, so no boundary
+    # exists and no match is attempted. A real JWT can never open with `AQ.`
+    # either — its first segment is base64 of `{"`, always `eyJ`.
+    SecretPattern(
+        name="Google AI Studio API Key",
+        regex=re.compile(r"\b(AQ\.[A-Za-z0-9_-]{30,200})\b"),
+        description="Google AI Studio / Gemini API key (AQ. format)",
+        severity="CRITICAL",
+        remediation=(
+            "Delete this key at https://aistudio.google.com/apikey and issue a "
+            "replacement held server-side. Unlike a Firebase web apiKey, an AI "
+            "Studio key is never public by design: it bills model inference to "
+            "the owning project and reaches every model the project can call. "
+            "Proxy Gemini calls through your own backend so the key never enters "
+            "a browser bundle."
+        ),
+    ),
     SecretPattern(
         name="Slack Webhook",
         regex=re.compile(
@@ -971,6 +1013,90 @@ SECRET_PATTERNS: list[SecretPattern] = [
             "immediately, rotate to a new key stored server-side, and audit "
             "the account's IAM roles for least privilege."
         ),
+    ),
+
+    # ── Providers added from gitleaks' rule definitions (v2.15.0) ────────────
+    #
+    # Every pattern below is transcribed from gitleaks' own published regex for
+    # that provider, not inferred from a single observed sample. That distinction
+    # is the whole reason these are safe to add in a batch: the shape is
+    # documented by a second project that maintains it, so none of them encodes a
+    # length this repository guessed at.
+    #
+    # They close the largest part of the "provider never claimed" bucket in
+    # `make bench-external` — a bucket that is a coverage decision rather than a
+    # defect, and was simply never decided.
+    SecretPattern(
+        name="Adobe Client Secret",
+        regex=re.compile(r"\b(p8e-[A-Za-z0-9]{32})\b"),
+        description="Adobe OAuth client secret",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Alibaba Access Key ID",
+        regex=re.compile(r"\b(LTAI[A-Za-z0-9]{20})\b"),
+        description="Alibaba Cloud access key ID",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Artifactory API Key",
+        regex=re.compile(r"\b(AKCp[A-Za-z0-9]{69})\b"),
+        description="JFrog Artifactory API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Atlassian API Token",
+        regex=re.compile(r"\b(ATATT3xFfGF0[A-Za-z0-9_\-=]{100,250})\b"),
+        description="Atlassian (Jira/Confluence) API token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Defined Networking API Token",
+        regex=re.compile(r"\b(dnkey-[A-Za-z0-9=_\-]{26}-[A-Za-z0-9=_\-]{52})\b"),
+        description="Defined Networking API token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Dynatrace API Token",
+        regex=re.compile(r"\b(dt0c01\.[A-Za-z0-9]{24}\.[A-Za-z0-9]{64})\b"),
+        description="Dynatrace API token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Intra42 Client Secret",
+        regex=re.compile(r"\b(s-s4t2(?:ud|af)-[A-Fa-f0-9]{64})\b"),
+        description="42 Intra OAuth client secret",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="PlanetScale API Token",
+        regex=re.compile(r"\b(pscale_tkn_[A-Za-z0-9=\.\-_]{32,64})\b"),
+        description="PlanetScale API token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="PlanetScale OAuth Token",
+        regex=re.compile(r"\b(pscale_oauth_[A-Za-z0-9=\.\-_]{32,64})\b"),
+        description="PlanetScale OAuth token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="PlanetScale Password",
+        regex=re.compile(r"\b(pscale_pw_[A-Za-z0-9=\.\-_]{32,64})\b"),
+        description="PlanetScale database password",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="RubyGems API Token",
+        regex=re.compile(r"\b(rubygems_[a-f0-9]{48})\b"),
+        description="RubyGems push/API token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Brevo (Sendinblue) API Token",
+        regex=re.compile(r"\b(xkeysib-[a-f0-9]{64}-[A-Za-z0-9]{16})\b"),
+        description="Brevo / Sendinblue transactional-email API key",
+        severity="HIGH",
     ),
 ]
 
@@ -2315,6 +2441,13 @@ async def spider_target(
 # ── Accuracy filters (v2.3.0): example/placeholder allowlist + base64 decoding ──
 _KNOWN_EXAMPLE_SECRETS = frozenset({
     "AKIAIOSFODNN7EXAMPLE",   # AWS's official documentation example key
+    # Firebase's own Android SDK documentation keys. They are `AIza`-shaped and
+    # therefore matched, they appear in copied sample code across the web, and
+    # gitleaks lists all three as declared non-secrets. Found by measuring this
+    # scanner against that list: they were 3 of the 16 alarms one rule produced.
+    "AIzaSyabcdefghijklmnopqrstuvwxyz1234567",
+    "AIzaSyAnLA7NfeLquW1tJFpx_eQCxoX-oo6YyIs",
+    "AIzaSyCkEhVjf3pduRDt6d1yKOMitrUEke8agEM",
 })
 _PLACEHOLDER_RE = re.compile(
     r"(?i)(your[_-]?(?:api|key|token|secret|id)|placeholder|changeme|"
@@ -2329,7 +2462,13 @@ _PLACEHOLDER_RE = re.compile(
     r"\$\{[^}]{1,80}\}|"          # ${VAR} — shell, JS template literal
     r"\{\{[^}]{1,80}\}\}|"        # {{VAR}} — Handlebars, Jinja, Vue, Go
     r"^\{[A-Za-z_][A-Za-z0-9_]{0,60}\}$|"   # {VAR} alone — str.format, f-string
-    r"%\([A-Za-z_][A-Za-z0-9_]*\)s)"        # %(name)s — Python printf mapping
+    r"%\([A-Za-z_][A-Za-z0-9_]*\)s|"        # %(name)s — Python printf mapping
+    # The EXAMPLE marker, case-sensitive. AWS documents its sample credentials by
+    # ending them in literal `EXAMPLE`, and other vendors copied the convention
+    # (`ABSKQmVkcm9ja0FQSUtleS1EXAMPLE`). Case-sensitivity is deliberate: a
+    # case-insensitive form would swallow `example.com` and every `exampleKey`
+    # identifier, trading a real detection for a cosmetic one.
+    r"(?-i:EXAMPLE))"
 )
 _B64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
 _MAX_B64_BLOBS = 200

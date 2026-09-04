@@ -38,7 +38,15 @@ import scanner  # noqa: E402
 # (see its masked-secret decoy) — a test suite that cannot be committed is not a
 # test suite, and the values are identical once built.
 AKIA = "AKIA" + "Z7QF3XBNQ2WKLMNP"
-AWS_SECRET = "wJalrXUtnFEMI7K9" + "MDENGbPxRfiCY" + "EXAMPLEK3yQ"   # 40, mixed alphabet
+# 40 characters, mixed alphabet — deliberately NOT AWS's documentation secret.
+#
+# This fixture used to end in `EXAMPLEK3yQ`, borrowing the shape of AWS's public
+# sample key. v2.15.0 added the `EXAMPLE` marker to the placeholder allowlist,
+# because vendors mark their documentation credentials that way and reporting one
+# is a false positive — so this test began asserting that the scanner reports a
+# documentation sample. The composite rule is about pairing an ID with a nearby
+# secret; the fixture only ever needed a realistic 40-character value.
+AWS_SECRET = "wJalrXUtnFEMI7K9" + "MDENGbPxRfiCY" + "hT4uQm2K3yQ"   # 40, mixed alphabet
 TWILIO_SID = "AC" + "9f3b2a1c4d5e6f708192a3b4c5d6e7f8"
 TWILIO_TOKEN = "1a2b3c4d5e6f708192a3b4c5d6e7f809"
 

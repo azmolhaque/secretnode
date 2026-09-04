@@ -3,6 +3,182 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.15.0] — The benchmark was measuring the wrong thing
+
+A minor version, not a patch, because the headline number changed and the detector
+registry grew by 17%. The work started as "add `AQ.` key detection" and turned into an
+audit of the instrument that was supposed to be grading this scanner.
+
+### Fixed — the external-validity harness was manufacturing defects
+
+`make bench-external` reported **80.6% recall, 10 in-scope misses**, and labelled that
+bucket *"the only bucket that is a defect"*. Both numbers were wrong, and the second one
+was wrong in the most dangerous direction. Tracing every entry back to the rule file it
+came from:
+
+| Reported "in-scope miss" | What it actually was |
+|---|---|
+| 3 entries | values gitleaks itself lists under `fps` — its **declared non-secrets** |
+| 6 entries | scraped from neither sample list: comments, regex bodies, doc strings |
+| 1 entry | `2021-02-14T20:41:01Z` — a timestamp sliced out of a longer sample |
+
+**Essentially none were defects.** SecretNode correctly refusing to report a value gitleaks
+declares is not a credential was being scored as a missed detection. That is precisely the
+failure this module's own docstring calls "the measuring instrument being wrong about the
+tool, which is the one thing a benchmark must never be."
+
+The extractor also dropped every line containing `secrets.NewSecret` as a "regex fragment".
+That is where most of gitleaks' samples live — `"AKIA"+secrets.NewSecret("[A-Z2-7]{16}")` —
+so the corpus was whatever happened to be hardcoded, and `Keywords: []string{"rubygems_"}`
+match hints were being scraped as specimens. A bare prefix cannot match any detector, so
+each one was counted as a missed credential; 91 of them were.
+
+The harness now parses what gitleaks **declares**: per rule function, `tps` and `fps` kept
+apart, generated samples expanded from their Go constructors, extraction scoped to the
+sample assignments so the rule definition's own fields stay out.
+
+### Added — an external precision number, and three buckets instead of one
+
+`fps` entries are the only externally-authored negatives available without a data-protection
+agreement, which makes them the one precision measurement here that nobody in this
+repository chose. They are reported in three buckets, because gitleaks' `fps` lists mix
+things that must not be scored alike:
+
+- **false alarm** — a provider detector fired on a declared non-secret. A real defect.
+- **cross-rule** — the value IS a credential, filed under a different gitleaks rule. Their
+  `anthropic-api-key` rule lists an admin key under `fps` with the comment *"Wrong prefix
+  (admin key, not API key)"*. SecretNode covers both with one detector, so matching it is
+  correct; counting it would penalise having broader coverage than the reference.
+- **generic only** — the harness wraps every specimen as `const <provider>ApiKey = "…"` so
+  keyword-anchored detectors get the context they need. That wrapper *manufactures* the
+  keyword the generic catch-all looks for.
+
+### Added — 12 providers, transcribed rather than inferred
+
+Adobe, Alibaba, Artifactory, Atlassian, Defined Networking, Dynatrace, Intra42, PlanetScale
+(token/OAuth/password), RubyGems, Brevo (Sendinblue). Every pattern is transcribed from
+gitleaks' **published regex** for that provider, not inferred from one observed sample —
+which is what makes adding twelve at once defensible. None encodes a length this repository
+guessed at.
+
+### Fixed — two precision gaps the corrected benchmark exposed
+
+Firebase's three Android-SDK documentation keys now join the known-example allowlist; they
+are `AIza`-shaped, they appear in copied sample code everywhere, and they were 3 of the 16
+alarms one rule produced. And the **`EXAMPLE` marker** — AWS documents its sample
+credentials by ending them in literal `EXAMPLE`, and other vendors copied the convention.
+Case-sensitive on purpose: a case-insensitive form would swallow `example.com` and every
+`exampleKey` identifier, trading a real detection for a cosmetic one.
+
+That change cost exactly one true-positive specimen — a Bedrock sample padded with repeated
+`EXAMPLE`, which is not a shape any real key has — and one test fixture that had been
+asserting the scanner reports AWS's documentation key.
+
+### Added — JWT claims are read, not just matched
+
+The registry has always matched a JWT's shape. Nothing opened one, so a fifteen-minute
+session token, a token that expired in 2023, and an unsigned admin token were one finding
+at one severity.
+
+The evidence came from a live scan rather than from theory. Against vulnweb.com the AI
+tier dismissed two JWTs by **reading their payloads** — *"an example payload
+('user':'test') used as sample documentation"* — while the offline tier retained both,
+because with no API key it had no way to separate a demonstration token from a live
+session. Offline is the documented default configuration, so that was the common case.
+
+`jwtclaims.py` decodes the header and payload — base64, no network call, no key, no cost —
+and the offline tier now renders five different verdicts where it previously rendered one:
+
+| Token | Before | Now |
+|---|---|---|
+| issuer `example.com` | retained, HIGH | **dropped** — demonstration token, deterministically |
+| `exp` in the past | retained, HIGH | dismissed but **kept visible** for review |
+| `alg: none` | retained, HIGH | retained — *"anyone can forge a token with any claims"* |
+| no `exp`, `scope: admin` | retained, HIGH | retained — *"service token, usable until revoked"* |
+| ordinary session | retained, HIGH | retained, with issuer and time-to-expiry named |
+
+Two deliberate limits. **No signature is verified** and none is claimed to be: verification
+needs the issuer's key, which would mean using a credential found on a target against a
+third party — exactly what this scanner does not do. A decoded claim is what the token
+*asserts*, and every verdict is worded that way.
+
+And **identity claims are never read**. A JWT payload is routinely full of personal data —
+`sub`, `email`, `name`, `picture`. The module extracts only operational claims: expiry,
+issuer, audience, algorithm, scope. A scanner that lifted a user's email address out of a
+token and printed it into a client-facing document would have turned a security finding
+into a data-protection problem. The finding does not need the subject's identity to be
+actionable, so the subject's identity is not collected.
+
+The expired case is dismissed at a confidence *below* the drop threshold on purpose, so it
+routes to review rather than deletion. The token cannot be used, but its presence still
+shows tokens reach the bundle — and a reader who sees nothing cannot tell whether the
+scanner examined it or never looked. That is the same argument that put public-by-design
+findings back in the report in v2.13.0.
+
+### The numbers
+
+| | before | after |
+|---|---|---|
+| corpus | 108 conflated strings | **209 true-positive + 110 false-positive** |
+| recall | 80.6% (of the wrong thing) | **89.0%** |
+| in-scope misses | 10 (≈0 real) | **11** (real) |
+| providers never claimed | 7 named, 60 specimens | **12 specimens** |
+| external false-alarm rate | never measured | **12.7%**, bucketed |
+| detectors | 73 | **85** |
+
+**906 tests**, ruff clean. Ground truth 85/85 with zero false positives, precision 1.000 /
+recall 1.000, offline and end-to-end over HTTP. Labelled-corpus quality gate PASS.
+
+## [2.14.6] — The Google key format that actually ships today
+
+Google AI Studio now issues `AQ.`-prefixed API keys, and the legacy `AIzaSy…` format is
+being retired. SecretNode had no detector for the new one:
+
+```
+grep -n "AIza" scanner.py   →  regex=re.compile(r"\b(AIza[0-9A-Za-z\-_]{35})\b")
+AQ.Ab8RN6…  →  detected: *** NOTHING ***
+```
+
+### Added — `Google AI Studio API Key` (detector 73)
+
+**The gap inverted this scanner's value on Google.** The `AIza` keys it reliably catches
+are, in real web bundles, overwhelmingly Firebase *web config* keys — public by design,
+correctly downgraded to INFO, and precisely the finding a client is told needs no action.
+The `AQ.` keys it could not see at all are live credentials with billing attached. It
+found the harmless ones and was blind to the dangerous ones, and that flipped within a few
+months of Google changing the default.
+
+Kept as a separate detector rather than folded into the `AIza` pattern, because the two
+differ in the way that decides a report: an `AIza` value may be public by design and
+routinely is; an `AQ.` key never is. One severity and one remediation cannot serve both.
+Verified: an `AQ.` key sitting *inside* a Firebase config block still comes out CRITICAL
+and is never cleared as public-by-design — that placement makes it more alarming, not less.
+
+**Sizing, honestly.** Google has published no specification for this format. The bound
+comes from one observed key — `AQ.` plus 50 base64url characters, mixed case and digits,
+entropy 4.76 — and was then deliberately widened to 30–200 rather than pinned. Pinning an
+observed length is exactly what left the OpenAI pattern demanding twenty characters before
+`T3BlbkFJ` and blind to every `sk-proj-` key issued today. The floor is what keeps a
+three-character prefix from matching ordinary text; the ceiling is slack.
+
+The `\b` before `AQ` is load-bearing, not decoration. A JWT whose header segment happens
+to end in `AQ` produces the literal `AQ.` followed by base64url at the payload separator,
+and JWTs are in nearly every bundle. The word boundary refuses it, because the `A` follows
+a word character; a real JWT can never *open* with `AQ.` either, its first segment being
+base64 of `{"` — always `eyJ`. A ground-truth decoy now holds that line.
+
+### The external benchmark could not have found this
+
+`make bench-external` still reads **80.6%**, unchanged, because gitleaks has no rule for
+Google's current key format either. This is the second concrete instance of a limit worth
+restating: an external corpus measures you against *another tool's* coverage, so a blind
+spot the whole industry shares stays invisible in it. The internal benchmark cannot see
+past its own regexes, the external one cannot see past someone else's, and this gap was
+found by neither — it was found by looking at a real key.
+
+**880 tests** (+9), ruff clean. **73 detectors**; ground truth 73/73 with zero false
+positives, precision 1.000 / recall 1.000, offline and end-to-end over HTTP.
+
 ## [2.14.5] — The leak pattern that dominates real bundles, and a corpus that can measure precision
 
 Research question: what does a leaked credential in browser-delivered JavaScript actually

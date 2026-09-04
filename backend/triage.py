@@ -54,6 +54,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+import jwtclaims
+
 # Confidence ceiling for anything this module says is real. It sits below
 # GEMINI_CONFIDENCE_MIN (80) by construction: a rules engine that never saw the
 # credential work should not be able to place a finding in a report section
@@ -273,6 +275,93 @@ def triage(
                 "distinguished from a server-side key offline. Retained for review."
             ),
         )
+
+    # 2b. A JWT that says what it is.
+    #
+    # Until v2.15.0 this tier could only see a JWT's shape, so it treated a
+    # fifteen-minute session token, a token that expired in 2023, and an
+    # unsigned admin token as one finding at one severity. The payload answers
+    # all three questions with no network call and no key — see `jwtclaims`,
+    # which reads only operational claims and never identity ones.
+    #
+    # The evidence this was needed came from a live scan: against vulnweb.com
+    # the AI tier dismissed two JWTs by reading their payloads, and this tier
+    # retained both, because with no API key it had no way to tell a
+    # demonstration token from a live session.
+    if "jwt" in secret_type.lower():
+        facts = jwtclaims.read(raw_match)
+        if facts.decoded:
+            detail = facts.summary()
+
+            # A token whose issuer is example.com is sample material. This is the
+            # one JWT rule that dismisses outright, and it is safe because the
+            # marker is in an operational claim the issuer chose, not in a
+            # heuristic about the value.
+            if facts.looks_like_sample:
+                return OfflineVerdict(
+                    is_valid=False,
+                    confidence=CERTAIN_DISMISSAL_CONFIDENCE,
+                    public_by_design=False,
+                    impact="",
+                    reason=(f"Demonstration token — the payload names a sample "
+                            f"issuer or audience ({detail}). Not a live credential."),
+                )
+
+            # Expired: dismissed as an active credential, deliberately NOT
+            # dropped. Confidence sits below the drop threshold on purpose, so
+            # this routes to review rather than deletion — the token cannot be
+            # used, but its presence still shows that tokens reach the bundle,
+            # and a reader who sees nothing cannot tell which happened.
+            if facts.expired:
+                return OfflineVerdict(
+                    is_valid=False,
+                    confidence=MAX_RETAIN_CONFIDENCE,
+                    public_by_design=False,
+                    impact=("Already expired, so not usable as-is. Worth a look "
+                            "anyway: a bundle that ships one token ships others, "
+                            "and refresh tokens often sit beside access tokens."),
+                    reason=f"JWT claims say it is expired ({detail}).",
+                )
+
+            # An unsigned token authenticates nothing — anyone can mint one with
+            # any claims. That is a worse finding than the leak itself.
+            if facts.unsigned:
+                return OfflineVerdict(
+                    is_valid=True,
+                    confidence=MAX_RETAIN_CONFIDENCE,
+                    public_by_design=False,
+                    impact=("Header declares alg=none, so the signature is not "
+                            "checked — anyone can forge a token with any claims, "
+                            "including elevated scope. Reject alg=none server-side."),
+                    reason=f"Unsigned JWT ({detail}).",
+                )
+
+            privileged = any(
+                w in s.lower()
+                for s in facts.scopes
+                for w in ("admin", "write", "root", "superuser", "*", "full")
+            )
+            if facts.never_expires:
+                return OfflineVerdict(
+                    is_valid=True,
+                    confidence=MAX_RETAIN_CONFIDENCE,
+                    public_by_design=False,
+                    impact=(("No expiry claim and a privileged scope: this is a "
+                             "service token, usable until revoked at the issuer.")
+                            if privileged else
+                            ("No expiry claim — this token stays usable until it "
+                             "is revoked at the issuer, not until it times out.")),
+                    reason=f"JWT with no expiry ({detail}).",
+                )
+
+            return OfflineVerdict(
+                is_valid=True,
+                confidence=MAX_RETAIN_CONFIDENCE,
+                public_by_design=False,
+                impact=("A live-looking session token. Anyone holding it can act "
+                        "as its subject until it expires."),
+                reason=f"JWT decoded ({detail}).",
+            )
 
     # 3. Non-production context, generic detector only.
     if not structural and looks_non_production(snippet, source_url):
