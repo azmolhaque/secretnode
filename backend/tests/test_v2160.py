@@ -19,6 +19,8 @@ this repository before.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import random
 import re
@@ -129,6 +131,14 @@ class TestFirebaseDocumentationKeys:
 
 # ── The 22 new detectors ─────────────────────────────────────────────────────
 
+def _mapbox_token(prefix: str) -> str:
+    """`<prefix>.<base64url claims>.<signature>` — Mapbox's documented shape."""
+    claims = base64.urlsafe_b64encode(
+        json.dumps({"u": "acme-maps", "a": r(string.ascii_lowercase + string.digits, 25)})
+        .encode()).decode().rstrip("=")
+    return f"{prefix}.{claims}.{r(URLSAFE, 22)}"
+
+
 def _structural_cases() -> list[tuple[str, str]]:
     return [
         ("Artifactory Reference Token", "cmVmd" + r(ALNUM, 59)),
@@ -139,7 +149,12 @@ def _structural_cases() -> list[tuple[str, str]]:
          + "-" + r(UPPER_NUM, 5) + "-" + r(UPPER_NUM, 5)),
         ("Airtable Personal Access Token", "pat" + r(ALNUM, 14) + "." + r(HEX, 64)),
         ("Sourcegraph Access Token", "sgp_" + r(HEX, 16) + "_" + r(HEX, 40)),
-        ("Mapbox Public Token", "pk." + r(URLSAFE, 60) + "." + r(URLSAFE, 22)),
+        # Built from Mapbox's documented JWT structure, not from the pattern.
+        # This specimen used to be `pk.` + 60 random characters, which is what
+        # the v2.16.0 regex said — and no real token looks like. See
+        # test_v2161.TestMapboxMatchesRealTokens and bench/vendorshapes.py.
+        ("Mapbox Public Token", _mapbox_token("pk")),
+        ("Mapbox Secret Token", _mapbox_token("sk")),
     ]
 
 
@@ -365,25 +380,27 @@ class TestHasDetectorWordBoundary:
 
 class TestDeclinedBucket:
     """A refusal the scanner really performs, asked directly — never a list of
-    rules the benchmark has decided to excuse."""
+    rules the benchmark has decided to excuse.
+
+    These call `ext.declined_reason`, the function the benchmark itself runs.
+    An earlier version of this file reimplemented it here, which would have
+    passed happily while the real code drifted — the exact failure the external
+    benchmark exists to catch, reproduced inside its own test.
+    """
 
     def test_a_documented_example_is_declined_with_a_reason(self):
-        assert ext_declined("AKIAIOSFODNN7EXAMPLE") == "documented example or placeholder"
+        assert ext.declined_reason("AKIAIOSFODNN7EXAMPLE") == (
+            "documented example or placeholder")
 
-    def test_filler_is_declined_on_entropy(self):
-        assert ext_declined("Q" * 58) == "below the entropy floor"
+    def test_filler_is_declined_as_degenerate(self):
+        assert ext.declined_reason("Q" * 58) == "rejected as degenerate filler"
 
     def test_an_ordinary_credential_is_not_declined(self):
-        assert ext_declined("ghp_" + r(ALNUM, 36)) == ""
+        assert ext.declined_reason("ghp_" + r(ALNUM, 36)) == ""
 
-
-def ext_declined(value: str) -> str:
-    """Reach the closure the benchmark builds, without running a whole report."""
-    if value in scanner._KNOWN_EXAMPLE_SECRETS or scanner._PLACEHOLDER_RE.search(value):
-        return "documented example or placeholder"
-    if len(value) >= 24 and scanner.shannon_entropy(value) < 2.5:
-        return "below the entropy floor"
-    return ""
+    def test_an_ordinary_numeric_id_is_not_declined(self):
+        """The case the absolute entropy floor got wrong."""
+        assert ext.declined_reason("884828884469342884") == ""
 
 
 # ── Registry-wide invariants ─────────────────────────────────────────────────

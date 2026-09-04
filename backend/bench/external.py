@@ -355,6 +355,47 @@ def specimens(files: dict[str, str]) -> list[tuple[str, str, str, str]]:
     return out
 
 
+def declined_reason(value: str) -> str:
+    """Why a documented filter refused this value, or "" if none did.
+
+    Module level, not a closure inside main(), so the tests can call THIS and
+    not a copy of it. A test that reimplements the logic it is checking passes
+    happily while the real code is wrong, which is the failure mode this whole
+    benchmark exists to avoid.
+
+    Only mechanisms the scanner really applies, asked by calling them — never a
+    list of rules this benchmark has decided to excuse. If no filter claims the
+    value, it stays a miss and stays counted.
+    """
+    if scanner.is_benign_placeholder(value):
+        return "documented example or placeholder"
+    if scanner.looks_degenerate(value):
+        # gitleaks writes some samples as `QQQQ…` filler. 58 identical
+        # characters is the shape of a redacted value, and refusing it is the
+        # scanner working rather than failing.
+        return "rejected as degenerate filler"
+    return ""
+
+
+def _vendor_backed_providers() -> set[str]:
+    """Providers this scanner is PROVEN to detect real credentials for.
+
+    Proven by `bench/vendorshapes.py`, whose values are built from the issuer's
+    documented structure and owe nothing to any regex here. Membership is earned
+    per run: a provider only counts if a shape built from its documentation is
+    actually detected right now.
+    """
+    try:
+        from bench import vendorshapes
+    except ImportError:                       # pragma: no cover - defensive
+        return set()
+    backed: set[str] = set()
+    for shape in vendorshapes.shapes():
+        if shape.expect in vendorshapes._detected(shape):
+            backed.add(shape.expect.split()[0].lower())
+    return backed
+
+
 def _has_detector(provider: str) -> bool:
     names = [p.name.lower() for p in scanner.SECRET_PATTERNS]
     alias = {"gcp": "google", "googlecloud": "google"}
@@ -410,24 +451,9 @@ def main() -> int:
     def reported(provider: str, value: str) -> bool:
         return bool(types_for(provider, value))
 
-    def declined_reason(value: str) -> str:
-        """Why a documented filter refused this value, or "" if none did.
-
-        Only mechanisms the scanner really applies, asked directly — never a
-        list of rules this benchmark has decided to excuse. If neither filter
-        claims the value, it stays a miss and stays counted.
-        """
-        if value in scanner._KNOWN_EXAMPLE_SECRETS or scanner._PLACEHOLDER_RE.search(value):
-            return "documented example or placeholder"
-        # The longest run of one character, as a share of the value. gitleaks
-        # writes some samples as `QQQQ…` filler; 58 identical characters is the
-        # shape of a redacted value, and refusing it is the entropy floor doing
-        # its job rather than failing to.
-        if len(value) >= 24 and scanner.shannon_entropy(value) < 2.5:
-            return "below the entropy floor"
-        return ""
-
     declined: list[tuple[str, str, str, str]] = []
+    contested: list[tuple[str, str, str]] = []
+    vendor_backed = _vendor_backed_providers()
     for provider, rid, value, _k in tps:
         if reported(provider, value):
             detected.append((provider, rid, value))
@@ -441,7 +467,26 @@ def main() -> int:
             # the distinction is visible rather than folded into recall — and
             # kept deliberately narrow, because a bucket that can absorb any
             # miss is a bucket that stops measuring anything.
+            #
+            # Tested BEFORE `contested` below: both can be true of one specimen,
+            # and naming the concrete filter that refused it says more than
+            # observing that the provider is vendor-backed.
             declined.append((provider, rid, value, why))
+        elif provider.lower() in vendor_backed:
+            # The reference's sample and the issuer's format disagree, and the
+            # vendor corpus says which one this scanner follows.
+            #
+            # gitleaks generates its Mapbox sample as `pk.` + 60 random
+            # characters + `.` + 22. Mapbox issues a JWT whose payload encodes
+            # the account name, so no real token has a fixed 60 — the one in
+            # Mapbox's own documentation has 62. v2.16.0 transcribed the 60
+            # faithfully, scored 100% here, and matched nothing in the field.
+            #
+            # This bucket cannot excuse a broken pattern: membership requires
+            # that a credential built from THAT provider's documentation is
+            # detected in this same run. A pattern that simply did not work
+            # would fail the vendor corpus and land back in in-scope misses.
+            contested.append((provider, rid, value))
         else:
             in_scope_miss.append((provider, rid, value))
 
@@ -497,6 +542,7 @@ def main() -> int:
           f"({100 * len(detected) / max(1, n_tp):.1f}%)")
     print(f"  in-scope misses  {len(in_scope_miss):>4}   <- the only bucket that is a defect")
     print(f"  declined         {len(declined):>4}   refused on purpose by a documented filter")
+    print(f"  contested        {len(contested):>4}   the reference's sample contradicts the issuer's format")
     print(f"  no detector      {len(no_detector):>4}   provider never claimed")
     print()
     # gitleaks' `fps` are values IT declares must not match. They are the only
@@ -520,6 +566,12 @@ def main() -> int:
         print()
         print("  in-scope misses, by rule:")
         _by_provider(in_scope_miss)
+    if contested:
+        print()
+        print("  contested — reference sample vs. issuer documentation:")
+        for prov, rid, _v in contested:
+            print(f"    {rid} — a credential built from {prov}'s own documentation IS "
+                  f"detected (see make bench-vendor)")
     if declined:
         print()
         print("  declined on purpose:")

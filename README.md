@@ -4,65 +4,50 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 ![Tests](https://img.shields.io/badge/tests-805%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.16.0-blue)
+![Version](https://img.shields.io/badge/version-2.16.1-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
 Passive Attack Surface Management scanner for detecting credential leaks in public-facing infrastructure.
-Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (107 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
+Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (108 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.16.0 — the benchmark was still manufacturing defects, one level deeper** ·
+> **v2.16.1 — a detector can score 100% on every benchmark and match nothing** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> v2.15.0 rebuilt the external benchmark after it turned out to be inventing the
-> misses it reported. This release went to close the 23 gaps that corrected
-> benchmark named — and found the corrected benchmark was still doing it.
+> A QC pass on v2.16.0. The headline is not any one pattern — it is that
+> **v2.16.0's Mapbox detector scored 1.000 on the ground-truth corpus and 99.1%
+> against gitleaks while matching zero real Mapbox tokens**, including the one
+> Mapbox publishes in its own documentation.
 >
-> **Five of the eleven "in-scope misses" were the harness dropping a prefix.**
-> gitleaks writes some samples as `"sk-ant-api03-" + NewSecret(…) + "AA"`. The
-> extractor handled the plural `GenerateSampleSecrets` and not the singular, so
-> those fell through to a path that returned only the generated middle — 93 bare
-> characters with the prefix removed. No prefix-anchored detector can match a
-> specimen with its prefix deleted. Fixing the extractor closed five misses
-> without touching a single pattern, and recall moved 89.0% → 91.0% on work that
-> was never a scanner defect.
+> Neither benchmark could have caught it, for a structural reason. Ground truth
+> generates its specimens *from* the registry's regexes, so a pattern that says
+> 60 characters gets a 60-character specimen and matches it. gitleaks' samples
+> come from *its* regex — which this project transcribed. Two copies of one
+> claim agreeing with each other is not corroboration.
 >
-> **And `age` was filed as a miss because "age" is inside "Azure StorAGE".** The
-> in-scope test was a substring check, so a provider with no detector at all
-> landed in the bucket documented as *the only bucket that is a defect*.
+> **`make bench-vendor` is the answer**: credentials built from the issuer's
+> documented structure, owing nothing to any regex here. A Mapbox token is a JWT
+> whose payload encodes the account name, so its length varies per customer. A
+> Discord id is `(ms since 2015) << 22`, so **every application created since
+> 2022 has a 19-digit id** and the transcribed 18 could not see any of them. The
+> gate is release-blocking in CI, and it was verified to fail on the shipped bug
+> before being trusted to pass on the fix.
 >
-> What was genuinely missing then got built: **22 new detectors** (85 → 107) —
-> 1Password, age, Airtable, Asana, Cohere, Confluent, KuCoin, LinkedIn, Mapbox,
-> Sourcegraph, plus the Artifactory reference token, GitLab session cookie and
-> GCP service-account marker. **External recall is now 99.1% with a 0.0%
-> false-alarm rate**, and no provider in gitleaks' corpus is unclaimed.
+> The audit also found an Airtable token reported twice, a 1Password token
+> invisible when base64url-encoded, and — underneath all of it — a shared gate
+> measuring the wrong thing: an absolute 2.5-bit entropy floor **silently
+> dropped 5.4% of genuine 16-digit ids and 2.4% of 18-digit ones**, because a
+> decimal digit carries at most log2(10) = 3.32 bits however random it is. It is
+> now a direct degeneracy test that drops 0.000% in any base.
 >
-> **Two precision defects, both found by measuring rather than reading.**
-> `-----BEGIN OPENSSH PRIVATE KEY----------END…-----` — a header with zero key
-> material — was reported CRITICAL, because the pattern asked only for the
-> marker. And 13 of the 14 false alarms in the whole corpus were one vendor's
-> documentation: Firebase's Android SDK sample keys, which gitleaks carries in a
-> hard-coded allowlist and this scanner carried three of.
->
-> Two specimens are still not matched, and the benchmark now says so out loud in
-> a `declined` line rather than hiding them in recall: AWS's published
-> `…EXAMPLE` key, and 58 identical characters. Refusing those is the filter
-> working. The bucket only accepts a mechanism the scanner actually applies —
-> a bucket that can absorb any miss has stopped measuring anything.
->
-> Scanning this release's own diff with this scanner then reported
-> `linkedInClientId` as a LinkedIn client secret — a variable **name** where a
-> value goes. The obvious fix, an entropy floor, was the wrong one: 3.5 bits
-> assumes a 62-character alphabet, and an 18-digit client ID tops out at 3.32
-> however random it is. A contextual detector now refuses a value that contains
-> its own provider's keyword instead.
->
-> Also: **Tier 2 AI validation moves to `gemini-3.8-flash`**, same $0.75/$3.75
-> as the 3.6 Flash it replaces.
+> Scans are also **~2.1× faster**. 108 patterns each made a full pass over every
+> asset; a literal pre-filter skips the ones whose provider name is absent. Its
+> soundness check found a bug in itself before it shipped — `https?://` yielded
+> the literal `https`, which would have skipped every `http://user:pass@host`.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
@@ -130,7 +115,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 secretnode/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + WebSocket + static server + auth/SSRF guards
-│   ├── scanner.py           # Async scan engine (107 patterns, source maps, entropy, base64, Gemini, Discord)
+│   ├── scanner.py           # Async scan engine (108 patterns, source maps, entropy, base64, Gemini, Discord)
 │   ├── verifier.py          # Optional live credential verification (off by default)
 │   ├── netguard.py          # "May this scanner request this?" — pre-flight AND every redirect hop
 │   ├── triage.py            # Deterministic verdicts with no API key, no network, no model
