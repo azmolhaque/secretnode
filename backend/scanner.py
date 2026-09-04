@@ -1014,6 +1014,90 @@ SECRET_PATTERNS: list[SecretPattern] = [
             "the account's IAM roles for least privilege."
         ),
     ),
+
+    # ── Providers added from gitleaks' rule definitions (v2.15.0) ────────────
+    #
+    # Every pattern below is transcribed from gitleaks' own published regex for
+    # that provider, not inferred from a single observed sample. That distinction
+    # is the whole reason these are safe to add in a batch: the shape is
+    # documented by a second project that maintains it, so none of them encodes a
+    # length this repository guessed at.
+    #
+    # They close the largest part of the "provider never claimed" bucket in
+    # `make bench-external` — a bucket that is a coverage decision rather than a
+    # defect, and was simply never decided.
+    SecretPattern(
+        name="Adobe Client Secret",
+        regex=re.compile(r"\b(p8e-[A-Za-z0-9]{32})\b"),
+        description="Adobe OAuth client secret",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Alibaba Access Key ID",
+        regex=re.compile(r"\b(LTAI[A-Za-z0-9]{20})\b"),
+        description="Alibaba Cloud access key ID",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Artifactory API Key",
+        regex=re.compile(r"\b(AKCp[A-Za-z0-9]{69})\b"),
+        description="JFrog Artifactory API key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Atlassian API Token",
+        regex=re.compile(r"\b(ATATT3xFfGF0[A-Za-z0-9_\-=]{100,250})\b"),
+        description="Atlassian (Jira/Confluence) API token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Defined Networking API Token",
+        regex=re.compile(r"\b(dnkey-[A-Za-z0-9=_\-]{26}-[A-Za-z0-9=_\-]{52})\b"),
+        description="Defined Networking API token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Dynatrace API Token",
+        regex=re.compile(r"\b(dt0c01\.[A-Za-z0-9]{24}\.[A-Za-z0-9]{64})\b"),
+        description="Dynatrace API token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Intra42 Client Secret",
+        regex=re.compile(r"\b(s-s4t2(?:ud|af)-[A-Fa-f0-9]{64})\b"),
+        description="42 Intra OAuth client secret",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="PlanetScale API Token",
+        regex=re.compile(r"\b(pscale_tkn_[A-Za-z0-9=\.\-_]{32,64})\b"),
+        description="PlanetScale API token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="PlanetScale OAuth Token",
+        regex=re.compile(r"\b(pscale_oauth_[A-Za-z0-9=\.\-_]{32,64})\b"),
+        description="PlanetScale OAuth token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="PlanetScale Password",
+        regex=re.compile(r"\b(pscale_pw_[A-Za-z0-9=\.\-_]{32,64})\b"),
+        description="PlanetScale database password",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="RubyGems API Token",
+        regex=re.compile(r"\b(rubygems_[a-f0-9]{48})\b"),
+        description="RubyGems push/API token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Brevo (Sendinblue) API Token",
+        regex=re.compile(r"\b(xkeysib-[a-f0-9]{64}-[A-Za-z0-9]{16})\b"),
+        description="Brevo / Sendinblue transactional-email API key",
+        severity="HIGH",
+    ),
 ]
 
 # Fast name -> pattern lookup (severity / CWE / remediation metadata).
@@ -2357,6 +2441,13 @@ async def spider_target(
 # ── Accuracy filters (v2.3.0): example/placeholder allowlist + base64 decoding ──
 _KNOWN_EXAMPLE_SECRETS = frozenset({
     "AKIAIOSFODNN7EXAMPLE",   # AWS's official documentation example key
+    # Firebase's own Android SDK documentation keys. They are `AIza`-shaped and
+    # therefore matched, they appear in copied sample code across the web, and
+    # gitleaks lists all three as declared non-secrets. Found by measuring this
+    # scanner against that list: they were 3 of the 16 alarms one rule produced.
+    "AIzaSyabcdefghijklmnopqrstuvwxyz1234567",
+    "AIzaSyAnLA7NfeLquW1tJFpx_eQCxoX-oo6YyIs",
+    "AIzaSyCkEhVjf3pduRDt6d1yKOMitrUEke8agEM",
 })
 _PLACEHOLDER_RE = re.compile(
     r"(?i)(your[_-]?(?:api|key|token|secret|id)|placeholder|changeme|"
@@ -2371,7 +2462,13 @@ _PLACEHOLDER_RE = re.compile(
     r"\$\{[^}]{1,80}\}|"          # ${VAR} — shell, JS template literal
     r"\{\{[^}]{1,80}\}\}|"        # {{VAR}} — Handlebars, Jinja, Vue, Go
     r"^\{[A-Za-z_][A-Za-z0-9_]{0,60}\}$|"   # {VAR} alone — str.format, f-string
-    r"%\([A-Za-z_][A-Za-z0-9_]*\)s)"        # %(name)s — Python printf mapping
+    r"%\([A-Za-z_][A-Za-z0-9_]*\)s|"        # %(name)s — Python printf mapping
+    # The EXAMPLE marker, case-sensitive. AWS documents its sample credentials by
+    # ending them in literal `EXAMPLE`, and other vendors copied the convention
+    # (`ABSKQmVkcm9ja0FQSUtleS1EXAMPLE`). Case-sensitivity is deliberate: a
+    # case-insensitive form would swallow `example.com` and every `exampleKey`
+    # identifier, trading a real detection for a cosmetic one.
+    r"(?-i:EXAMPLE))"
 )
 _B64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
 _MAX_B64_BLOBS = 200

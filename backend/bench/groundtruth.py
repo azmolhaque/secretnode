@@ -257,6 +257,24 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     # one observed key was 50, and the detector is bounded 30-200 precisely so it
     # does not encode a length nobody has specified.
     add(plain("Google AI Studio API Key", "AQ." + r(URLSAFE, 44)))
+
+    # v2.15.0 providers, transcribed from gitleaks' published regexes. Appended
+    # last for the same shared-RNG reason as everything above.
+    add(plain("Adobe Client Secret", "p8e-" + r(ALNUM, 32)))
+    add(plain("Alibaba Access Key ID", "LTAI" + r(ALNUM, 20)))
+    add(plain("Artifactory API Key", "AKCp" + r(ALNUM, 69)))
+    add(plain("Atlassian API Token", "ATATT3xFfGF0" + r(ALNUM, 120)))
+    add(plain("Defined Networking API Token",
+              "dnkey-" + r(ALNUM, 26) + "-" + r(ALNUM, 52)))
+    add(plain("Dynatrace API Token",
+              "dt0c01." + r(ALNUM, 24) + "." + r(ALNUM, 64)))
+    add(plain("Intra42 Client Secret", "s-s4t2ud-" + r(HEX, 64)))
+    add(plain("PlanetScale API Token", "pscale_tkn_" + r(ALNUM, 40)))
+    add(plain("PlanetScale OAuth Token", "pscale_oauth_" + r(ALNUM, 40)))
+    add(plain("PlanetScale Password", "pscale_pw_" + r(ALNUM, 40)))
+    add(plain("RubyGems API Token", "rubygems_" + r(HEX, 48)))
+    add(plain("Brevo (Sendinblue) API Token",
+              "xkeysib-" + r(HEX, 64) + "-" + r(ALNUM, 16)))
     return out
 
 

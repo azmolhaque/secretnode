@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import sys
 from pathlib import Path
@@ -146,26 +147,189 @@ def load_corpus(offline: bool) -> dict[str, str] | None:
     return files
 
 
-def specimens(files: dict[str, str]) -> list[tuple[str, str, str]]:
-    """(provider, rule_id, specimen), de-duplicated, fragments removed."""
-    out: list[tuple[str, str, str]] = []
+# ── Turning gitleaks' Go samples into concrete specimens ────────────────────
+#
+# Most of gitleaks' samples are GENERATED, not literal:
+#
+#     tps := utils.GenerateSampleSecrets("AWS", "AKIA"+secrets.NewSecret("[A-Z2-7]{16}"))
+#     tps := utils.GenerateSampleSecrets("gitlab", "glpat-"+secrets.NewSecret(utils.AlphaNumeric("20")))
+#
+# The first version of this module dropped every line containing
+# `secrets.NewSecret` as a "regex fragment" and scraped the leftover string
+# literals instead. That discarded the majority of the corpus and kept whatever
+# happened to be hardcoded — including entries from `fps`, gitleaks' own list of
+# values that must NOT match. The result scored SecretNode's correct refusal to
+# report a non-secret as a missed detection, and filed it under the bucket this
+# module labels "the only one that is a defect".
+#
+# Measured on the old output: of ten reported in-scope misses, three were gitleaks
+# false positives, six were scraped from neither sample list (comments, regex
+# bodies, doc strings), and one was the timestamp `2021-02-14T20:41:01Z` sliced
+# out of a longer entry. Essentially none were defects. A benchmark being wrong
+# about the tool is the one failure this file's own docstring says it must never
+# have, so the extractor now parses what gitleaks actually declares.
+
+_CLASS = re.compile(r"\[([^\]]+)\]\{(\d+)\}")
+
+
+def _expand_class(spec: str, rng: random.Random) -> str | None:
+    """`[A-Z2-7]{16}` -> sixteen characters drawn from that class."""
+    m = _CLASS.fullmatch(spec.strip())
+    if not m:
+        return None
+    body, n = m.group(1), int(m.group(2))
+    chars: list[str] = []
+    i = 0
+    while i < len(body):
+        if i + 2 < len(body) and body[i + 1] == "-":
+            chars.extend(chr(c) for c in range(ord(body[i]), ord(body[i + 2]) + 1))
+            i += 3
+        else:
+            chars.append(body[i])
+            i += 1
+    return "".join(rng.choice(chars) for _ in range(n)) if chars else None
+
+
+_HELPERS = {
+    "AlphaNumeric": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    "AlphaNumericExtended": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
+    "AlphaNumericExtendedShort": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_",
+    "Hex": "0123456789abcdef",
+    "Numeric": "0123456789",
+    "AlphaNumericExtendedLong": (
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.~+/="),
+}
+_NEWSECRET = re.compile(r"secrets\.NewSecret\(\s*(.+?)\s*\)\s*$", re.S)
+_UTILS_CALL = re.compile(r"utils\.(\w+)\(\s*[\"`](\d+)[\"`]\s*\)")
+
+
+def _expand_atom(atom: str, rng: random.Random) -> str | None:
+    """One `+`-joined piece of a Go sample expression."""
+    a = atom.strip()
+    if not a:
+        return None
+    # A quoted literal (Go raw strings use backticks).
+    if (a[0] == a[-1] == '"' and len(a) > 1) or (a[0] == a[-1] == "`" and len(a) > 1):
+        return a[1:-1].replace('\\"', '"')
+    # secrets.NewSecret(...) wrapping either a helper call or a bare char class.
+    m = _NEWSECRET.search(a) or (re.fullmatch(r"secrets\.NewSecret\((.*)\)", a, re.S))
+    inner = m.group(1) if m else a
+    u = _UTILS_CALL.search(inner)
+    if u and u.group(1) in _HELPERS:
+        alphabet = _HELPERS[u.group(1)]
+        return "".join(rng.choice(alphabet) for _ in range(int(u.group(2))))
+    lit = re.fullmatch(r"[\"`](.*)[\"`]", inner.strip(), re.S)
+    if lit:
+        expanded = _expand_class(lit.group(1), rng)
+        if expanded:
+            return expanded
+        # A plain literal inside NewSecret with no quantifier is not generatable.
+        return None if _FRAGMENT.search(lit.group(1)) else lit.group(1)
+    return None
+
+
+def _expand_expr(expr: str, rng: random.Random) -> str | None:
+    """A full Go sample expression, e.g. `"AKIA"+secrets.NewSecret("[A-Z2-7]{16}")`.
+
+    Returns None when any piece cannot be resolved: a partially-expanded sample
+    is a string no scanner could match, and counting it as a miss would repeat
+    the mistake this rewrite exists to correct.
+    """
+    parts, depth, cur = [], 0, ""
+    for ch in expr:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "+" and depth == 0:
+            parts.append(cur); cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    out = []
+    for part in parts:
+        v = _expand_atom(part, rng)
+        if v is None:
+            return None
+        out.append(v)
+    joined = "".join(out)
+    return joined if len(joined) >= 8 else None
+
+
+_FUNC_SPLIT = re.compile(r"\nfunc\s+\w+\(\)\s*\*config\.Rule\s*\{")
+_RULE_ID = re.compile(r'RuleID:\s*"([^"]+)"')
+_SAMPLE_CALL = re.compile(r'GenerateSampleSecrets\(\s*"[^"]*"\s*,\s*', re.S)
+
+
+def _balanced(text: str, i: int) -> str:
+    """Slice from `i` to the paren that closes the call opened before it."""
+    depth, out = 1, []
+    while i < len(text) and depth:
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if not depth:
+                break
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _entries(block: str, rng: random.Random) -> list[str]:
+    """Every concrete sample declared in one `tps`/`fps` region."""
+    found: list[str] = []
+    for m in _SAMPLE_CALL.finditer(block):
+        v = _expand_expr(_balanced(block, m.end()), rng)
+        if v:
+            found.append(v)
+    for lst in re.finditer(r"\[\]string\{(.*?)\n\s*\}", block, re.S):
+        for line in lst.group(1).splitlines():
+            line = line.strip().rstrip(",")
+            if line and not line.startswith("//"):
+                v = _expand_expr(line, rng)
+                if v:
+                    found.append(v)
+    return found
+
+
+def specimens(files: dict[str, str]) -> list[tuple[str, str, str, str]]:
+    """(provider, rule_id, value, kind) where kind is 'tp' or 'fp'.
+
+    `tp` is a value gitleaks declares its rule MUST match; `fp` is one it
+    declares the rule must NOT match. Keeping them apart is what lets this
+    module report recall and a false-alarm rate instead of one blurred number.
+    """
+    rng = random.Random(20260904)          # deterministic: same corpus, same run
+    out: list[tuple[str, str, str, str]] = []
     seen: set[str] = set()
     for name, src in files.items():
-        rid = re.search(r'RuleID:\s*"([^"]+)"', src)
-        rid = rid.group(1) if rid else name
-        for line in src.splitlines():
-            for m in re.finditer(r'"([^"\\\n]{20,400})"', line):
-                v = m.group(1)
-                if v.startswith(("http", "github.com/")):
-                    continue
-                if " " in v or "%" in v or _FRAGMENT.search(v):
-                    continue
-                if not (re.search(r"\d", v) and re.search(r"[A-Za-z]", v)):
-                    continue
-                if v in seen:
-                    continue
-                seen.add(v)
-                out.append((name, rid, v))
+        for fn in _FUNC_SPLIT.split(src)[1:]:
+            cut = fn.find("return utils.Validate")
+            body = fn[: cut if cut > 0 else len(fn)]
+            rid_m = _RULE_ID.search(body)
+            rid = rid_m.group(1) if rid_m else name
+            # Start at the `tps` assignment, not at the function body. The body
+            # also holds the rule definition, whose `Keywords: []string{...}`
+            # field is a list of match hints — `"rubygems_"`, `"pscale_pw_"` —
+            # not samples. Scanning from the top emitted those bare prefixes as
+            # specimens, and a prefix with no body cannot match any detector, so
+            # each one was scored as a missed credential. Same failure this
+            # rewrite exists to correct, one level in.
+            tps_m = re.search(r"\btps\s*:?=", body)
+            fps_m = re.search(r"\bfps\s*:?=", body)
+            if not tps_m and not fps_m:
+                continue
+            tps_start = tps_m.start() if tps_m else len(body)
+            tps_text = body[tps_start: fps_m.start()] if fps_m else body[tps_start:]
+            fps_text = body[fps_m.start():] if fps_m else ""
+            for kind, text in (("tp", tps_text), ("fp", fps_text)):
+                for v in _entries(text, rng):
+                    if v in seen:
+                        continue
+                    seen.add(v)
+                    out.append((name, rid, v, kind))
     return out
 
 
@@ -182,8 +346,8 @@ def main() -> int:
                     help="use the cache only; skip rather than fetch")
     args = ap.parse_args()
 
-    print("External-validity recall — corpus: gitleaks rule definitions")
-    print("=" * 66)
+    print("External validity — corpus: gitleaks rule definitions")
+    print("=" * 68)
     files = load_corpus(args.offline)
     if not files:
         print("  No corpus available (no network and no cache). Skipped.")
@@ -191,45 +355,113 @@ def main() -> int:
         return 0
 
     corpus = specimens(files)
-    detected: list[tuple[str, str, str]] = []
-    in_scope_miss: list[tuple[str, str, str]] = []
-    no_detector: list[tuple[str, str, str]] = []
+    tps = [c for c in corpus if c[3] == "tp"]
+    fps = [c for c in corpus if c[3] == "fp"]
 
-    for provider, rid, value in corpus:
+    detected: list[tuple] = []
+    in_scope_miss: list[tuple] = []
+    no_detector: list[tuple] = []
+    false_alarms: list[tuple] = []
+
+    GENERIC = "Generic High-Entropy Secret"
+
+    def types_for(provider: str, value: str) -> list[str]:
         # Embedded the way a credential actually appears in shipped code —
         # gitleaks' own sample generator does the same. A bare string with no
         # provider keyword would unfairly miss every keyword-anchored detector.
         asset = f'const {provider}ApiKey = "{value}";\nexport default {provider}ApiKey;\n'
-        hits = scanner.extract_secrets(
-            "bench", "https://corpus.test", "https://corpus.test/app.js", asset)
-        if hits:
+        return [h.secret_type for h in scanner.extract_secrets(
+            "bench", "https://corpus.test", "https://corpus.test/app.js", asset)]
+
+    def reported(provider: str, value: str) -> bool:
+        return bool(types_for(provider, value))
+
+    for provider, rid, value, _k in tps:
+        if reported(provider, value):
             detected.append((provider, rid, value))
         elif _has_detector(provider):
             in_scope_miss.append((provider, rid, value))
         else:
             no_detector.append((provider, rid, value))
 
-    total = len(corpus)
+    # gitleaks' `fps` lists mix two things that must not be scored alike:
+    #
+    #   * values that are genuinely not credentials — documentation examples,
+    #     low-entropy filler, wrong case. Reporting one is a precision defect.
+    #   * values that ARE credentials but belong to a DIFFERENT rule. The
+    #     anthropic-api-key rule lists an admin key under `fps` with the comment
+    #     "Wrong prefix (admin key, not API key)", because gitleaks splits those
+    #     across two rules. SecretNode covers both with one detector, so matching
+    #     it is correct — counting it against this scanner would penalise having
+    #     broader coverage than the reference.
+    #
+    # A third bucket is this harness's own doing: every specimen is wrapped as
+    # `const <provider>ApiKey = "…"` so keyword-anchored detectors get the
+    # context they legitimately need. That wrapper MANUFACTURES the keyword the
+    # generic catch-all looks for, so a generic-only match says more about the
+    # scaffold than about the scanner. Reported apart rather than folded in.
+    # Matched on a shared prefix rather than an exact value: gitleaks generates
+    # the two rules' samples independently, so an admin key in the api-key rule's
+    # fps is never byte-identical to one in the admin rule's tps — it just starts
+    # the same way. An exact-value test looked correct and silently found nothing.
+    tp_prefixes = {v[:10] for _p, _r, v, _k in tps if len(v) >= 10}
+    generic_only: list[tuple] = []
+    cross_rule: list[tuple] = []
+    for provider, rid, value, _k in fps:
+        got = types_for(provider, value)
+        if not got:
+            continue
+        if len(value) >= 10 and value[:10] in tp_prefixes:
+            cross_rule.append((provider, rid, value))
+        elif got == [GENERIC]:
+            generic_only.append((provider, rid, value))
+        else:
+            false_alarms.append((provider, rid, value))
+
+    n_tp, n_fp = len(tps), len(fps)
     print(f"  rule files       {len(files)}")
-    print(f"  specimens        {total}")
+    print(f"  specimens        {n_tp} true-positive, {n_fp} false-positive")
     print()
-    print(f"  detected         {len(detected):>3} / {total}   "
-          f"({100 * len(detected) / max(1, total):.1f}%)")
-    print(f"  in-scope misses  {len(in_scope_miss):>3}   <- the only bucket that is a defect")
-    print(f"  no detector      {len(no_detector):>3}   "
-          f"[{', '.join(sorted({p for p, _r, _v in no_detector}))}]")
+    print(f"  recall           {len(detected)}/{n_tp}   "
+          f"({100 * len(detected) / max(1, n_tp):.1f}%)")
+    print(f"  in-scope misses  {len(in_scope_miss):>4}   <- the only bucket that is a defect")
+    print(f"  no detector      {len(no_detector):>4}   provider never claimed")
+    print()
+    # gitleaks' `fps` are values IT declares must not match. They are the only
+    # externally-authored negatives available without a data-protection
+    # agreement, which makes this the one precision number here that nobody in
+    # this repository chose.
+    print(f"  false alarms     {len(false_alarms)}/{n_fp}   "
+          f"({100 * len(false_alarms) / max(1, n_fp):.1f}%)   provider detector on a declared non-secret")
+    print(f"    cross-rule     {len(cross_rule):>4}   a real credential gitleaks files under another rule")
+    print(f"    generic only   {len(generic_only):>4}   the harness's own `…ApiKey =` wrapper supplied the keyword")
+
+    def _by_provider(items: list[tuple], limit: int = 14) -> None:
+        counts: dict[str, int] = {}
+        for provider, rid, _v in items:
+            counts[rid or provider] = counts.get(rid or provider, 0) + 1
+        for key, n in sorted(counts.items(), key=lambda kv: -kv[1])[:limit]:
+            print(f"    {n:>4}  {key}")
 
     if in_scope_miss:
         print()
-        print("  in-scope misses:")
-        for provider, rid, value in in_scope_miss:
-            print(f"    {provider:14} {rid:34} {value[:40]}")
+        print("  in-scope misses, by rule:")
+        _by_provider(in_scope_miss)
+    if no_detector:
+        print()
+        print("  providers never claimed:")
+        print(f"    {', '.join(sorted({p for p, _r, _v in no_detector}))}")
+    if false_alarms:
+        print()
+        print("  false alarms, by rule:")
+        _by_provider(false_alarms)
 
     print()
     print("  Recall here is EXTERNAL: these specimens were written by another")
     print("  project for another scanner and owe nothing to these patterns.")
-    print("  It is the number to quote. `bench.benchmark`'s 70/70 is a")
-    print("  regression net and a precision measurement, not a recall claim.")
+    print("  The false-alarm rate is measured against values gitleaks itself")
+    print("  declares are NOT secrets — the only externally-authored negatives")
+    print("  available without a data-protection agreement.")
     return 0
 
 

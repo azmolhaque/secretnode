@@ -3,6 +3,91 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.15.0] — The benchmark was measuring the wrong thing
+
+A minor version, not a patch, because the headline number changed and the detector
+registry grew by 17%. The work started as "add `AQ.` key detection" and turned into an
+audit of the instrument that was supposed to be grading this scanner.
+
+### Fixed — the external-validity harness was manufacturing defects
+
+`make bench-external` reported **80.6% recall, 10 in-scope misses**, and labelled that
+bucket *"the only bucket that is a defect"*. Both numbers were wrong, and the second one
+was wrong in the most dangerous direction. Tracing every entry back to the rule file it
+came from:
+
+| Reported "in-scope miss" | What it actually was |
+|---|---|
+| 3 entries | values gitleaks itself lists under `fps` — its **declared non-secrets** |
+| 6 entries | scraped from neither sample list: comments, regex bodies, doc strings |
+| 1 entry | `2021-02-14T20:41:01Z` — a timestamp sliced out of a longer sample |
+
+**Essentially none were defects.** SecretNode correctly refusing to report a value gitleaks
+declares is not a credential was being scored as a missed detection. That is precisely the
+failure this module's own docstring calls "the measuring instrument being wrong about the
+tool, which is the one thing a benchmark must never be."
+
+The extractor also dropped every line containing `secrets.NewSecret` as a "regex fragment".
+That is where most of gitleaks' samples live — `"AKIA"+secrets.NewSecret("[A-Z2-7]{16}")` —
+so the corpus was whatever happened to be hardcoded, and `Keywords: []string{"rubygems_"}`
+match hints were being scraped as specimens. A bare prefix cannot match any detector, so
+each one was counted as a missed credential; 91 of them were.
+
+The harness now parses what gitleaks **declares**: per rule function, `tps` and `fps` kept
+apart, generated samples expanded from their Go constructors, extraction scoped to the
+sample assignments so the rule definition's own fields stay out.
+
+### Added — an external precision number, and three buckets instead of one
+
+`fps` entries are the only externally-authored negatives available without a data-protection
+agreement, which makes them the one precision measurement here that nobody in this
+repository chose. They are reported in three buckets, because gitleaks' `fps` lists mix
+things that must not be scored alike:
+
+- **false alarm** — a provider detector fired on a declared non-secret. A real defect.
+- **cross-rule** — the value IS a credential, filed under a different gitleaks rule. Their
+  `anthropic-api-key` rule lists an admin key under `fps` with the comment *"Wrong prefix
+  (admin key, not API key)"*. SecretNode covers both with one detector, so matching it is
+  correct; counting it would penalise having broader coverage than the reference.
+- **generic only** — the harness wraps every specimen as `const <provider>ApiKey = "…"` so
+  keyword-anchored detectors get the context they need. That wrapper *manufactures* the
+  keyword the generic catch-all looks for.
+
+### Added — 12 providers, transcribed rather than inferred
+
+Adobe, Alibaba, Artifactory, Atlassian, Defined Networking, Dynatrace, Intra42, PlanetScale
+(token/OAuth/password), RubyGems, Brevo (Sendinblue). Every pattern is transcribed from
+gitleaks' **published regex** for that provider, not inferred from one observed sample —
+which is what makes adding twelve at once defensible. None encodes a length this repository
+guessed at.
+
+### Fixed — two precision gaps the corrected benchmark exposed
+
+Firebase's three Android-SDK documentation keys now join the known-example allowlist; they
+are `AIza`-shaped, they appear in copied sample code everywhere, and they were 3 of the 16
+alarms one rule produced. And the **`EXAMPLE` marker** — AWS documents its sample
+credentials by ending them in literal `EXAMPLE`, and other vendors copied the convention.
+Case-sensitive on purpose: a case-insensitive form would swallow `example.com` and every
+`exampleKey` identifier, trading a real detection for a cosmetic one.
+
+That change cost exactly one true-positive specimen — a Bedrock sample padded with repeated
+`EXAMPLE`, which is not a shape any real key has — and one test fixture that had been
+asserting the scanner reports AWS's documentation key.
+
+### The numbers
+
+| | before | after |
+|---|---|---|
+| corpus | 108 conflated strings | **209 true-positive + 110 false-positive** |
+| recall | 80.6% (of the wrong thing) | **89.0%** |
+| in-scope misses | 10 (≈0 real) | **11** (real) |
+| providers never claimed | 7 named, 60 specimens | **12 specimens** |
+| external false-alarm rate | never measured | **12.7%**, bucketed |
+| detectors | 73 | **85** |
+
+**885 tests**, ruff clean. Ground truth 85/85 with zero false positives, precision 1.000 /
+recall 1.000, offline and end-to-end over HTTP. Labelled-corpus quality gate PASS.
+
 ## [2.14.6] — The Google key format that actually ships today
 
 Google AI Studio now issues `AQ.`-prefixed API keys, and the legacy `AIzaSy…` format is

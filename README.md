@@ -4,17 +4,17 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 ![Tests](https://img.shields.io/badge/tests-805%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.14.6-blue)
+![Version](https://img.shields.io/badge/version-2.15.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
 Passive Attack Surface Management scanner for detecting credential leaks in public-facing infrastructure.
-Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (73 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
+Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (85 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.14.6 — the Google key format that actually ships today** ·
+> **v2.15.0 — the benchmark was measuring the wrong thing** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
@@ -114,7 +114,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 secretnode/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + WebSocket + static server + auth/SSRF guards
-│   ├── scanner.py           # Async scan engine (73 patterns, source maps, entropy, base64, Gemini, Discord)
+│   ├── scanner.py           # Async scan engine (85 patterns, source maps, entropy, base64, Gemini, Discord)
 │   ├── verifier.py          # Optional live credential verification (off by default)
 │   ├── netguard.py          # "May this scanner request this?" — pre-flight AND every redirect hop
 │   ├── triage.py            # Deterministic verdicts with no API key, no network, no model
