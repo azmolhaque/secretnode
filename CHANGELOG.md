@@ -74,6 +74,47 @@ That change cost exactly one true-positive specimen — a Bedrock sample padded 
 `EXAMPLE`, which is not a shape any real key has — and one test fixture that had been
 asserting the scanner reports AWS's documentation key.
 
+### Added — JWT claims are read, not just matched
+
+The registry has always matched a JWT's shape. Nothing opened one, so a fifteen-minute
+session token, a token that expired in 2023, and an unsigned admin token were one finding
+at one severity.
+
+The evidence came from a live scan rather than from theory. Against vulnweb.com the AI
+tier dismissed two JWTs by **reading their payloads** — *"an example payload
+('user':'test') used as sample documentation"* — while the offline tier retained both,
+because with no API key it had no way to separate a demonstration token from a live
+session. Offline is the documented default configuration, so that was the common case.
+
+`jwtclaims.py` decodes the header and payload — base64, no network call, no key, no cost —
+and the offline tier now renders five different verdicts where it previously rendered one:
+
+| Token | Before | Now |
+|---|---|---|
+| issuer `example.com` | retained, HIGH | **dropped** — demonstration token, deterministically |
+| `exp` in the past | retained, HIGH | dismissed but **kept visible** for review |
+| `alg: none` | retained, HIGH | retained — *"anyone can forge a token with any claims"* |
+| no `exp`, `scope: admin` | retained, HIGH | retained — *"service token, usable until revoked"* |
+| ordinary session | retained, HIGH | retained, with issuer and time-to-expiry named |
+
+Two deliberate limits. **No signature is verified** and none is claimed to be: verification
+needs the issuer's key, which would mean using a credential found on a target against a
+third party — exactly what this scanner does not do. A decoded claim is what the token
+*asserts*, and every verdict is worded that way.
+
+And **identity claims are never read**. A JWT payload is routinely full of personal data —
+`sub`, `email`, `name`, `picture`. The module extracts only operational claims: expiry,
+issuer, audience, algorithm, scope. A scanner that lifted a user's email address out of a
+token and printed it into a client-facing document would have turned a security finding
+into a data-protection problem. The finding does not need the subject's identity to be
+actionable, so the subject's identity is not collected.
+
+The expired case is dismissed at a confidence *below* the drop threshold on purpose, so it
+routes to review rather than deletion. The token cannot be used, but its presence still
+shows tokens reach the bundle — and a reader who sees nothing cannot tell whether the
+scanner examined it or never looked. That is the same argument that put public-by-design
+findings back in the report in v2.13.0.
+
 ### The numbers
 
 | | before | after |
@@ -85,7 +126,7 @@ asserting the scanner reports AWS's documentation key.
 | external false-alarm rate | never measured | **12.7%**, bucketed |
 | detectors | 73 | **85** |
 
-**885 tests**, ruff clean. Ground truth 85/85 with zero false positives, precision 1.000 /
+**906 tests**, ruff clean. Ground truth 85/85 with zero false positives, precision 1.000 /
 recall 1.000, offline and end-to-end over HTTP. Labelled-corpus quality gate PASS.
 
 ## [2.14.6] — The Google key format that actually ships today
