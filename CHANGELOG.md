@@ -3,6 +3,182 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.5] — The leak pattern that dominates real bundles, and a corpus that can measure precision
+
+Research question: what does a leaked credential in browser-delivered JavaScript actually
+look like in 2026? The answer is not an exotic format. Every SPA bundler inlines a
+whitelisted env prefix into the shipped bundle — `NEXT_PUBLIC_` (Next.js), `REACT_APP_`
+(CRA), `VITE_`, `VUE_APP_`, `NUXT_PUBLIC_`, `GATSBY_`, `EXPO_PUBLIC_`, `PUBLIC_`
+(SvelteKit) — and the prefix *is* the instruction to publish. The failure is a developer
+reading it as a naming convention and putting a real secret behind it.
+
+SecretNode had no awareness of any of them:
+
+```
+grep -ni "NEXT_PUBLIC|REACT_APP|VUE_APP|VITE_|environment.ts" scanner.py triage.py
+→ (no matches)
+```
+
+### Added — `Framework Public Env Secret` (detector 72)
+
+Fires on a value whose *name* declares a secret sitting behind a public prefix:
+`NEXT_PUBLIC_STRIPE_SECRET_KEY`, `REACT_APP_DB_PASSWORD`, `VITE_SUPABASE_SERVICE_ROLE_KEY`.
+
+It is keyword-anchored, so it lives in the registry rather than `composite.py` — per that
+module's own rule, *"a companion carrying its own keyword is an ordinary detector wearing
+a composite's clothes."*
+
+Only names that **declare** a secret qualify. `NEXT_PUBLIC_MAPBOX_TOKEN`,
+`NEXT_PUBLIC_POSTHOG_KEY` and `PUBLIC_SUPABASE_ANON_KEY` are public by design and stay
+clear: matching on TOKEN or KEY alone would aim a false-positive engine at exactly the
+values the informational bucket exists to clear.
+
+**Where it is findable, stated honestly:** a fully minified Next.js bundle has already
+substituted the literal for `process.env.NEXT_PUBLIC_…`, so the name is gone and only the
+value ships. This detector fires where the name survives — Angular `environment.ts`
+objects compiled verbatim, source maps' `sourcesContent`, unminified and dev builds,
+served `.env` files, and config objects that enumerate the vars. That is a large share of
+what a crawler meets, and it is not all of it.
+
+Two corrections during the work. The first value charset allowlisted base64, so
+`hunter2Correct!Horse9Battery` was invisible — a `_PASSWORD` is exactly where punctuation
+lives, and the name anchor is strong enough to carry a permissive value. And when a real
+provider detector also matches, it wins: `NEXT_PUBLIC_STRIPE_SECRET_KEY="sk_live_…"` is
+reported as a **Stripe Secret Key**, CRITICAL with Stripe's own remediation, which is
+strictly more useful than a generic framework verdict.
+
+### Added — `bench.secretbench`: external precision, not just external recall
+
+`bench.benchmark` measures precision against decoys this project invented.
+`bench.external` measures recall against another scanner's samples. Neither measures
+precision against **values a human examined and ruled out**, which is what a client is
+really asking when they ask how noisy the tool is.
+
+[SecretBench](https://github.com/setu1421/SecretBench) carries both labels: 97,479
+candidate secrets mined from 818 public GitHub repositories, 15,084 of them labelled
+TRUE by hand. So recall, precision and false-alarm rate all come from one corpus that
+owes nothing to these patterns.
+
+**There is no downloader, and there will not be one.** The authors gate the dataset
+deliberately — *"a data protection agreement has to be signed with us"* — because the
+true-labelled rows are real credentials belonging to real people. Writing a fetcher would
+route around an agreement someone else signed, and shipping one open-source would invite
+every user to do the same. Obtain access yourself, export what you are permitted to hold,
+and pass `--export`. The same applies to FPSecretBench, which this module reads through
+the same path.
+
+Three rules on the data, enforced rather than documented: the export is never copied or
+cached; an export located **inside the repository is refused** (one `git add -A` publishes
+real credentials, and this project has been bitten by that exact shape twice); and nothing
+secret reaches stdout — misses print provider, category and a masked fragment.
+
+With no export it prints *"this is a skip, not a pass: no number was measured"* and exits
+0, matching `bench.external`.
+
+One bug found in the new code by its own test: `_has_detector` used `len(head) > 3`, which
+excluded every three-letter provider — aws, npm, pgp, gcp, xai — so a missed **AWS Access
+Key** was filed as "provider never claimed". That is the one misclassification this split
+must never make: it moves a defect into the bucket labelled not-a-defect.
+
+### Fixed — two precision defects the QA pass found, neither caused by this release
+
+Running the new detector through the real pipeline rather than a fixture reported a HIGH
+credential from a bundle that contains none:
+
+```
+{"homepage":"https://acme.com","author":"dev@acme.com"}
+  -> https://acme.com","author":"dev@acme.com      [Basic-Auth URL Credentials, HIGH]
+```
+
+The Basic-Auth URL pattern's character classes excluded only `/` and whitespace, so a
+match could begin inside one JS string and end inside another. That is the shape of every
+`package.json`, and of any path-less base URL in a config object sitting near a support
+address. It survived this long because a `/` in the URL's path breaks the run — so every
+obvious test case passed, and only a path-less base URL exposes it. The classes now
+exclude JS/JSON string boundaries, which RFC 3986 excludes from userinfo anyway.
+
+Then scanning this project's **own diff** with this scanner reported the literal
+`{_STRIPE_LIVE}` — an f-string placeholder in a test fixture — as a credential. The
+placeholder allowlist covered `<PLACEHOLDER>` and no interpolation form at all. `${VAR}`,
+`{{VAR}}`, `{VAR}` and `%(name)s` now join it, at the allowlist rather than in one
+detector, because the failure belongs to every detector that reads a quoted value. These
+ship for real: a broken build, a template that never rendered, a failed entrypoint
+substitution.
+
+Both are pre-existing and neither is a regression. Both are locked in — the first by a new
+ground-truth decoy, both by tests.
+
+**871 tests** (+38), ruff clean. **72 detectors**; ground truth 72/72 with zero false
+positives, precision 1.000 / recall 1.000, offline and end-to-end over HTTP. Labelled
+corpus quality gate PASS. External recall unchanged at 80.6% — gitleaks has no
+framework-prefix rule, so there was nothing there for the new detector to move.
+
+## [2.14.4] — A host that was never read reported as scanned
+
+Four live deep scans of intentionally vulnerable targets — vulnweb.com, nmap.org,
+badssl.com, testfire.net. No credentials to find on any of them (they are XSS/SQLi/TLS
+testbeds, and their secrets live server-side), so zero confirmed was the correct answer
+throughout. What the scans exercised was orchestration and reporting, and that is where
+both defects are.
+
+### Fixed — every single-target failure rendered as a clean host
+
+nmap.org's report said **CLEAN across 5 of 5 hosts**. One of the five, `issues.nmap.org`,
+redirects to github.com; the scope guard correctly refused to follow it, so the root
+document was never fetched. The per-host table showed:
+
+```
+issues.nmap.org | scanned | 0 assets | 0 confirmed | 0 posture | (no note)
+```
+
+The spider logged the failure and returned an empty asset list, so the scan "completed"
+with nothing in it. But the cause was wider than that host: `run_scan` reports failure
+through `status` and `errors` (plural), while `_summarise_scan` read `scan["error"]` — a
+key `run_scan` never sets. **Every** single-target failure, a fatal spider crash included,
+arrived in the deep-scan table as `scanned`.
+
+That also disabled the v2.13.1 coverage verdict, which counts only hosts carrying an
+error: a host the scanner explicitly said it could not read still counted as covered, so
+the verdict could not hedge to PARTIAL. An unreadable host and a host read and found clean
+were the same thing to every deliverable.
+
+An unfetchable root now raises `RootUnreachable` rather than returning an empty list, so
+the scan is `failed` with a reason at single-target level too; and `_scan_failure()` reads
+the signals `run_scan` actually sets. A host that was not read now says so, and hedges the
+domain verdict.
+
+### Fixed — the host budget could be swallowed whole by a generated fleet
+
+The per-run host cap is a prefix slice of an alphabetically sorted candidate list. Under
+wildcard DNS that is the worst available ordering: whatever sorts first takes everything.
+badssl.com surfaced 646 live hosts, of which all but a handful were generated
+`wowmoarhost1000…1441` names returning zero assets each.
+
+**An honest correction to the first reading of that scan:** badssl was not actually harmed.
+Its fleet sorts *last*, so the alphabetical slice already reached all six distinct hosts,
+and the 19 remaining slots had nothing better to spend on. The defect it exposed is latent
+rather than realised — a fleet whose stem sorts *before* the real hosts takes every slot
+and none of them is ever read. Measured on that shape: **0 of 5 distinct hosts reached
+before, 5 of 5 after.**
+
+`prioritise_hosts()` bands candidates — apex first, then hosts with no large same-stem
+family, then the remainder of each family after keeping two representatives. It reorders
+and never drops, so a run whose cap exceeds the candidate count still reaches everything.
+Raising `MAX_TARGETS` was never the fix; it just buys more `wowmoarhost`.
+
+### Known and not fixed here
+
+Three smaller findings from the same four scans, recorded rather than silently carried:
+`?.badssl.com` reached the probe list because the deep-scan candidate filter checks scope
+but not hostname validity (`surface._valid_host` already rejects it and is not called
+here); the "Subdomains found" and "Live hosts" tiles count different populations (CT only
+versus CT ∪ archive ∪ target), which reads as `0 found / 3 live` on vulnweb; and the
+deep-scan deliverables carry no screening funnel, so vulnweb's two examined-and-dismissed
+JWTs appear nowhere outside the dashboard.
+
+**833 tests** (+15), ruff clean. Ground truth 71/71 with zero false positives, precision
+1.000 / recall 1.000, unchanged.
+
 ## [2.14.3] — The finding was found, then dropped on the way to the report
 
 A deep scan of an authorized bug-bounty target. `mtw-pwa-test.telenor.se/js/index.js`

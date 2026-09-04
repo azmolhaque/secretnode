@@ -242,6 +242,17 @@ def _specimens(rng: random.Random) -> list[Specimen]:
                  note="DSN is a public write-only endpoint; allows event injection only."))
     add(plain("PostHog Project API Key", "phc_" + r(ALNUM, 43), kind="public",
               note="Project key is published to every browser by design."))
+
+    # Appended LAST on purpose. Every specimen draws from one shared RNG, so
+    # inserting one mid-list shifts every value after it — which is how adding a
+    # detector once pushed the Terraform sample onto a trailing `-` its own \b
+    # excludes, and broke a corpus that had nothing to do with the change.
+    #
+    # Not `plain()`: the value is nothing on its own. The name is the entire
+    # signal, so the specimen has to carry the assignment that a build inlines.
+    v = r(ALNUM, 30)
+    add(Specimen("Framework Public Env Secret", v,
+                 f'NEXT_PUBLIC_APP_CLIENT_SECRET="{v}"'))
     return out
 
 
@@ -291,6 +302,19 @@ def _decoys(rng: random.Random) -> list[Decoy]:
               "Base64 config the decoder will open — contains no credential"),
         Decoy("lorem-high-entropy", f'const nonce = "{r(ALNUM, 32)}";',
               "A genuine high-entropy value that is not a secret: a CSP nonce"),
+        # Appended last: decoys draw from the same RNG as the specimens, so an
+        # insertion higher up shifts every value after it.
+        #
+        # The Basic-Auth URL detector used to match ACROSS a string boundary,
+        # because its character classes excluded only `/` and whitespace. This
+        # is the shape of every package.json, and it produced a fabricated HIGH
+        # finding: `https://acme.com","author":"dev@acme.com`. It survived
+        # because the false positive needs a base URL with NO path — which is
+        # exactly the form a config object holds.
+        Decoy("url-then-email",
+              '{"homepage":"https://acme.com","author":"dev@acme.com",'
+              '"apiBase":"https://api.acme.com","support":"help@acme.com"}',
+              "Path-less base URLs beside emails — must not read as basic-auth credentials"),
     ]
 
 

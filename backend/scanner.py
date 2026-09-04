@@ -53,9 +53,16 @@ VERIFY_SECRETS: bool       = os.environ.get("VERIFY_SECRETS", "false").lower() =
 #
 # Defaults track Google's current lineup: Tier 1 on 3.5 Flash-Lite (fastest /
 # most cost-effective 3.5-class, ideal for the high-volume pre-filter) and Tier 2
-# on 3.6 Flash (stronger coding/reasoning workhorse). For security-focused
-# deployments, set GEMINI_TIER2_MODEL to the security-specialised 3.5 Flash Cyber
-# model (tuned to reason about vulnerabilities) once your key can call it.
+# on 3.6 Flash (stronger coding/reasoning workhorse).
+#
+# This comment used to recommend the security-specialised "Flash Cyber" model
+# for Tier 2 "once your key can call it". No ordinary key ever will: the Cyber
+# models are not published to the public API at any tier, and access is an
+# organisational grant under Google's Fairwind Program. Worse, taking that
+# advice does not merely fail one call — the 404 is a permanent config error,
+# so _describe_ai_config_error latches _ai_disabled_reason and AI validation is
+# off for the ENTIRE scan, silently demoting every finding to offline triage.
+# See .env.example for the full note.
 _LEGACY_MODEL              = os.environ.get("GEMINI_MODEL", "").strip()
 GEMINI_TIER1_MODEL: str    = os.environ.get("GEMINI_TIER1_MODEL", _LEGACY_MODEL or "gemini-3.5-flash-lite")
 GEMINI_TIER2_MODEL: str    = os.environ.get("GEMINI_TIER2_MODEL", "gemini-3.6-flash")
@@ -455,6 +462,61 @@ SECRET_PATTERNS: list[SecretPattern] = [
         severity="MEDIUM",
         entropy_gated=True,   # loose keyword=value match — entropy keeps it quiet
     ),
+    # A secret hiding behind a build-time "public" prefix.
+    #
+    # Every SPA bundler inlines a whitelisted env prefix into the shipped bundle:
+    # NEXT_PUBLIC_ (Next.js), REACT_APP_ (CRA), VITE_ (Vite), VUE_APP_ (Vue CLI),
+    # NUXT_PUBLIC_, GATSBY_, EXPO_PUBLIC_, PUBLIC_ (SvelteKit). The prefix IS the
+    # opt-in — it means "ship this to every browser" — and the failure this
+    # catches is a developer reading it as a naming convention and putting a real
+    # secret behind it. `NEXT_PUBLIC_STRIPE_SECRET_KEY` is not a hypothetical
+    # shape; it is the single most common way a live key reaches a bundle today.
+    #
+    # The name is the whole signal, so this is keyword-anchored and lives here
+    # rather than in composite.py — per that module's own rule, a companion
+    # carrying its own keyword is an ordinary detector wearing a composite's
+    # clothes.
+    #
+    # WHERE IT IS ACTUALLY FINDABLE, honestly: a fully minified Next.js bundle
+    # has already substituted the literal for `process.env.NEXT_PUBLIC_…`, so the
+    # name is gone and only the value ships. This detector fires on the forms
+    # where the name survives — Angular `environment.ts` object literals compiled
+    # verbatim, source maps' `sourcesContent`, unminified and dev builds, served
+    # `.env` files, and any config object that enumerates the vars rather than
+    # dereferencing them one by one. That is a real and large share of what a
+    # crawler meets, but it is not all of it, and claiming otherwise would be the
+    # kind of overstatement the benchmark caveat exists to prevent.
+    #
+    # Only names that DECLARE a secret qualify. `NEXT_PUBLIC_MAPBOX_TOKEN` and
+    # `NEXT_PUBLIC_POSTHOG_KEY` are public by design and correctly ignored —
+    # matching on "TOKEN" or "KEY" alone would turn this into a false-positive
+    # engine on exactly the values the informational bucket exists to clear.
+    SecretPattern(
+        name="Framework Public Env Secret",
+        regex=re.compile(
+            r"(?:NEXT_PUBLIC|REACT_APP|VUE_APP|VITE|NUXT_PUBLIC|GATSBY|EXPO_PUBLIC|PUBLIC)"
+            r"_[A-Z0-9_]{0,40}"
+            r"(?:SECRET|PRIVATE|PASSWORD|PASSWD|SERVICE_ROLE|CLIENT_SECRET)"
+            r"[A-Z0-9_]{0,40}"
+            # Value charset excludes only quotes, whitespace and angle brackets
+            # rather than allowlisting base64: a `_PASSWORD` is routinely full of
+            # punctuation, and `hunter2Correct!Horse9Battery` was invisible while
+            # this allowlisted `[A-Za-z0-9-_.~+/=]`. The name anchor is strong
+            # enough to carry a permissive value — a bundle does not casually
+            # contain `REACT_APP_..._SECRET=` beside something harmless.
+            r"['\"]?\s*[=:]\s*['\"]([^'\"\s<>]{12,200})['\"]"
+        ),
+        description="Secret-named value behind a framework's public env prefix",
+        severity="HIGH",
+        remediation=(
+            "This value is inlined into the browser bundle by the build — the "
+            "NEXT_PUBLIC_/REACT_APP_/VITE_ prefix is precisely the instruction to "
+            "publish it, so every visitor already has it. Treat it as compromised: "
+            "rotate it at the provider, then move the call server-side (an API "
+            "route or backend-for-frontend) and re-introduce the value WITHOUT the "
+            "public prefix so the bundler cannot inline it again."
+        ),
+    ),
     SecretPattern(
         name="OAuth Client Secret",
         regex=re.compile(
@@ -712,7 +774,27 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Basic-Auth URL Credentials",
-        regex=re.compile(r"\b(https?://[^:@/\s]+:[^@/\s]{3,}@[^\s'\"<>]+)"),
+        # The character classes exclude JS/JSON string boundaries, not just
+        # whitespace. Excluding only `/` and space let a match start inside one
+        # string literal and finish inside another:
+        #
+        #   {"homepage":"https://acme.com","author":"dev@acme.com"}
+        #    -> https://acme.com","author":"dev@acme.com   [HIGH, fabricated]
+        #
+        # That is the shape of every package.json, and any path-less base URL in
+        # a config object followed by a support email does the same. A `/` in the
+        # URL's path happened to break the run, which is why this survived — the
+        # false positive needs a base URL with no path, which is the commonest
+        # form a config object holds.
+        #
+        # RFC 3986 userinfo is unreserved / pct-encoded / sub-delims / ":", so
+        # quotes, angle brackets, braces and backslash are excluded by the spec
+        # anyway. Comma and semicolon are sub-delims in principle; in shipped
+        # JavaScript they mean "the string ended" far more often than they mean
+        # "part of a password", and that trade buys back the whole false positive.
+        regex=re.compile(
+            r"\b(https?://[^:@/\s'\"<>{},;\\]+:[^@/\s'\"<>{},;\\]{3,}@[^\s'\"<>{},;\\]+)"
+        ),
         description="Credentials embedded in an HTTP(S) URL",
         severity="HIGH",
         cwe="CWE-522",
@@ -1985,6 +2067,18 @@ async def check_robots_txt(
         return True  # robots.txt missing/unreachable is not an error condition
 
 
+class RootUnreachable(RuntimeError):
+    """The target's root document could not be fetched, so there was nothing to
+    scan.
+
+    A distinct type because the caller must be able to tell this apart from a
+    genuine crash: it is an expected outcome (a WAF block, an out-of-scope
+    redirect, a dead host) that has to reach the report as a *failure* rather
+    than as an empty-but-successful scan. Silence here is what let a deep scan
+    call a host `scanned` when its root was never read.
+    """
+
+
 class _AssetBudget:
     """Tracks the bytes a scan is holding and says when to stop collecting.
 
@@ -2055,7 +2149,20 @@ async def spider_target(
                     f"The scan cannot proceed without the root document."
                 ),
             })
-        return []
+        # Raise rather than return []. Returning an empty asset list made an
+        # unreachable target indistinguishable from a reachable one that simply
+        # had nothing in it: the scan completed, reported 0 assets and 0
+        # findings, and every deliverable then said "clean". A deep scan of
+        # nmap.org showed the cost — issues.nmap.org redirected out of scope,
+        # its root was never fetched, and the per-host table still read
+        # `scanned` with no note while the domain verdict said CLEAN across
+        # 5 of 5 hosts. The coverage verdict cannot hedge to PARTIAL either,
+        # because that counts hosts carrying an error and this one carried none.
+        raise RootUnreachable(
+            f"could not fetch the target root ({target_url}) — commonly a WAF/CDN "
+            f"block (HTTP 403/503), an out-of-scope redirect, an unresolved host, "
+            f"or a timeout"
+        )
 
     budget = budget or _AssetBudget()
     assets: list[tuple[str, str]] = (
@@ -2211,7 +2318,18 @@ _KNOWN_EXAMPLE_SECRETS = frozenset({
 })
 _PLACEHOLDER_RE = re.compile(
     r"(?i)(your[_-]?(?:api|key|token|secret|id)|placeholder|changeme|"
-    r"redacted|x{8,}|0{8,}|<[^>]{2,}>)"
+    r"redacted|x{8,}|0{8,}|<[^>]{2,}>|"
+    # Un-interpolated template syntax. `<…>` was already here; the interpolation
+    # forms were not, and they ship for real — a broken build, a server-rendered
+    # template that never ran, a Docker entrypoint that failed to substitute.
+    # Found by scanning this project's own diff with this scanner, which
+    # reported the literal `{_STRIPE_LIVE}` out of a test fixture as a
+    # credential. Placed here rather than in one detector because the failure
+    # belongs to every detector that reads a quoted value.
+    r"\$\{[^}]{1,80}\}|"          # ${VAR} — shell, JS template literal
+    r"\{\{[^}]{1,80}\}\}|"        # {{VAR}} — Handlebars, Jinja, Vue, Go
+    r"^\{[A-Za-z_][A-Za-z0-9_]{0,60}\}$|"   # {VAR} alone — str.format, f-string
+    r"%\([A-Za-z_][A-Za-z0-9_]*\)s)"        # %(name)s — Python printf mapping
 )
 _B64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
 _MAX_B64_BLOBS = 200
@@ -3128,6 +3246,14 @@ async def run_scan(
         except asyncio.CancelledError:
             result["status"] = "cancelled"
             await emit({"type": "scan_cancelled", "scan_id": scan_id})
+            return result
+        except RootUnreachable as exc:
+            # Expected and reportable, not a crash — no stack trace. What matters
+            # is that `status` and `errors` say so, because that is what a deep
+            # scan reads to decide whether this host counts as covered.
+            result["status"] = "failed"
+            result["errors"].append(str(exc))
+            await emit({"type": "scan_error", "error": str(exc)})
             return result
         except Exception as exc:
             logger.exception("Fatal spider error")
