@@ -3,6 +3,65 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.15.1] — Two-year-old pins, and a dependency that was never used
+
+GitHub's Security tab showed four alerts. Chasing them found one confirmed CVE and, behind
+it, the actual problem: **every direct dependency was pinned to a late-2024 release** while
+the transitive ones (certifi 2026.7.22, cryptography 50.0.0, urllib3 2.7.0) had moved on.
+Exact pins do not drift by themselves — someone has to move them, and nobody had for
+roughly two years.
+
+### Fixed — CVE-2025-54121 (Starlette multipart DoS)
+
+`fastapi==0.115.5` pinned `starlette==0.41.3`. The advisory affects `< 0.47.2`; the fix is
+a rollover check in `UploadFile.write()` that stops the main thread blocking when a
+multipart upload spills to disk. Moderate, CVSS 5.3.
+
+**Exposure, stated honestly: the vulnerable path was not reachable here.** There are no
+upload endpoints — no `UploadFile`, no `File(...)`, no `Form(...)` anywhere in the
+codebase, and all four POST routes take JSON behind an API key. It was a real advisory
+against code this application does not run. Fixed because a stale pin is the finding, not
+because the sky was falling.
+
+### Removed — `python-multipart`, declared and never used
+
+Nothing imported it, and FastAPI only needs it for form-encoded bodies. It sat in
+`requirements.txt` producing advisories for a code path that does not exist. An unused
+dependency is attack surface and alert noise at the same time.
+
+### Changed — the pins moved
+
+| | was | now |
+|---|---|---|
+| fastapi | 0.115.5 | **0.141.1** |
+| starlette *(transitive)* | 0.41.3 | **1.6.0** |
+| uvicorn | 0.32.1 | **0.52.4** |
+| lxml | 5.3.0 | **6.1.3** |
+| google-genai | 2.11.0 | **2.22.0** |
+| websockets | 14.1 | **16.1.1** |
+| pytest | 8.3.4 | **9.1.1** |
+| pytest-asyncio | 0.24.0 | **1.4.0** |
+
+`websockets` is capped at 16.x rather than the current 17.1, because `google-genai`
+requires `websockets<17.0`. `uvicorn[standard]` only needs `>=13.0`, so google-genai is
+the binding constraint — recorded in `requirements.txt` so the next person does not
+rediscover it. `httpx` was already current at 0.28.1.
+
+Two majors in that list are the ones that usually break a suite — pytest 8→9 and
+pytest-asyncio 0.24→1.4. All **906 tests pass** unchanged, and the long-standing
+`asyncio_default_fixture_loop_scope` deprecation warning is gone with them.
+
+### Noted, not acted on
+
+Starlette 1.6 deprecates `httpx` inside its `TestClient` in favour of `httpx2`. It is a
+warning, not a failure, and migrating the HTTP client is a change with its own blast
+radius — recorded here rather than bundled into a dependency refresh.
+
+**906 tests**, ruff clean. Ground truth 85/85 with zero false positives, precision 1.000 /
+recall 1.000, offline and end-to-end over HTTP. External recall 89.0% and false-alarm rate
+12.7% unchanged. Labelled-corpus gate PASS. App boots, `/api/health` reports 2.15.1, and
+`/api/scans` still returns 401 without a key.
+
 ## [2.15.0] — The benchmark was measuring the wrong thing
 
 A minor version, not a patch, because the headline number changed and the detector

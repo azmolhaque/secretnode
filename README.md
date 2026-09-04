@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 ![Tests](https://img.shields.io/badge/tests-805%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.15.0-blue)
+![Version](https://img.shields.io/badge/version-2.15.1-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,7 +14,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.15.0 — the benchmark was measuring the wrong thing** ·
+> **v2.15.1 — two-year-old pins, and a dependency that was never used** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
