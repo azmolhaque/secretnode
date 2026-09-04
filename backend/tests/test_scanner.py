@@ -198,10 +198,13 @@ class TestEntropyGatingPolicy:
         assert "AWS Access Key" in [f.secret_type for f in findings]
 
     def test_degenerate_structural_key_is_rejected(self):
-        # All-identical chars => degenerate junk, not a real key. The low
-        # structural floor still rejects it even though it matches the AWS shape.
+        # All-identical chars => degenerate junk, not a real key. Rejected even
+        # though it matches the AWS shape. Asserted through looks_degenerate now
+        # rather than an absolute entropy floor: the floor answered this case
+        # correctly and answered ordinary numeric ids wrongly, dropping 2-5% of
+        # them for no reason but the base they are written in.
         junk = "AKIA" + "A" * 16
-        assert scanner.shannon_entropy(junk) < scanner.MIN_STRUCTURAL_ENTROPY
+        assert scanner.looks_degenerate(junk)
         body = f'k = "{junk}"'
         findings = scanner.extract_secrets(
             "scan1", "https://example.com", "https://example.com/app.js", body

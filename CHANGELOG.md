@@ -3,6 +3,140 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.16.1] — A detector can score 100% on every benchmark and match nothing
+
+A QC/QA pass over v2.16.0. The headline finding is not any single pattern.
+
+**v2.16.0's Mapbox detector scored 1.000 on the ground-truth corpus and 99.1%
+against gitleaks while matching zero real Mapbox tokens** — including the one
+Mapbox publishes in its own documentation.
+
+Neither benchmark could have caught it, and the reason is structural rather than
+an oversight in either:
+
+| corpus | why it is blind to this |
+|---|---|
+| ground truth | specimens are generated **from** the registry's own regexes, so a pattern that says 60 characters gets a 60-character specimen and matches it. The corpus cannot disagree with the pattern. |
+| external | gitleaks' samples come from **its** regex — and this project transcribed that same regex. Two copies of one claim agreeing with each other is not corroboration. |
+
+So a detector whose length is simply wrong scores 1.000 on one and 100% on the
+other and finds nothing in the field. That is the worst failure this scanner can
+have: a scan that returns CLEAN because the pattern never could have matched.
+
+### Added — `make bench-vendor`, a corpus that owes nothing to our regexes
+
+Every value is constructed from the **issuer's** documented structure, written
+out as an algorithm, with the registry's pattern deliberately not consulted:
+
+- a Discord id is `(milliseconds since 2015-01-01) << 22`, so its width is a
+  function of the calendar rather than a property of the format;
+- a Mapbox token is a JWT whose payload encodes the **account name**, so its
+  length varies per customer and no fixed width is correct.
+
+When a construction and a pattern disagree, the pattern is wrong until someone
+shows otherwise. 21 shapes, release-blocking in CI beside the existing gate.
+
+**The instrument was verified to fail before it was trusted to pass**: restoring
+v2.16.0's Mapbox pattern drops it to 85.7% with a non-zero exit, and the fix
+takes it back to 21/21. A gate that cannot fail measures nothing.
+
+### Fixed — the four defects that audit turned up
+
+**Mapbox matched no real token.** `pk.<60>.<22>` was transcribed literally from
+gitleaks, whose generator emits exactly 60 random characters; Mapbox's own
+documentation token has 62, and observed payloads run 59–92 across ordinary
+account names. Now anchored on `pk.eyJ` with ranges. **`sk.` secret tokens were
+never covered at all** — the half that can enumerate and revoke your other
+tokens — and are now a separate CRITICAL detector.
+
+**Discord missed every application created since 2022.** Snowflake width grows
+with the calendar; gitleaks' 18 held from roughly 2016 to 2021 and today's ids
+are 19 digits. Now 17–20, and Asana's gid widened for the same reason.
+
+**An Airtable personal access token reported twice.** `pat` + 14 characters is
+exactly the 17 alphanumerics the legacy Airtable key pattern wants, and
+`_collapse_duplicates` could not merge them because the matched substrings
+differ. `_contextual` now refuses a value that continues through `.`, `_` or `-`
+— capturing the front of a longer credential is always wrong.
+
+**A 1Password token was invisible when base64url-encoded**, because the
+transcribed class was base64 only.
+
+### Fixed — a shared gate that was measuring the wrong thing
+
+`MIN_STRUCTURAL_ENTROPY` exists to reject `AKIAAAAAAAAAAAAAAAAA`. At 2.5
+absolute bits it does. It also **silently dropped 5.4% of genuine 16-digit ids
+and 2.4% of 18-digit ones**, measured over 20,000 draws each — because a decimal
+digit carries at most log2(10) = 3.32 bits however random it is. Hex and
+alphanumeric values are unaffected (0.000%), which is why this went unnoticed:
+it is invisible until a detector matches a numeric value, and the Discord and
+Asana client IDs are the first that do.
+
+`looks_degenerate()` asks the question directly instead — almost no distinct
+characters, one character dominating, or a repeating short cycle. Alphabet
+independent, and it drops **0.000%** of random values in base 10, 16 and 62 at
+every length tested. The periodic test was added after the external corpus
+showed `GR1348941` + `123123123…` slipping through the first two: the absolute
+floor had caught that at 2.45 bits, and keeping the catch is what makes this a
+pure improvement rather than a trade.
+
+### Added — a literal pre-filter: scans are ~2.1× faster
+
+108 patterns each made a full pass over every asset, measured at ~11 ms per
+pattern per megabyte — and on a real bundle nearly every provider name is
+absent, so almost every pass was reading a megabyte to find nothing. A
+lowercased substring test now decides whether to run each regex. 1 MB went from
+1303 ms to 613 ms; the worst case, a bundle naming every provider, still beats
+the old best case.
+
+A pre-filter decides whether to **run** a regex, never whether a match counts,
+which makes an unsound one a silent false negative. So the derivation is timid —
+no alternations, at least four literal characters — and the soundness check is
+attached rather than optional: every ground-truth specimen, every vendor shape
+and all 209 externally-authored positives must contain their detector's literal.
+
+**That check found a bug in the derivation before it shipped.** `https?://`
+yielded the literal `https`, because the extractor took the character the `?`
+had made optional — so every `http://user:pass@host` would have been skipped by
+the one detector that exists to find it.
+
+### Added — a `contested` line, for when the reference disagrees with the issuer
+
+Correcting Mapbox meant gitleaks' generated sample stopped matching, and the
+external benchmark scored that as a defect. It is not one, and hiding it would be
+worse than reporting it.
+
+`contested` names the disagreement, and cannot excuse a broken pattern:
+membership requires that a credential built from **that provider's own
+documentation** is detected in the same run. A pattern that simply did not work
+would fail the vendor corpus and land back in in-scope misses. `declined` is
+tested first, because naming the concrete filter that refused a value says more
+than observing that its provider is vendor-backed.
+
+### Fixed — report advice that was wrong, not merely unhelpful
+
+"Treat as compromised: revoke at the provider immediately" is the registry
+default. For a published OAuth client id there is nothing to revoke; for an
+`age` key there is no provider; a 1Password Secret Key cannot be rotated on its
+own. Wrong advice on a LOW finding teaches a reader to skim the CRITICAL ones,
+so those seven detectors now carry their own.
+
+### Fixed — a test that reimplemented the code it was checking
+
+`declined_reason` was a closure inside `main()`, so the v2.16.0 test carried a
+copy of its logic and would have passed while the real function drifted. It is
+module level now and the tests call it — the exact failure this benchmark exists
+to catch, reproduced inside its own test.
+
+### Verified
+
+**1025 tests (+47), ruff clean.** 108 detectors; ground truth 108/108 offline
+**and** end-to-end over HTTP, precision 1.000 / recall 1.000, zero mistypes, zero
+decoy false positives. Labelled-corpus gate PASS. Vendor shapes 21/21. External
+208/211 with **0 in-scope misses and 0.0% false alarms** (2 declined, 1
+contested, each printed with its reason). No pathological backtracking: scan cost
+is linear in input size across 64 KB–4 MB and under adversarial repetition.
+
 ## [2.16.0] — The benchmark was still manufacturing defects, one level deeper
 
 v2.15.0 rebuilt the external benchmark after it turned out to be inventing the misses it

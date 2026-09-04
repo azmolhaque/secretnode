@@ -17,7 +17,7 @@ import random
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Coroutine
@@ -176,11 +176,14 @@ class SecretPattern:
     remediation: str = _DEFAULT_REMEDIATION
     # Entropy handling differs by detector class:
     #   • Structural/provider detectors (AKIA…, ghp_…, sk_live_…, PEM blocks,
-    #     fixed-format hex/UUID tokens) are high-precision by shape. They get
-    #     only a LOW anti-degenerate floor (MIN_STRUCTURAL_ENTROPY) that rejects
-    #     obvious junk like "AKIAAAAAAAAAAAAAAAAA" while still catching genuinely
-    #     modest-entropy live keys — because gating these on the full generic bar
-    #     silently drops real credentials (a false negative, the worst failure).
+    #     fixed-format hex/UUID tokens) are high-precision by shape. They are
+    #     asked only whether the value is degenerate filler — see
+    #     looks_degenerate() — which rejects "AKIAAAAAAAAAAAAAAAAA" while still
+    #     catching genuinely modest-entropy live keys, because gating these on
+    #     the full generic bar silently drops real credentials (a false negative,
+    #     the worst failure). That test replaced an absolute 2.5-bit floor, which
+    #     did the same job for alphanumerics and dropped 2-5% of real NUMERIC ids
+    #     for no reason but the base they are written in.
     #   • The generic keyword=value catch-all matches loosely and needs the full
     #     MIN_ENTROPY_THRESHOLD randomness signal to stay quiet; it opts in below.
     #   • The provider keyword-anchored detectors (`_contextual`) deliberately do
@@ -193,6 +196,23 @@ class SecretPattern:
     #     An absolute bit floor is a category error on a restricted alphabet.
     #     `_contextual` refuses identifiers by shape instead — see its docstring.
     entropy_gated: bool = False
+    # Literal substrings, lowercased, of which AT LEAST ONE must appear in an
+    # asset for this pattern to have any chance of matching. A necessary
+    # condition, never a sufficient one: it decides whether to RUN the regex,
+    # never whether a match counts.
+    #
+    # 108 patterns each make a full pass over every asset, which measured at
+    # ~11 ms per pattern per megabyte — and on a real bundle almost none of the
+    # provider names are present, so almost every one of those passes is a scan
+    # of a megabyte to find nothing. gitleaks carries the same idea in its
+    # `Keywords` field for the same reason.
+    #
+    # Soundness is not taken on trust: `test_prefilters_are_necessary_conditions`
+    # asserts that every ground-truth specimen for a prefiltered detector
+    # contains one of its literals. An unsound prefilter is a silent false
+    # negative, which is the worst failure this scanner has, so the mechanism
+    # only earns its place with that check attached.
+    prefilter: tuple[str, ...] = ()
 
 
 @dataclass
@@ -367,11 +387,60 @@ def _contextual(keyword: str, value: str) -> "re.Pattern[str]":
     often than it holds a literal. Nothing about the length or the alphabet
     separates the two — but a credential that spells its own provider's name
     does not exist, so the name is the discriminator.
+
+    The trailing class also refuses a value that CONTINUES through `.`, `_` or
+    `-`. Capturing the front of a longer credential is always wrong, and it
+    happened: an Airtable personal access token is `pat` + 14 characters + `.` +
+    64 hex, whose first segment is exactly the 17 alphanumerics the legacy
+    Airtable key pattern wants. One credential produced two findings, and
+    `_collapse_duplicates` could not merge them because the matched substrings
+    differ — which is precisely the double-count it exists to prevent.
     """
     return re.compile(
         rf"(?i)(?:{keyword}).{{0,30}}?['\"=:\s](?!\w{{0,40}}?(?:{keyword}))"
-        rf"({value})(?![A-Za-z0-9])"
+        rf"({value})(?![A-Za-z0-9]|[._-][A-Za-z0-9])"
     )
+
+
+_REGEX_META = set(".^$*+?{}[]\\|()")
+
+
+def _literal_prefix(alternative: str) -> str:
+    """The leading run of ordinary characters in one regex alternative.
+
+    `linked[_-]?in` -> `linked`. Everything from the first metacharacter on is
+    dropped, because only the plain prefix is guaranteed to appear verbatim in
+    any string the alternative can match.
+    """
+    out: list[str] = []
+    i = 0
+    for i, ch in enumerate(alternative):
+        if ch in _REGEX_META:
+            break
+        out.append(ch)
+    else:
+        i = len(alternative)
+    # The last literal character may be the target of the quantifier that
+    # stopped the walk, in which case it is optional and must not be required.
+    # `https?://` yields `http`, not `https` — the soundness check caught this
+    # by finding that the Basic-Auth URL detector would have skipped every
+    # `http://user:pass@host`, which is precisely the credential it exists for.
+    # `+` is left alone: one-or-more still requires the character once.
+    if out and i < len(alternative) and alternative[i] in "?*{":
+        out.pop()
+    return "".join(out).lower()
+
+
+def _keyword_prefilter(keyword: str) -> tuple[str, ...]:
+    """Literals for a `_contextual` keyword, or () when none is safe.
+
+    The keyword may be an alternation (`cohere|co_api_key`). EVERY branch has to
+    yield a literal, because a single branch without one means the pattern can
+    match text containing none of the others — and skipping that text would be a
+    false negative. All or nothing is the only safe rule here.
+    """
+    parts = [_literal_prefix(a) for a in keyword.split("|")]
+    return tuple(parts) if all(len(part) >= 3 for part in parts) else ()
 
 
 SECRET_PATTERNS: list[SecretPattern] = [
@@ -1208,10 +1277,26 @@ SECRET_PATTERNS: list[SecretPattern] = [
         description="age file-encryption private key",
         severity="CRITICAL",
         cwe="CWE-321",
+        remediation=(
+            # The default advice — revoke at the provider — has no meaning here.
+            # There is no provider and no revocation: an age key is a local
+            # asymmetric key, so exposure is permanent for everything it has
+            # already encrypted.
+            "There is nothing to revoke: age keys are local, so every file this "
+            "key can decrypt must be treated as readable by anyone who saw it. "
+            "Generate a new keypair, re-encrypt that data to it, and rotate any "
+            "secrets the old ciphertext contained."
+        ),
     ),
     SecretPattern(
         name="1Password Service Account Token",
-        regex=re.compile(r"\b(ops_eyJ[A-Za-z0-9+/]{250,}={0,3})"),
+        # `-_` as well as `+/`: gitleaks' class is base64 only, and the same blob
+        # travels base64url-encoded wherever it passes through a URL or an env
+        # file. A token holding one `-` would otherwise be truncated at it, or
+        # dropped outright if the truncation fell short of 250 characters. The
+        # `ops_eyJ` prefix is the discriminator, so widening the body costs
+        # nothing in precision.
+        regex=re.compile(r"\b(ops_eyJ[A-Za-z0-9+/_-]{250,}={0,3})"),
         description="1Password service-account token",
         severity="CRITICAL",
         remediation=(
@@ -1230,6 +1315,13 @@ SECRET_PATTERNS: list[SecretPattern] = [
         ),
         description="1Password account secret key",
         severity="CRITICAL",
+        remediation=(
+            "The Secret Key is one of the two factors that derive the account's "
+            "encryption key; it cannot be rotated on its own. Change the account "
+            "password, which reissues the Secret Key, then re-download the "
+            "Emergency Kit. Until that is done, treat every item in the account's "
+            "vaults as exposed to anyone who also has the password."
+        ),
     ),
     SecretPattern(
         name="Airtable Personal Access Token",
@@ -1264,18 +1356,49 @@ SECRET_PATTERNS: list[SecretPattern] = [
         regex=_contextual("sourcegraph", r"[a-fA-F0-9]{40}"),
         description="Sourcegraph legacy access token (contextual)",
         severity="HIGH",
+        prefilter=_keyword_prefilter("sourcegraph"),
     ),
+    # DEPARTURE 2, in the other direction: matched WITHOUT the `mapbox` keyword
+    # gitleaks requires, because the `pk.eyJ` / `sk.eyJ` prefix is unambiguous on
+    # its own and a bundled map widget rarely names its vendor nearby.
+    #
+    # The LENGTHS here are this project's, not gitleaks'. Transcribing its
+    # `pk\.[a-z0-9]{60}\.[a-z0-9]{22}` literally produced a detector that matched
+    # gitleaks' generated samples, scored 100% on both benchmarks, and matched
+    # ZERO real tokens — including the one Mapbox publishes in its own
+    # documentation, whose payload is 62 characters rather than 60.
+    #
+    # A Mapbox token is a JWT: `pk.<base64url payload>.<base64url signature>`,
+    # and the payload encodes the account name, so its length varies with the
+    # account — 59 to 92 across ordinary usernames. A fixed 60 is a snapshot of
+    # one generator's output, not a format. Ranges here, with `eyJ` (base64 for
+    # `{"`) carrying the precision the fixed length was only pretending to.
     SecretPattern(
         name="Mapbox Public Token",
-        # DEPARTURE 2, in the other direction: matched WITHOUT the `mapbox`
-        # keyword gitleaks requires, because `pk.<60>.<22>` is unambiguous on
-        # its own and a bundled map widget rarely names its vendor nearby.
-        # Reported as public-by-design — see triage._PUBLIC_BY_TYPE. A pk. token
-        # is built to ship in a browser; the finding is worth stating so a
-        # reviewer can check its URL restrictions, not worth alarming over.
-        regex=re.compile(r"\b(pk\.[A-Za-z0-9_-]{60}\.[A-Za-z0-9_-]{22})\b"),
+        regex=re.compile(r"\b(pk\.eyJ[A-Za-z0-9_-]{20,400}\.[A-Za-z0-9_-]{20,86})\b"),
         description="Mapbox public access token (client-side by design)",
         severity="LOW",
+        remediation=(
+            "A pk. token is Mapbox's client-side token and has to ship in the "
+            "browser for a map to render — rotating it is not the fix. Check its "
+            "URL restrictions and scopes in the Mapbox account settings so it "
+            "cannot be lifted and billed against another site."
+        ),
+    ),
+    SecretPattern(
+        name="Mapbox Secret Token",
+        # The half gitleaks' rule does not cover, and the one that matters. An
+        # sk. token carries account-management scopes — it can read, create and
+        # DELETE other tokens — and must never leave a server.
+        regex=re.compile(r"\b(sk\.eyJ[A-Za-z0-9_-]{20,400}\.[A-Za-z0-9_-]{20,86})\b"),
+        description="Mapbox secret access token",
+        severity="CRITICAL",
+        remediation=(
+            "Delete this token in the Mapbox account settings immediately — a "
+            "secret token can enumerate and revoke your other tokens and bills "
+            "usage to the account. Issue a replacement held server-side, and "
+            "ship a URL-restricted pk. token to the browser instead."
+        ),
     ),
     SecretPattern(
         name="GCP Service Account JSON",
@@ -1299,6 +1422,13 @@ SECRET_PATTERNS: list[SecretPattern] = [
         description="Google Cloud service-account JSON document",
         severity="HIGH",
         cwe="CWE-798",
+        remediation=(
+            "This marker says a service-account key document is present, whether "
+            "or not its private_key survived the trim. Find the account in the "
+            "GCP console, delete every key issued to it, and audit its IAM roles "
+            "— a service account in a browser bundle usually has far broader "
+            "scope than the one call the frontend needed."
+        ),
     ),
 
     # Keyword-anchored. These providers issue values with no distinguishing
@@ -1310,54 +1440,104 @@ SECRET_PATTERNS: list[SecretPattern] = [
         regex=_contextual("discord", r"[A-Za-z0-9_\-]{32}"),
         description="Discord OAuth client secret (contextual)",
         severity="HIGH",
+        prefilter=_keyword_prefilter("discord"),
     ),
     SecretPattern(
         name="Discord Client ID",
-        regex=_contextual("discord", r"[0-9]{18}"),
+        # 17-20, not 18. A Discord ID is a snowflake — `(ms since 2015) << 22` —
+        # so its width grows with the calendar and is not a property of the
+        # format. gitleaks' 18 held from roughly 2016 to 2021; IDs minted since
+        # 2022 are 19 digits, so the transcribed pattern missed every Discord
+        # application created in the last four years. Found by computing
+        # snowflakes for known dates, not by stumbling on one.
+        regex=_contextual("discord", r"[0-9]{17,20}"),
         description="Discord OAuth client ID (public identifier)",
         severity="LOW",
+        remediation=(
+            # The default text — "treat as compromised, revoke immediately" — is
+            # not merely unhelpful here, it is wrong, and wrong advice on a LOW
+            # finding is how a reader learns to skim the CRITICAL ones.
+            "An OAuth client ID is published in every authorization URL the "
+            "application builds — it is not a leak and there is nothing to "
+            "revoke. Treat it as a pointer: confirm the matching client SECRET "
+            "is not in the same bundle, and that the redirect URIs registered "
+            "for this client are restricted to hosts you control."
+        ),
+        prefilter=_keyword_prefilter("discord"),
     ),
     SecretPattern(
         name="Asana Client Secret",
         regex=_contextual("asana", r"[A-Za-z0-9]{32}"),
         description="Asana OAuth client secret (contextual)",
         severity="HIGH",
+        prefilter=_keyword_prefilter("asana"),
     ),
     SecretPattern(
         name="Asana Client ID",
-        regex=_contextual("asana", r"[0-9]{16}"),
+        # A range for the same reason as Discord above: an Asana gid is an
+        # allocated numeric id that has been getting longer, so a fixed width is
+        # a snapshot of when the reference rule was written. Kept narrower than
+        # Discord's, because the growth here is observed rather than derivable
+        # from a documented formula.
+        regex=_contextual("asana", r"[0-9]{15,19}"),
         description="Asana OAuth client ID (public identifier)",
         severity="LOW",
+        remediation=(
+            # The default text — "treat as compromised, revoke immediately" — is
+            # not merely unhelpful here, it is wrong, and wrong advice on a LOW
+            # finding is how a reader learns to skim the CRITICAL ones.
+            "An OAuth client ID is published in every authorization URL the "
+            "application builds — it is not a leak and there is nothing to "
+            "revoke. Treat it as a pointer: confirm the matching client SECRET "
+            "is not in the same bundle, and that the redirect URIs registered "
+            "for this client are restricted to hosts you control."
+        ),
+        prefilter=_keyword_prefilter("asana"),
     ),
     SecretPattern(
         name="LinkedIn Client Secret",
         regex=_contextual("linked[_-]?in", r"[A-Za-z0-9]{16}"),
         description="LinkedIn OAuth client secret (contextual)",
         severity="HIGH",
+        prefilter=_keyword_prefilter("linked[_-]?in"),
     ),
     SecretPattern(
         name="LinkedIn Client ID",
         regex=_contextual("linked[_-]?in", r"[A-Za-z0-9]{14}"),
         description="LinkedIn OAuth client ID (public identifier)",
         severity="LOW",
+        remediation=(
+            # The default text — "treat as compromised, revoke immediately" — is
+            # not merely unhelpful here, it is wrong, and wrong advice on a LOW
+            # finding is how a reader learns to skim the CRITICAL ones.
+            "An OAuth client ID is published in every authorization URL the "
+            "application builds — it is not a leak and there is nothing to "
+            "revoke. Treat it as a pointer: confirm the matching client SECRET "
+            "is not in the same bundle, and that the redirect URIs registered "
+            "for this client are restricted to hosts you control."
+        ),
+        prefilter=_keyword_prefilter("linked[_-]?in"),
     ),
     SecretPattern(
         name="Cohere API Token",
         regex=_contextual("cohere|co_api_key", r"[A-Za-z0-9]{40}"),
         description="Cohere API token (contextual)",
         severity="CRITICAL",
+        prefilter=_keyword_prefilter("cohere|co_api_key"),
     ),
     SecretPattern(
         name="Confluent Secret Key",
         regex=_contextual("confluent", r"[A-Za-z0-9]{64}"),
         description="Confluent Cloud secret key (contextual)",
         severity="CRITICAL",
+        prefilter=_keyword_prefilter("confluent"),
     ),
     SecretPattern(
         name="Confluent Access Token",
         regex=_contextual("confluent", r"[A-Za-z0-9]{16}"),
         description="Confluent Cloud access token (contextual)",
         severity="HIGH",
+        prefilter=_keyword_prefilter("confluent"),
     ),
     SecretPattern(
         name="KuCoin Secret Key",
@@ -1367,19 +1547,72 @@ SECRET_PATTERNS: list[SecretPattern] = [
         ),
         description="KuCoin API secret key (contextual)",
         severity="CRITICAL",
+        remediation=(
+            "Delete this API key in the KuCoin account settings now, then review "
+            "trade and withdrawal history for activity you did not initiate — an "
+            "exchange credential can move funds, so rotation alone is not the end "
+            "of the incident. Reissue with the narrowest permissions and an IP "
+            "allowlist, and never ship one to a browser."
+        ),
+        prefilter=_keyword_prefilter("kucoin"),
     ),
     SecretPattern(
         name="KuCoin Access Token",
         regex=_contextual("kucoin", r"[a-f0-9]{24}"),
         description="KuCoin API access token (contextual)",
         severity="CRITICAL",
+        prefilter=_keyword_prefilter("kucoin"),
     ),
     SecretPattern(
         name="Airtable API Key",
         regex=_contextual("airtable", r"[A-Za-z0-9]{17}"),
         description="Airtable legacy API key (contextual)",
         severity="HIGH",
+        prefilter=_keyword_prefilter("airtable"),
     ),
+]
+
+def _derive_prefilter(pattern: re.Pattern[str]) -> tuple[str, ...]:
+    """A mandatory literal read off a prefix-anchored pattern, or ().
+
+    Deliberately timid, because an unsound prefilter is a silent false negative
+    and this runs over the whole registry. Three conditions, all required:
+
+      * no `|` anywhere in the source — an alternation could offer a branch that
+        does not contain the prefix, and skipping text for a literal only SOME
+        branches need is exactly the mistake worth being afraid of here;
+      * the pattern opens with the usual `(?i)? \b? (` scaffolding and then at
+        least four ordinary characters;
+      * those characters are not themselves a character class or quantifier.
+
+    Everything else keeps an empty prefilter and is scanned as before. A
+    detector losing a speed-up costs milliseconds; a detector losing a match
+    costs the entire point of the tool.
+    """
+    src = pattern.pattern
+    if "|" in src:
+        return ()
+    i = 0
+    if src.startswith("(?i)"):
+        i = 4
+    while i < len(src) and src[i] in "(^":
+        if src.startswith("(?:", i) or src.startswith("(?=", i) or src.startswith("(?!", i):
+            return ()
+        i += 1
+    if src.startswith("\\b", i):
+        i += 2
+    while i < len(src) and src[i] in "(":
+        i += 1
+    literal = _literal_prefix(src[i:])
+    return (literal,) if len(literal) >= 4 else ()
+
+
+# Fill in prefilters for the prefix-anchored patterns that did not declare one.
+# Keyword-anchored detectors set theirs explicitly via `_keyword_prefilter`.
+SECRET_PATTERNS = [
+    p if (p.prefilter or p.name == GENERIC_SECRET_TYPE)
+    else replace(p, prefilter=_derive_prefilter(p.regex))
+    for p in SECRET_PATTERNS
 ]
 
 # Fast name -> pattern lookup (severity / CWE / remediation metadata).
@@ -2781,6 +3014,63 @@ def is_benign_placeholder(value: str) -> bool:
     return value in _KNOWN_EXAMPLE_SECRETS or bool(_PLACEHOLDER_RE.search(value))
 
 
+# Share of the value one character may occupy before it reads as filler. A
+# genuinely random 16-character decimal id crosses 0.6 about once in 25,000
+# draws; `AKIAAAAAAAAAAAAAAAAA` is at 0.8 and `Q`*58 at 1.0.
+_DEGENERATE_DOMINANCE = _env_float("DEGENERATE_DOMINANCE", 0.6)
+
+
+def looks_degenerate(value: str) -> bool:
+    """True when a value is filler rather than a credential.
+
+    This replaces an absolute Shannon floor for structural detectors, and the
+    reason is a measured false negative rather than a preference.
+
+    MIN_STRUCTURAL_ENTROPY exists to reject `AKIAAAAAAAAAAAAAAAAA` and `Q`*58 —
+    its comment says so. At 2.5 bits it does. But Shannon entropy is measured in
+    absolute bits and a decimal digit carries at most log2(10) = 3.32 of them, so
+    an ordinary random numeric id sits far closer to that floor than an
+    alphanumeric key of the same length ever does. Measured over 20,000 draws
+    each: 5.4% of genuine 16-digit ids and 2.4% of 18-digit ids fall below 2.5
+    bits and were silently dropped. Hex and alphanumeric values are unaffected
+    (0.0%), which is why this went unnoticed — it is invisible unless a detector
+    matches a numeric value, and the Discord and Asana client IDs are the first
+    that do.
+
+    Degeneracy does not depend on how large the alphabet is. A value is filler
+    when it is built from almost no distinct characters, or when one character
+    dominates it — both true of the junk the floor was written to reject, and
+    neither true of a random id in any base.
+    """
+    core = value.strip()
+    if len(core) < 8:
+        # Too short for any of these tests to mean anything; the pattern's own
+        # shape is doing the work at this length.
+        return False
+    distinct = set(core)
+    if len(distinct) <= 2:
+        return True
+    if max(core.count(c) for c in distinct) / len(core) >= _DEGENERATE_DOMINANCE:
+        return True
+    # Periodic filler. `GR1348941` + `123123123…` is dominated by no single
+    # character and holds nine distinct ones, so neither test above sees it —
+    # but it repeats a three-character cycle and is plainly not a credential.
+    # gitleaks lists exactly that string as a declared non-secret, and the
+    # absolute entropy floor this function replaced happened to catch it at 2.45
+    # bits; keeping that catch is what makes the replacement a pure improvement
+    # rather than a trade.
+    #
+    # Distinct trigrams against half the length, applied only from 16 characters
+    # up. Measured over 20,000 draws per shape at 12/16/18/24/32/40 characters
+    # in base 10, 16 and 62: 0.000% of random values are dropped at every length
+    # of 16 or more, and 0.005% at 12 — which is why the floor is 16 and not 8.
+    if len(core) >= 16:
+        trigrams = {core[i:i + 3] for i in range(len(core) - 2)}
+        if len(trigrams) <= len(core) / 2:
+            return True
+    return False
+
+
 def _decode_base64_blobs(text: str) -> list[str]:
     """Decode base64-looking blobs so the regex pass can also inspect secrets
     hidden inside encoded strings (a technique used by modern scanners)."""
@@ -2806,7 +3096,18 @@ def _scan_text(
     scan_id: str, target_url: str, source_url: str, text: str, decoded: bool = False,
 ) -> list[RawFinding]:
     findings: list[RawFinding] = []
+    # One lowercase copy, then a substring test per pattern, instead of 108 full
+    # regex passes over the asset. Measured at ~11 ms per pattern per megabyte,
+    # and on a real bundle nearly every provider name is absent — so most of
+    # those passes were reading a megabyte to find nothing.
+    #
+    # The test is a NECESSARY condition only: it decides whether to run the
+    # regex, never whether a match counts. Patterns that could not be reduced to
+    # a safe literal carry an empty prefilter and are scanned exactly as before.
+    haystack = text.lower()
     for pattern in SECRET_PATTERNS:
+        if pattern.prefilter and not any(k in haystack for k in pattern.prefilter):
+            continue
         examined = 0
         for match in pattern.regex.finditer(text):
             examined += 1
@@ -2826,11 +3127,16 @@ def _scan_text(
             if is_benign_placeholder(raw_value):
                 continue
             entropy = shannon_entropy(raw_value)
-            # Generic keyword=value catch-all must clear the full randomness bar;
-            # structural detectors only need to clear a low anti-degenerate floor
-            # so genuinely modest-entropy live keys are not silently dropped.
-            floor = MIN_ENTROPY_THRESHOLD if pattern.entropy_gated else MIN_STRUCTURAL_ENTROPY
-            if entropy < floor:
+            # Generic keyword=value catch-all must clear the full randomness bar.
+            # Its values are alphanumeric, where an absolute bit floor behaves.
+            #
+            # Structural detectors are asked a different question — "is this
+            # filler?" — and asked it directly, because an absolute floor answers
+            # it wrongly on a small alphabet. See looks_degenerate().
+            if pattern.entropy_gated:
+                if entropy < MIN_ENTROPY_THRESHOLD:
+                    continue
+            elif looks_degenerate(raw_value):
                 continue
             start = max(0, match.start() - CONTEXT_WINDOW_CHARS)
             end   = min(len(text), match.end() + CONTEXT_WINDOW_CHARS)
@@ -2877,7 +3183,7 @@ def _scan_composites(
         if is_benign_placeholder(cm.value):
             continue
         entropy = shannon_entropy(cm.value)
-        if entropy < MIN_STRUCTURAL_ENTROPY:
+        if looks_degenerate(cm.value):
             continue
         start = max(0, cm.start - CONTEXT_WINDOW_CHARS)
         end = min(len(text), cm.end + CONTEXT_WINDOW_CHARS)

@@ -43,6 +43,7 @@ whose declared and embedded values differed because the RNG was called twice.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import random
@@ -294,10 +295,22 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     add(plain("Airtable Personal Access Token",
               "pat" + r(ALNUM, 14) + "." + r(HEX, 64)))
     add(plain("Sourcegraph Access Token", "sgp_" + r(HEX, 16) + "_" + r(HEX, 40)))
+    # Mapbox tokens are JWTs, and the payload encodes the account name — so its
+    # length varies with the account and a fixed width is a snapshot, not a
+    # format. The v2.16.0 specimen was 60 random characters because the DETECTOR
+    # said 60, and both scored 1.000 while matching no real token. Built from the
+    # documented structure now: `pk.` + base64url of a claims object + signature.
+    def _mapbox(prefix: str, account: str) -> str:
+        claims = base64.urlsafe_b64encode(
+            json.dumps({"u": account, "a": r(LOWER + DIGITS, 25)}).encode()
+        ).decode().rstrip("=")
+        return f"{prefix}.{claims}.{r(URLSAFE, 22)}"
+
     # Public by design: a pk. token has to reach the browser for a map to draw.
-    add(plain("Mapbox Public Token", "pk." + r(URLSAFE, 60) + "." + r(URLSAFE, 22),
-              kind="public",
+    add(plain("Mapbox Public Token", _mapbox("pk", "acme-maps"), kind="public",
               note="Mapbox client-side token; restrict by URL rather than hide."))
+    # The half that must never leave a server: it can revoke the others.
+    add(plain("Mapbox Secret Token", _mapbox("sk", "acme-maps")))
 
     # A cookie, not a token — it carries its own `name=` and cannot be `plain()`.
     add(Specimen("GitLab Session Cookie", "_gitlab_session=" + (gl := r(HEX, 32)),
@@ -443,11 +456,18 @@ def _self_validate(corpus: Corpus) -> None:
                 f"{s.pattern}: declared value != captured value ({s.value!r} vs {got!r})")
         if scanner.is_benign_placeholder(s.value):
             problems.append(f"{s.pattern}: value would be dropped as a placeholder")
-        floor = (scanner.MIN_ENTROPY_THRESHOLD if pat.entropy_gated
-                 else scanner.MIN_STRUCTURAL_ENTROPY)
-        ent = scanner.shannon_entropy(s.value)
-        if ent < floor:
-            problems.append(f"{s.pattern}: entropy {ent:.2f} below floor {floor}")
+        # The same two questions the scanner asks, asked the same way. This used
+        # a single absolute floor for both classes, which meant the corpus could
+        # certify a specimen the scanner would then drop — or, worse, fail to
+        # warn about one it would.
+        if pat.entropy_gated:
+            ent = scanner.shannon_entropy(s.value)
+            if ent < scanner.MIN_ENTROPY_THRESHOLD:
+                problems.append(
+                    f"{s.pattern}: entropy {ent:.2f} below floor "
+                    f"{scanner.MIN_ENTROPY_THRESHOLD}")
+        elif scanner.looks_degenerate(s.value):
+            problems.append(f"{s.pattern}: value would be dropped as degenerate filler")
 
     missing = known - seen
     if missing:

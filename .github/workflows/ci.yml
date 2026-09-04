@@ -44,6 +44,15 @@ jobs:
       - name: Detection quality gate (precision/recall)
         run: make bench
 
+      # The labelled corpus above and the ground-truth corpus both derive their
+      # specimens from the registry's own regexes, so neither can tell you that a
+      # pattern's LENGTH is wrong — it will happily match the specimen it
+      # generated. This corpus is built from issuer documentation instead, and it
+      # is release-blocking for the same reason: a detector that cannot match a
+      # real credential turns a scan into a CLEAN verdict it has not earned.
+      - name: Vendor-shape gate (do the patterns match real credentials?)
+        run: make bench-vendor
+
   docker-build:
     runs-on: ubuntu-latest
     steps:
