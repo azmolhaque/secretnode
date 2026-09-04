@@ -99,6 +99,32 @@ _PUBLIC_BY_TYPE: dict[str, str] = {
         "A phc_ project key is a write-only ingest identifier intended for "
         "browser use; it grants no read access to captured data."
     ),
+    # OAuth client identifiers. The ID half of an OAuth pair is published in
+    # every authorization URL the application builds — it is not merely
+    # tolerable in client code, it cannot function anywhere else. Detecting it
+    # is still worth doing: it names the integration, and it is the marker that
+    # says look nearby for the secret half. Reporting it as an exposure is not.
+    "Discord Client ID": (
+        "An OAuth client ID travels in every authorization URL the app builds. "
+        "It identifies the integration; the client SECRET is the half that "
+        "carries risk."
+    ),
+    "Asana Client ID": (
+        "An OAuth client ID travels in every authorization URL the app builds. "
+        "It identifies the integration; the client SECRET is the half that "
+        "carries risk."
+    ),
+    "LinkedIn Client ID": (
+        "An OAuth client ID travels in every authorization URL the app builds. "
+        "It identifies the integration; the client SECRET is the half that "
+        "carries risk."
+    ),
+    "Mapbox Public Token": (
+        "A pk. token is Mapbox's client-side token and must ship in the browser "
+        "for a map to render. Worth checking its URL restrictions and scopes in "
+        "the Mapbox dashboard; not worth reporting as a leak. The sk. half is "
+        "the secret one."
+    ),
 }
 
 # ── Public-by-design: only in the right context ──────────────────────────────

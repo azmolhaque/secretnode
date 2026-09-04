@@ -4,52 +4,68 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 ![Tests](https://img.shields.io/badge/tests-805%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.15.1-blue)
+![Version](https://img.shields.io/badge/version-2.16.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
 Passive Attack Surface Management scanner for detecting credential leaks in public-facing infrastructure.
-Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (85 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
+Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (107 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.15.1 — two-year-old pins, and a dependency that was never used** ·
+> **v2.16.0 — the benchmark was still manufacturing defects, one level deeper** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> A live deep scan of a 258-subdomain estate. v2.13.1's coverage verdict and
-> posture section both worked on it; reading the report against its own CSV
-> turned up three defects anyway.
+> v2.15.0 rebuilt the external benchmark after it turned out to be inventing the
+> misses it reported. This release went to close the 23 gaps that corrected
+> benchmark named — and found the corrected benchmark was still doing it.
 >
-> **`i.test` was still there, from a construct the earlier fix never saw.** The
-> bundle supplied with the report came back *clean* when tested directly, which
-> pointed at a different shape: `/^https?:\/\//i.test(u)`, the idiomatic
-> absolute-URL test. v2.13.1 taught the stripper to recognise a regex literal but
-> left its text in place — and that literal's own escaped slashes spell
-> `//i.test`. Bodies are now blanked; a host inside a pattern has escaped dots
-> and was never extractable anyway.
+> **Five of the eleven "in-scope misses" were the harness dropping a prefix.**
+> gitleaks writes some samples as `"sk-ant-api03-" + NewSecret(…) + "AA"`. The
+> extractor handled the plural `GenerateSampleSecrets` and not the singular, so
+> those fell through to a path that returned only the generated middle — 93 bare
+> characters with the prefix removed. No prefix-anchored detector can match a
+> specimen with its prefix deleted. Fixing the extractor closed five misses
+> without touching a single pattern, and recall moved 89.0% → 91.0% on work that
+> was never a scanner defect.
 >
-> **Blanking then turned a harmless misparse into a dropped finding**, caught by a
-> test predating all of this work. `</script>` opens with a slash exactly where a
-> literal would, so scanning on swallowed a real external host out of the graph.
-> Latent and free for two releases; a false negative only once an unrelated
-> improvement changed what happened to the text it mis-tokenised.
+> **And `age` was filed as a miss because "age" is inside "Azure StorAGE".** The
+> in-scope test was a substring check, so a provider with no detector at all
+> landed in the bucket documented as *the only bucket that is a defect*.
 >
-> **One host's evidence was printed for a whole posture group** — `server:
-> AmazonS3` shown against a host actually disclosing `Microsoft-IIS/10.0`. For
-> version disclosure the evidence *is* the finding. And **`AmazonS3` is not a
-> version disclosure**: the check was `any(c.isdigit())`, and the 3 is part of a
-> product name.
+> What was genuinely missing then got built: **22 new detectors** (85 → 107) —
+> 1Password, age, Airtable, Asana, Cohere, Confluent, KuCoin, LinkedIn, Mapbox,
+> Sourcegraph, plus the Artifactory reference token, GitLab session cookie and
+> GCP service-account marker. **External recall is now 99.1% with a 0.0%
+> false-alarm rate**, and no provider in gitleaks' corpus is unclaimed.
 >
-> The two releases before it: **v2.14.1** bounded three limits that were
-> documented, asserted or implied but unenforced; **v2.14.0** gave recall a number
-> measured against a corpus this project did not write (80.6%), which immediately
-> found the current OpenAI key formats undetected.
+> **Two precision defects, both found by measuring rather than reading.**
+> `-----BEGIN OPENSSH PRIVATE KEY----------END…-----` — a header with zero key
+> material — was reported CRITICAL, because the pattern asked only for the
+> marker. And 13 of the 14 false alarms in the whole corpus were one vendor's
+> documentation: Firebase's Android SDK sample keys, which gitleaks carries in a
+> hard-coded allowlist and this scanner carried three of.
+>
+> Two specimens are still not matched, and the benchmark now says so out loud in
+> a `declined` line rather than hiding them in recall: AWS's published
+> `…EXAMPLE` key, and 58 identical characters. Refusing those is the filter
+> working. The bucket only accepts a mechanism the scanner actually applies —
+> a bucket that can absorb any miss has stopped measuring anything.
+>
+> Scanning this release's own diff with this scanner then reported
+> `linkedInClientId` as a LinkedIn client secret — a variable **name** where a
+> value goes. The obvious fix, an entropy floor, was the wrong one: 3.5 bits
+> assumes a 62-character alphabet, and an 18-digit client ID tops out at 3.32
+> however random it is. A contextual detector now refuses a value that contains
+> its own provider's keyword instead.
+>
+> Also: **Tier 2 AI validation moves to `gemini-3.8-flash`**, same $0.75/$3.75
+> as the 3.6 Flash it replaces.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
-
 ---
 
 ## Architecture
@@ -84,7 +100,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 │                                                                  │
 │  validate_with_gemini()  — two-tier engine (google-genai SDK)   │
 │    └─ Tier 1 pre-filter:  gemini-3.5-flash-lite (thinking:min)  │
-│    └─ Tier 2 deep-valid.: gemini-3.6-flash      (thinking:high) │
+│    └─ Tier 2 deep-valid.: gemini-3.8-flash      (thinking:high) │
 │    └─ Structured output → Pydantic GeminiVerdict               │
 │       {is_valid, confidence, reason}                            │
 │                                                                  │
@@ -102,7 +118,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 | HTTP | `httpx.AsyncClient` | Native async, connection pooling, retries |
 | Concurrency | `asyncio.Semaphore(20)` | Bounds *in-flight fetches* — not retained bytes |
 | Memory ceiling | `MAX_TOTAL_ASSET_BYTES` (256 MB) | Bounds what a scan *keeps*; the semaphore never did |
-| AI | Two-tier Gemini (`google-genai`): 3.5-flash-lite → 3.6-flash | Cheap pre-filter kills noise; strong tier deep-validates real/critical findings with structured output |
+| AI | Two-tier Gemini (`google-genai`): 3.5-flash-lite → 3.8-flash | Cheap pre-filter kills noise; strong tier deep-validates real/critical findings with structured output |
 | Transport | WebSocket fan-out | Browser gets live logs without polling |
 | Frontend | Vanilla JS, self-hosted CSS + fonts | Zero build step, deployable immediately, fully offline-capable (no Tailwind CDN — removed; see `frontend/index.html`) |
 
@@ -114,7 +130,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 secretnode/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + WebSocket + static server + auth/SSRF guards
-│   ├── scanner.py           # Async scan engine (85 patterns, source maps, entropy, base64, Gemini, Discord)
+│   ├── scanner.py           # Async scan engine (107 patterns, source maps, entropy, base64, Gemini, Discord)
 │   ├── verifier.py          # Optional live credential verification (off by default)
 │   ├── netguard.py          # "May this scanner request this?" — pre-flight AND every redirect hop
 │   ├── triage.py            # Deterministic verdicts with no API key, no network, no model

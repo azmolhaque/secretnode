@@ -40,7 +40,12 @@ def _hits(body: str) -> set[str]:
         ("HashiCorp Vault Token",       f'k="hvs.{_rnd(30)}"'),
         ("Telegram Bot Token",          f'tg="1234567890:{_rnd(35)}"'),
         ("Database Connection URI",     'DB="postgres://admin:' + _rnd(16) + '@db.example.com:5432/app"'),
-        ("PGP Private Key Block",       "-----BEGIN PGP PRIVATE KEY BLOCK-----"),
+        # Header AND body. The bare marker used to match; since v2.16.0 an empty
+        # PEM/PGP block is refused, because a header with nothing behind it is
+        # not a key — it is a template that never rendered.
+        ("PGP Private Key Block",
+         "-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\n"
+         + _rnd(64) + "\n-----END PGP PRIVATE KEY BLOCK-----"),
         ("Bearer Token",                f"Authorization: Bearer {_rnd(40)}"),
     ],
 )

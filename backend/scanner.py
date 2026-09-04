@@ -53,7 +53,14 @@ VERIFY_SECRETS: bool       = os.environ.get("VERIFY_SECRETS", "false").lower() =
 #
 # Defaults track Google's current lineup: Tier 1 on 3.5 Flash-Lite (fastest /
 # most cost-effective 3.5-class, ideal for the high-volume pre-filter) and Tier 2
-# on 3.6 Flash (stronger coding/reasoning workhorse).
+# on 3.8 Flash (stronger reasoning workhorse).
+#
+# Tier 2 moved 3.6 Flash -> 3.8 Flash in v2.16.0. Both bill at $0.75 / $3.75 per
+# million tokens, so this is strictly more capability at identical cost, and the
+# call was verified against a real key before the default changed rather than
+# read off a price list. Tier 1 stays on 3.5 Flash-Lite: the pre-filter's job is
+# to be cheap and high-volume, and it is not the tier that renders a verdict on
+# a critical finding.
 #
 # This comment used to recommend the security-specialised "Flash Cyber" model
 # for Tier 2 "once your key can call it". No ordinary key ever will: the Cyber
@@ -65,7 +72,7 @@ VERIFY_SECRETS: bool       = os.environ.get("VERIFY_SECRETS", "false").lower() =
 # See .env.example for the full note.
 _LEGACY_MODEL              = os.environ.get("GEMINI_MODEL", "").strip()
 GEMINI_TIER1_MODEL: str    = os.environ.get("GEMINI_TIER1_MODEL", _LEGACY_MODEL or "gemini-3.5-flash-lite")
-GEMINI_TIER2_MODEL: str    = os.environ.get("GEMINI_TIER2_MODEL", "gemini-3.6-flash")
+GEMINI_TIER2_MODEL: str    = os.environ.get("GEMINI_TIER2_MODEL", "gemini-3.8-flash")
 GEMINI_TIER1_THINKING: str = os.environ.get("GEMINI_TIER1_THINKING", "minimal")
 GEMINI_TIER2_THINKING: str = os.environ.get("GEMINI_TIER2_THINKING", "high")
 # Severities that ALWAYS escalate to the deep tier, even if the cheap pre-filter
@@ -176,6 +183,15 @@ class SecretPattern:
     #     silently drops real credentials (a false negative, the worst failure).
     #   • The generic keyword=value catch-all matches loosely and needs the full
     #     MIN_ENTROPY_THRESHOLD randomness signal to stay quiet; it opts in below.
+    #   • The provider keyword-anchored detectors (`_contextual`) deliberately do
+    #     NOT opt in, and the reason is worth recording. They have the same
+    #     looseness, so the entropy gate was the obvious answer — and it is the
+    #     wrong one. MIN_ENTROPY_THRESHOLD is 3.5 bits, which silently assumes a
+    #     ~62-character alphabet: an 18-digit Discord client ID tops out at
+    #     log2(10) = 3.32 and can never pass, however random it is. Gating them
+    #     dropped four external specimens, every one of them digit- or hex-only.
+    #     An absolute bit floor is a category error on a restricted alphabet.
+    #     `_contextual` refuses identifiers by shape instead — see its docstring.
     entropy_gated: bool = False
 
 
@@ -327,6 +343,36 @@ class ValidatedFinding:
 # needs to know which detector is the fallback: when a provider-specific detector
 # has already typed a credential, the generic claim on the same value is dropped.
 GENERIC_SECRET_TYPE = "Generic High-Entropy Secret"
+
+def _contextual(keyword: str, value: str) -> "re.Pattern[str]":
+    """`keyword … = value`, for providers whose value carries no shape at all.
+
+    Asana, Confluent, KuCoin and the rest issue plain runs of alphanumerics.
+    Nothing about `a7Fk…` says "Asana", so the provider name within thirty
+    characters is the entire discriminator — the same construction as the
+    Datadog and Heroku patterns above, factored out because this batch needed
+    it eleven times.
+
+    The separator class accepts the quoted form a JS bundle uses AND the bare
+    `KEY=value` of a `.env` file or a shell export. Both reach this scanner: an
+    exposed `.env` is one of the things it looks for, and gitleaks' own sample
+    for Cohere is `export CO_API_KEY=…` with no quotes anywhere. A quote-only
+    separator matched the bundle case and silently missed the file case.
+
+    The lookahead refuses a value that CONTAINS the provider keyword, because
+    that is a variable name and not a credential. Scanning this release's own
+    diff with this scanner reported `linkedInClientId` as a LinkedIn client
+    secret: sixteen alphanumerics, sitting exactly where a value goes, and in
+    real code an assignment reads `linkedin_secret: linkedInSecret` far more
+    often than it holds a literal. Nothing about the length or the alphabet
+    separates the two — but a credential that spells its own provider's name
+    does not exist, so the name is the discriminator.
+    """
+    return re.compile(
+        rf"(?i)(?:{keyword}).{{0,30}}?['\"=:\s](?!\w{{0,40}}?(?:{keyword}))"
+        rf"({value})(?![A-Za-z0-9])"
+    )
+
 
 SECRET_PATTERNS: list[SecretPattern] = [
     SecretPattern(
@@ -482,6 +528,19 @@ SECRET_PATTERNS: list[SecretPattern] = [
         name="Private Key Block",
         regex=re.compile(
             r"(-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)"
+            # A header with nothing behind it is not a key. Empty PEM blocks ship
+            # for real — templates that never rendered, fixtures, configs stripped
+            # before publication — and each one was reported CRITICAL, because the
+            # pattern asked only for the marker. Found by measuring this scanner
+            # against gitleaks' declared non-secrets, where the empty OPENSSH block
+            # is listed for exactly this reason.
+            #
+            # The lookahead demands real key material without capturing it: the
+            # reported value stays the header alone, so masking, fingerprints and
+            # memory are unchanged. The window is 300 characters rather than zero
+            # because an encrypted key puts `Proc-Type:` and `DEK-Info:` between
+            # the header and its base64, and those must still be found.
+            r"(?=[\s\S]{0,300}?[A-Za-z0-9+/]{32})"
         ),
         description="PEM Private Key Block",
         severity="CRITICAL",
@@ -855,7 +914,13 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="PGP Private Key Block",
-        regex=re.compile(r"(-----BEGIN PGP PRIVATE KEY BLOCK-----)"),
+        regex=re.compile(
+            r"(-----BEGIN PGP PRIVATE KEY BLOCK-----)"
+            # Same empty-block guard as the PEM detector above. A PGP armor
+            # header may be followed by `Version:`/`Comment:` lines before the
+            # base64 begins, which the 300-character window accommodates.
+            r"(?=[\s\S]{0,300}?[A-Za-z0-9+/]{32})"
+        ),
         description="PGP private key block",
         severity="CRITICAL",
         cwe="CWE-321",   # Use of Hard-coded Cryptographic Key
@@ -1096,6 +1161,223 @@ SECRET_PATTERNS: list[SecretPattern] = [
         name="Brevo (Sendinblue) API Token",
         regex=re.compile(r"\b(xkeysib-[a-f0-9]{64}-[A-Za-z0-9]{16})\b"),
         description="Brevo / Sendinblue transactional-email API key",
+        severity="HIGH",
+    ),
+
+    # ── Providers added from gitleaks' rule definitions (v2.16.0) ────────────
+    #
+    # The remainder of the "provider never claimed" bucket, plus the four rules
+    # this scanner claimed a provider for and still missed. Same rule as the
+    # v2.15.0 batch: every shape below is transcribed from gitleaks' published
+    # regex rather than inferred from one observed sample.
+    #
+    # Two deliberate departures from the reference are marked at their pattern.
+    # A transcription is not an obligation to copy a pattern this scanner would
+    # not otherwise accept.
+
+    # Structure-anchored: a distinctive prefix carries the whole match, so these
+    # need no neighbouring keyword and stay high-precision on minified bundles.
+    SecretPattern(
+        name="Artifactory Reference Token",
+        # `cmVmd` is base64 for `refe…` — the token's own prefix, encoded.
+        # Separate from the AKCp API key above because Artifactory issues both
+        # and they share no shape.
+        regex=re.compile(r"\b(cmVmd[A-Za-z0-9]{59})\b"),
+        description="JFrog Artifactory reference token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="GitLab Session Cookie",
+        # Not an API token: a live browser session. Anyone holding it acts as
+        # the signed-in user until it expires, with no key to revoke.
+        regex=re.compile(r"(?i)(_gitlab_session=[0-9a-z]{32})"),
+        description="GitLab session cookie",
+        severity="CRITICAL",
+        cwe="CWE-539",   # Use of Persistent Cookies Containing Sensitive Information
+        remediation=(
+            "Terminate the session in GitLab (Settings -> Active Sessions) "
+            "rather than rotating a key — there is no key. Then find why a "
+            "session cookie reached a public asset; it is usually a captured "
+            "request pasted into a fixture or a debug log."
+        ),
+    ),
+    SecretPattern(
+        name="age Secret Key",
+        # Bech32 charset, so the body excludes 1/b/i/o by construction.
+        regex=re.compile(r"\b(AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58})\b"),
+        description="age file-encryption private key",
+        severity="CRITICAL",
+        cwe="CWE-321",
+    ),
+    SecretPattern(
+        name="1Password Service Account Token",
+        regex=re.compile(r"\b(ops_eyJ[A-Za-z0-9+/]{250,}={0,3})"),
+        description="1Password service-account token",
+        severity="CRITICAL",
+        remediation=(
+            "Revoke the service account in 1Password. This token reads every "
+            "vault the account was granted, so treat all secrets in those "
+            "vaults as exposed and rotate them too."
+        ),
+    ),
+    SecretPattern(
+        name="1Password Secret Key",
+        # The hyphens are readability only and 1Password strips them at login,
+        # but every exported or copied key carries one of these two groupings.
+        regex=re.compile(
+            r"\b(A3-[A-Z0-9]{6}-(?:[A-Z0-9]{11}|[A-Z0-9]{6}-[A-Z0-9]{5})"
+            r"-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5})\b"
+        ),
+        description="1Password account secret key",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Airtable Personal Access Token",
+        regex=re.compile(r"\b(pat[A-Za-z0-9]{14}\.[a-f0-9]{64})\b"),
+        description="Airtable personal access token",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Sourcegraph Access Token",
+        # DEPARTURE 1, and it is a split rather than a refusal. gitleaks' rule
+        # offers three alternatives in one pattern, the third being a bare
+        # 40-character hex string. Transcribed as written it would match every
+        # Git SHA-1, every sha1 digest and every 40-hex id in a bundle — a rule
+        # that fires on every commit hash in a source map costs more trust than
+        # the tokens it recovers.
+        #
+        # But gitleaks does not apply that alternative bare either: its rule
+        # carries a `sourcegraph`/`sgp_` keyword precondition and an entropy
+        # floor, and this registry has no keyword mechanism of its own. So the
+        # two halves are separated instead — the sgp_ forms here, unconditional
+        # because the prefix is the discriminator, and the legacy bare-hex form
+        # below with the keyword written into the pattern. Same coverage as the
+        # reference, same precondition, expressed where this scanner can see it.
+        regex=re.compile(
+            r"\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40})\b"
+        ),
+        description="Sourcegraph access token",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Sourcegraph Access Token (legacy)",
+        regex=_contextual("sourcegraph", r"[a-fA-F0-9]{40}"),
+        description="Sourcegraph legacy access token (contextual)",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Mapbox Public Token",
+        # DEPARTURE 2, in the other direction: matched WITHOUT the `mapbox`
+        # keyword gitleaks requires, because `pk.<60>.<22>` is unambiguous on
+        # its own and a bundled map widget rarely names its vendor nearby.
+        # Reported as public-by-design — see triage._PUBLIC_BY_TYPE. A pk. token
+        # is built to ship in a browser; the finding is worth stating so a
+        # reviewer can check its URL restrictions, not worth alarming over.
+        regex=re.compile(r"\b(pk\.[A-Za-z0-9_-]{60}\.[A-Za-z0-9_-]{22})\b"),
+        description="Mapbox public access token (client-side by design)",
+        severity="LOW",
+    ),
+    SecretPattern(
+        name="GCP Service Account JSON",
+        # The `private_key_id` detector above needs that field to be present.
+        # This marker survives a JSON that was trimmed to its useful fields, and
+        # a service-account document in a shipped bundle is the finding whether
+        # or not the key id came with it. HIGH rather than CRITICAL: the marker
+        # proves the document, the private_key detector proves the key.
+        # Only when the document does NOT also carry a private_key_id. Google's
+        # generated JSON opens with `"type"` and reaches `private_key_id` a
+        # couple of fields later, so on a complete file the key-id detector
+        # above claims it and this one stays silent — one document, one finding.
+        # `_collapse_duplicates` cannot do that job here: the two detectors match
+        # different substrings, so they are not duplicates by its definition
+        # (same URL, same matched value) even though they describe one exposure.
+        # The lookahead is what keeps a trimmed document covered without
+        # double-reporting a whole one.
+        regex=re.compile(
+            r'("type"\s*:\s*"service_account")(?![\s\S]{0,600}?"private_key_id")'
+        ),
+        description="Google Cloud service-account JSON document",
+        severity="HIGH",
+        cwe="CWE-798",
+    ),
+
+    # Keyword-anchored. These providers issue values with no distinguishing
+    # shape — 16 to 64 alphanumerics — so the provider name within 30 characters
+    # is what separates a credential from any other string of that length. Same
+    # construction as the Datadog and Heroku patterns above.
+    SecretPattern(
+        name="Discord Client Secret",
+        regex=_contextual("discord", r"[A-Za-z0-9_\-]{32}"),
+        description="Discord OAuth client secret (contextual)",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Discord Client ID",
+        regex=_contextual("discord", r"[0-9]{18}"),
+        description="Discord OAuth client ID (public identifier)",
+        severity="LOW",
+    ),
+    SecretPattern(
+        name="Asana Client Secret",
+        regex=_contextual("asana", r"[A-Za-z0-9]{32}"),
+        description="Asana OAuth client secret (contextual)",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="Asana Client ID",
+        regex=_contextual("asana", r"[0-9]{16}"),
+        description="Asana OAuth client ID (public identifier)",
+        severity="LOW",
+    ),
+    SecretPattern(
+        name="LinkedIn Client Secret",
+        regex=_contextual("linked[_-]?in", r"[A-Za-z0-9]{16}"),
+        description="LinkedIn OAuth client secret (contextual)",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="LinkedIn Client ID",
+        regex=_contextual("linked[_-]?in", r"[A-Za-z0-9]{14}"),
+        description="LinkedIn OAuth client ID (public identifier)",
+        severity="LOW",
+    ),
+    SecretPattern(
+        name="Cohere API Token",
+        regex=_contextual("cohere|co_api_key", r"[A-Za-z0-9]{40}"),
+        description="Cohere API token (contextual)",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Confluent Secret Key",
+        regex=_contextual("confluent", r"[A-Za-z0-9]{64}"),
+        description="Confluent Cloud secret key (contextual)",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Confluent Access Token",
+        regex=_contextual("confluent", r"[A-Za-z0-9]{16}"),
+        description="Confluent Cloud access token (contextual)",
+        severity="HIGH",
+    ),
+    SecretPattern(
+        name="KuCoin Secret Key",
+        regex=_contextual(
+            "kucoin",
+            r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
+        ),
+        description="KuCoin API secret key (contextual)",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="KuCoin Access Token",
+        regex=_contextual("kucoin", r"[a-f0-9]{24}"),
+        description="KuCoin API access token (contextual)",
+        severity="CRITICAL",
+    ),
+    SecretPattern(
+        name="Airtable API Key",
+        regex=_contextual("airtable", r"[A-Za-z0-9]{17}"),
+        description="Airtable legacy API key (contextual)",
         severity="HIGH",
     ),
 ]
@@ -2442,12 +2724,31 @@ async def spider_target(
 _KNOWN_EXAMPLE_SECRETS = frozenset({
     "AKIAIOSFODNN7EXAMPLE",   # AWS's official documentation example key
     # Firebase's own Android SDK documentation keys. They are `AIza`-shaped and
-    # therefore matched, they appear in copied sample code across the web, and
-    # gitleaks lists all three as declared non-secrets. Found by measuring this
-    # scanner against that list: they were 3 of the 16 alarms one rule produced.
+    # therefore matched, and they appear in copied sample code across the web.
+    # gitleaks carries the same sixteen values in a hard-coded allowlist on its
+    # `gcp-api-key` rule; three were transcribed in v2.14.5, and measuring this
+    # scanner against that list showed the remaining thirteen were still being
+    # reported. They accounted for 13 of the 14 alarms the whole external corpus
+    # produced, which is worth stating plainly rather than as a precision number:
+    # the corpus over-weights one vendor's documentation. The narrow, real gain
+    # is bundles that paste Firebase's Android sample config verbatim, which is
+    # common enough to be worth the eight lines.
     "AIzaSyabcdefghijklmnopqrstuvwxyz1234567",
     "AIzaSyAnLA7NfeLquW1tJFpx_eQCxoX-oo6YyIs",
     "AIzaSyCkEhVjf3pduRDt6d1yKOMitrUEke8agEM",
+    "AIzaSyDMAScliyLx7F0NPDEJi1QmyCgHIAODrlU",
+    "AIzaSyD3asb-2pEZVqMkmL6M9N6nHZRR_znhrh0",
+    "AIzayDNSXIbFmlXbIE6mCzDLQAqITYefhixbX4A",
+    "AIzaSyAdOS2zB6NCsk1pCdZ4-P6GBdi_UUPwX7c",
+    "AIzaSyASWm6HmTMdYWpgMnjRBjxcQ9CKctWmLd4",
+    "AIzaSyANUvH9H9BsUccjsu2pCmEkOPjjaXeDQgY",
+    "AIzaSyA5_iVawFQ8ABuTZNUdcwERLJv_a_p4wtM",
+    "AIzaSyA4UrcGxgwQFTfaI3no3t7Lt1sjmdnP5sQ",
+    "AIzaSyDSb51JiIcB6OJpwwMicseKRhhrOq1cS7g",
+    "AIzaSyBF2RrAIm4a0mO64EShQfqfd2AFnzAvvuU",
+    "AIzaSyBcE-OOIbhjyR83gm4r2MFCu4MJmprNXsw",
+    "AIzaSyB8qGxt4ec15vitgn44duC5ucxaOi4FmqE",
+    "AIzaSyA8vmApnrHNFE0bApF4hoZ11srVL_n0nvY",
 })
 _PLACEHOLDER_RE = re.compile(
     r"(?i)(your[_-]?(?:api|key|token|secret|id)|placeholder|changeme|"

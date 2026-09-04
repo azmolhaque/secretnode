@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("SECRETNODE_API_KEY", "test-key-for-pytest")
 
 import scanner
+import triage
 from bench import benchmark, groundtruth
 
 
@@ -46,10 +47,33 @@ class TestCorpusIsAValidInstrument:
             assert s.value in blob or s.value in json_escaped(blob), s.pattern
 
     def test_public_by_design_specimens_are_marked(self):
+        """Every `public` specimen must actually be classified public-by-design.
+
+        This asserted a hand-written list of three names, which meant every
+        release that added a public-by-design detector edited the test to say
+        so — a list that only ever agrees with itself. What matters is that the
+        corpus and the triage tier agree: a specimen the corpus calls public
+        must be one triage dismisses as public, and a specimen it calls a secret
+        must not be. That holds without maintenance as detectors are added, and
+        it fails for the reason worth failing on — the two drifting apart.
+        """
         c = groundtruth.build()
-        public = {s.pattern for s in c.specimens if s.kind == "public"}
-        assert public == {"Stripe Publishable Key", "Sentry DSN",
-                          "PostHog Project API Key"}
+        for s in c.specimens:
+            verdict = triage.triage(
+                secret_type=s.pattern,
+                raw_match=s.value,
+                context_snippet=s.snippet,
+                entropy=scanner.shannon_entropy(s.value),
+                severity="HIGH",
+                structural=s.pattern != scanner.GENERIC_SECRET_TYPE,
+                source_url="https://corpus.test/app.js",
+            )
+            if s.kind == "public":
+                assert verdict.public_by_design, (
+                    f"{s.pattern}: corpus calls it public-by-design, triage does not")
+            elif s.kind == "secret":
+                assert not verdict.public_by_design, (
+                    f"{s.pattern}: corpus calls it a secret, triage calls it public")
 
 
 def json_escaped(blob: str) -> str:

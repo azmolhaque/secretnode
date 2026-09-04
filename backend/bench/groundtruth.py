@@ -275,6 +275,68 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     add(plain("RubyGems API Token", "rubygems_" + r(HEX, 48)))
     add(plain("Brevo (Sendinblue) API Token",
               "xkeysib-" + r(HEX, 64) + "-" + r(ALNUM, 16)))
+
+    # v2.16.0 providers. Appended last, same shared-RNG reason as every block
+    # above: a specimen inserted higher up shifts every value after it.
+    # Module-level UPPER is letters only; 1Password's groups are alphanumeric.
+    UPPER_NUM = UPPER + DIGITS
+    BECH32 = "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L"
+
+    # Structure-anchored: the prefix is the whole discriminator.
+    add(plain("Artifactory Reference Token", "cmVmd" + r(ALNUM, 59)))
+    add(plain("age Secret Key", "AGE-SECRET-KEY-1" + r(BECH32, 58)))
+    add(plain("1Password Service Account Token", "ops_eyJ" + r(B64, 260)))
+    add(plain("1Password Secret Key",
+              # The whitepaper's grouping: A3-<6>-<11>-<5>-<5>-<5>. The other
+              # accepted form splits the 11 into <6>-<5>; both are the same key.
+              "A3-" + r(UPPER_NUM, 6) + "-" + r(UPPER_NUM, 11) + "-"
+              + r(UPPER_NUM, 5) + "-" + r(UPPER_NUM, 5) + "-" + r(UPPER_NUM, 5)))
+    add(plain("Airtable Personal Access Token",
+              "pat" + r(ALNUM, 14) + "." + r(HEX, 64)))
+    add(plain("Sourcegraph Access Token", "sgp_" + r(HEX, 16) + "_" + r(HEX, 40)))
+    # Public by design: a pk. token has to reach the browser for a map to draw.
+    add(plain("Mapbox Public Token", "pk." + r(URLSAFE, 60) + "." + r(URLSAFE, 22),
+              kind="public",
+              note="Mapbox client-side token; restrict by URL rather than hide."))
+
+    # A cookie, not a token — it carries its own `name=` and cannot be `plain()`.
+    add(Specimen("GitLab Session Cookie", "_gitlab_session=" + (gl := r(HEX, 32)),
+                 f'document.cookie = "_gitlab_session={gl}; path=/";'))
+    # A marker rather than a value: the finding is the document it announces.
+    add(Specimen("GCP Service Account JSON", '"type": "service_account"',
+                 '{"type": "service_account", "project_id": "acme-prod-1421"}'))
+
+    # Keyword-anchored. The value has no shape of its own, so each specimen has
+    # to carry the provider name that makes it findable — which is exactly the
+    # property being measured.
+    def ctx(pattern: str, keyword: str, value: str, kind: str = "secret",
+            note: str = "") -> None:
+        add(Specimen(pattern, value, f'{keyword}: "{value}",', kind=kind, note=note))
+
+    # Spelled `<provider>Secret`, not `<provider>ClientSecret`. The registry has
+    # carried a generic `OAuth Client Secret` detector since long before these,
+    # anchored on the literal `client_secret`, and it claims that spelling first.
+    # Both names are correct for the same value, so the overlap is harmless — but
+    # a specimen another detector answers measures that detector, not this one.
+    # What these three genuinely add is the provider-named spelling, which the
+    # `client_secret` anchor does not see at all.
+    ctx("Discord Client Secret", "discordSecret", r(URLSAFE, 32))
+    ctx("Discord Client ID", "discordClientId", r(DIGITS, 18), kind="public",
+        note="OAuth client IDs ship in every authorization URL by design.")
+    ctx("Asana Client Secret", "asanaSecret", r(ALNUM, 32))
+    ctx("Asana Client ID", "asanaClientId", r(DIGITS, 16), kind="public",
+        note="OAuth client IDs ship in every authorization URL by design.")
+    ctx("LinkedIn Client Secret", "linkedInSecret", r(ALNUM, 16))
+    ctx("LinkedIn Client ID", "linkedInClientId", r(ALNUM, 14), kind="public",
+        note="OAuth client IDs ship in every authorization URL by design.")
+    ctx("Cohere API Token", "cohereApiKey", r(ALNUM, 40))
+    ctx("Confluent Secret Key", "confluentSecret", r(ALNUM, 64))
+    ctx("Confluent Access Token", "confluentAccessToken", r(ALNUM, 16))
+    ctx("KuCoin Secret Key", "kucoinSecret",
+        r(HEX, 8) + "-" + r(HEX, 4) + "-" + r(HEX, 4) + "-" + r(HEX, 4) + "-" + r(HEX, 12))
+    ctx("KuCoin Access Token", "kucoinAccessToken", r(HEX, 24))
+    ctx("Airtable API Key", "airtableApiKey", r(ALNUM, 17))
+    ctx("Sourcegraph Access Token (legacy)", "sourcegraphToken", r(HEX, 40))
     return out
 
 
