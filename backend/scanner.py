@@ -369,6 +369,48 @@ SECRET_PATTERNS: list[SecretPattern] = [
         description="Google Cloud / Firebase API Key",
         severity="HIGH",
     ),
+    # Google's CURRENT key format, and the one that actually matters.
+    #
+    # AI Studio now issues `AQ.`-prefixed keys instead of `AIzaSy…`, and the
+    # legacy format is being retired. That inverted this scanner's value on
+    # Google: the `AIza` keys it reliably catches are, in real web bundles,
+    # overwhelmingly Firebase *web config* keys — public by design, correctly
+    # downgraded to INFO — while the `AQ.` keys it could not see at all are live
+    # credentials with billing attached. It found the harmless ones and was blind
+    # to the dangerous ones.
+    #
+    # Kept separate from the `AIza` detector rather than folded into it, because
+    # the two differ in the way that decides a report: an `AIza` value may be
+    # public by design and routinely is, an `AQ.` key never is. One severity and
+    # one remediation cannot serve both.
+    #
+    # SIZING, honestly: Google has published no specification for this format.
+    # The bound comes from an observed key — `AQ.` plus 50 base64url characters,
+    # mixed case and digits — widened deliberately rather than pinned to that
+    # length. Pinning an observed length is exactly what left the OpenAI pattern
+    # demanding twenty characters before `T3BlbkFJ` and blind to every `sk-proj-`
+    # key Google's counterpart issues today. The 30-character floor is what keeps
+    # the short `AQ.` prefix from matching ordinary text; the ceiling is slack.
+    #
+    # `\b` before `AQ` is load-bearing, not decoration. It is what stops a JWT
+    # whose segment happens to end in `AQ` from reading as a key: in
+    # `…HUzI1NiAQ.eyJzdWI…` the `A` follows a word character, so no boundary
+    # exists and no match is attempted. A real JWT can never open with `AQ.`
+    # either — its first segment is base64 of `{"`, always `eyJ`.
+    SecretPattern(
+        name="Google AI Studio API Key",
+        regex=re.compile(r"\b(AQ\.[A-Za-z0-9_-]{30,200})\b"),
+        description="Google AI Studio / Gemini API key (AQ. format)",
+        severity="CRITICAL",
+        remediation=(
+            "Delete this key at https://aistudio.google.com/apikey and issue a "
+            "replacement held server-side. Unlike a Firebase web apiKey, an AI "
+            "Studio key is never public by design: it bills model inference to "
+            "the owning project and reaches every model the project can call. "
+            "Proxy Gemini calls through your own backend so the key never enters "
+            "a browser bundle."
+        ),
+    ),
     SecretPattern(
         name="Slack Webhook",
         regex=re.compile(

@@ -3,6 +3,56 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.6] — The Google key format that actually ships today
+
+Google AI Studio now issues `AQ.`-prefixed API keys, and the legacy `AIzaSy…` format is
+being retired. SecretNode had no detector for the new one:
+
+```
+grep -n "AIza" scanner.py   →  regex=re.compile(r"\b(AIza[0-9A-Za-z\-_]{35})\b")
+AQ.Ab8RN6…  →  detected: *** NOTHING ***
+```
+
+### Added — `Google AI Studio API Key` (detector 73)
+
+**The gap inverted this scanner's value on Google.** The `AIza` keys it reliably catches
+are, in real web bundles, overwhelmingly Firebase *web config* keys — public by design,
+correctly downgraded to INFO, and precisely the finding a client is told needs no action.
+The `AQ.` keys it could not see at all are live credentials with billing attached. It
+found the harmless ones and was blind to the dangerous ones, and that flipped within a few
+months of Google changing the default.
+
+Kept as a separate detector rather than folded into the `AIza` pattern, because the two
+differ in the way that decides a report: an `AIza` value may be public by design and
+routinely is; an `AQ.` key never is. One severity and one remediation cannot serve both.
+Verified: an `AQ.` key sitting *inside* a Firebase config block still comes out CRITICAL
+and is never cleared as public-by-design — that placement makes it more alarming, not less.
+
+**Sizing, honestly.** Google has published no specification for this format. The bound
+comes from one observed key — `AQ.` plus 50 base64url characters, mixed case and digits,
+entropy 4.76 — and was then deliberately widened to 30–200 rather than pinned. Pinning an
+observed length is exactly what left the OpenAI pattern demanding twenty characters before
+`T3BlbkFJ` and blind to every `sk-proj-` key issued today. The floor is what keeps a
+three-character prefix from matching ordinary text; the ceiling is slack.
+
+The `\b` before `AQ` is load-bearing, not decoration. A JWT whose header segment happens
+to end in `AQ` produces the literal `AQ.` followed by base64url at the payload separator,
+and JWTs are in nearly every bundle. The word boundary refuses it, because the `A` follows
+a word character; a real JWT can never *open* with `AQ.` either, its first segment being
+base64 of `{"` — always `eyJ`. A ground-truth decoy now holds that line.
+
+### The external benchmark could not have found this
+
+`make bench-external` still reads **80.6%**, unchanged, because gitleaks has no rule for
+Google's current key format either. This is the second concrete instance of a limit worth
+restating: an external corpus measures you against *another tool's* coverage, so a blind
+spot the whole industry shares stays invisible in it. The internal benchmark cannot see
+past its own regexes, the external one cannot see past someone else's, and this gap was
+found by neither — it was found by looking at a real key.
+
+**880 tests** (+9), ruff clean. **73 detectors**; ground truth 73/73 with zero false
+positives, precision 1.000 / recall 1.000, offline and end-to-end over HTTP.
+
 ## [2.14.5] — The leak pattern that dominates real bundles, and a corpus that can measure precision
 
 Research question: what does a leaked credential in browser-delivered JavaScript actually

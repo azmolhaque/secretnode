@@ -253,6 +253,10 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     v = r(ALNUM, 30)
     add(Specimen("Framework Public Env Secret", v,
                  f'NEXT_PUBLIC_APP_CLIENT_SECRET="{v}"'))
+    # Also appended last, same RNG reason. Deliberately NOT 50 characters — the
+    # one observed key was 50, and the detector is bounded 30-200 precisely so it
+    # does not encode a length nobody has specified.
+    add(plain("Google AI Studio API Key", "AQ." + r(URLSAFE, 44)))
     return out
 
 
@@ -311,6 +315,14 @@ def _decoys(rng: random.Random) -> list[Decoy]:
         # finding: `https://acme.com","author":"dev@acme.com`. It survived
         # because the false positive needs a base URL with NO path — which is
         # exactly the form a config object holds.
+        # A JWT whose header segment happens to end in `AQ`, so the payload
+        # separator produces the literal `AQ.` followed by base64url. The `\b`
+        # in the AI Studio pattern is the only thing standing between this and a
+        # CRITICAL false positive on a token type that is in nearly every bundle.
+        Decoy("jwt-segment-ending-aq",
+              'const t="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCAQ.'
+              'eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0";',
+              "JWT boundary yields a literal AQ. — must not read as an AI Studio key"),
         Decoy("url-then-email",
               '{"homepage":"https://acme.com","author":"dev@acme.com",'
               '"apiBase":"https://api.acme.com","support":"help@acme.com"}',

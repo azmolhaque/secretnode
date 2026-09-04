@@ -296,3 +296,4 @@ class TestTemplatePlaceholdersAreRejected:
 
     def test_an_uninterpolated_template_is_not_reported_end_to_end(self):
         assert FW not in _types('NEXT_PUBLIC_APP_SECRET="${BUILD_SECRET}"')
+
