@@ -3,6 +3,199 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.16.0] — The benchmark was still manufacturing defects, one level deeper
+
+v2.15.0 rebuilt the external benchmark after it turned out to be inventing the misses it
+reported, and left a clean, finite backlog: 11 in-scope misses and 12 specimens from
+providers never claimed. This release went to close them. Six of the eleven were the
+benchmark, again.
+
+### Fixed — the harness deleted the prefix that makes a credential recognisable
+
+gitleaks writes some samples as a Go concatenation:
+
+```go
+utils.GenerateSampleSecret("anthropic", "sk-ant-api03-"+secrets.NewSecret(...)+"AA")
+```
+
+`_SAMPLE_CALL` matched the **plural** `GenerateSampleSecrets` and not the singular, so a
+line like that fell through to the generic atom path, which found the first
+`utils.X("n")` helper in it and returned only that helper's output — 93 random characters
+with `sk-ant-api03-` and `AA` stripped off. No prefix-anchored detector can match a
+specimen whose prefix has been deleted, so each one was filed as a missed credential.
+
+Five of the eleven reported misses were this: both Anthropic rules, two of the three
+Bedrock specimens, and the Artifactory reference token. Fixing the extractor closed all
+five **without touching a single detector**, and took recall from 89.0% to 91.0% on work
+that was never a scanner defect at all.
+
+Two guards came with it. `_expand_atom` now expands a nested sample call's second
+argument as a full expression, so a `+`-joined prefix and suffix survive. And `_entries`
+computes the `[]string{…}` spans before anything consumes the shared RNG, so a sample call
+inside a list is expanded by exactly one of the two loops — expanding it twice would have
+inflated the corpus with near-copies differing only by where the RNG happened to be.
+
+### Fixed — `age` was an in-scope miss because "age" is inside "Azure StorAGE"
+
+`_has_detector` tested `provider in detector_name`. `age` is a substring of "Azure
+StorAGE Account Key", so `age-secret-key` — a provider with **no detector whatsoever** —
+was reported in the bucket this benchmark documents as *"the only bucket that is a
+defect"*. Moving a not-a-defect into the defect bucket is the more expensive direction of
+that error. The test now requires a left word boundary.
+
+### Fixed — an empty PEM block was reported CRITICAL
+
+```
+-----BEGIN OPENSSH PRIVATE KEY----------END OPENSSH PRIVATE KEY-----
+```
+
+A header immediately followed by its footer, with zero key material, matched — because
+the pattern asked only for the marker. Empty PEM blocks ship for real: templates that
+never rendered, fixtures, configs stripped before publication. Found by measuring against
+gitleaks' declared non-secrets, where the empty OPENSSH block is listed for exactly this
+reason.
+
+Both the PEM and PGP detectors now require real key material via a **lookahead**, so the
+reported value stays the header alone and masking, fingerprints and memory are unchanged.
+The window is 300 characters rather than zero because an encrypted key puts `Proc-Type:`
+and `DEK-Info:` between the header and its base64 — a naive lookahead would have broken
+every encrypted key to fix the empty one.
+
+### Fixed — 13 of the 14 false alarms in the whole corpus were one vendor's documentation
+
+gitleaks hard-codes a sixteen-entry allowlist on its `gcp-api-key` rule: sample keys from
+the `firebase-android-sdk` repository. v2.14.5 transcribed three of them. The other
+thirteen were still being reported, and accounted for 13 of the 14 alarms the entire
+external corpus produced.
+
+Worth stating plainly rather than as a precision number: **the corpus over-weights one
+vendor's documentation.** The real-world gain is narrow — bundles that paste Firebase's
+Android sample config verbatim — but that is common enough to be worth eight lines.
+
+With the empty PEM block, this takes the measured false-alarm rate from 12.7% to **0.0%**.
+
+### Added — 22 detectors (85 → 107)
+
+Every shape transcribed from gitleaks' published regex, not inferred from one observed
+sample. Structure-anchored, needing no neighbouring keyword:
+
+| | |
+|---|---|
+| Artifactory Reference Token | `cmVmd…` — base64 for `refe`, the token's own prefix |
+| age Secret Key | `AGE-SECRET-KEY-1…`, bech32 body |
+| 1Password Service Account Token | `ops_eyJ…` |
+| 1Password Secret Key | `A3-XXXXXX-…` |
+| Airtable Personal Access Token | `pat…​.<64 hex>` |
+| Sourcegraph Access Token | `sgp_…` |
+| Mapbox Public Token | `pk.<60>.<22>` — reported public-by-design |
+| GitLab Session Cookie | `_gitlab_session=…` |
+| GCP Service Account JSON | `"type": "service_account"` |
+
+And eleven keyword-anchored ones for providers whose values have no shape of their own —
+Discord, Asana, LinkedIn (client ID and secret each), Cohere, Confluent (×2), KuCoin (×2),
+Airtable, Sourcegraph legacy. These share a new `_contextual()` helper rather than eleven
+copies of the same regex, and its separator class accepts both the quoted form a JS bundle
+uses **and** the bare `KEY=value` of a `.env` file or shell export. A quote-only separator
+matched the bundle case and silently missed the file case — gitleaks' own Cohere sample is
+`export CO_API_KEY=…` with no quotes anywhere.
+
+**External recall is now 209/211 (99.1%) with a 0.0% false-alarm rate, and no provider in
+gitleaks' corpus is unclaimed.**
+
+Three notes on judgement, because a transcription is not an obligation to copy a pattern
+this scanner would not otherwise accept:
+
+- **Sourcegraph was split, not refused.** gitleaks' rule offers a bare 40-character hex
+  alternative, which transcribed as written would match every Git SHA-1 in a source map.
+  But gitleaks does not apply it bare either — its rule carries a keyword precondition
+  this registry has no mechanism for. So the `sgp_` forms are unconditional and the legacy
+  bare-hex form carries the keyword *in the pattern*. Same coverage, same precondition,
+  expressed where this scanner can see it.
+- **Mapbox is matched without the keyword** gitleaks requires, because `pk.<60>.<22>` is
+  unambiguous alone and a bundled map widget rarely names its vendor nearby.
+- **The GCP marker fires only when no `private_key_id` follows.** Google's JSON opens with
+  `"type"` and reaches `private_key_id` a few fields later, so a complete document is
+  claimed by the existing key-id detector and this one stays silent. `_collapse_duplicates`
+  cannot do that job: the two detectors match different substrings, so they are not
+  duplicates by its definition even though they describe one exposure.
+
+### Fixed — a contextual detector captured a variable NAME as the credential
+
+Found by scanning this release's own diff with this scanner, the QA step that
+also caught the Basic-Auth boundary defect in v2.14.5:
+
+```
+LinkedIn Client Secret    'linkedInClientId'
+LinkedIn Client ID        'linkedInSecret'
+```
+
+The captured "credential" is an identifier. A contextual detector's value has no
+shape at all, so nothing about its length or alphabet separates a real secret from
+the variable that holds one — and in real code `linkedin_secret: linkedInSecret`
+is far more common than a literal.
+
+**The obvious fix was the wrong one, and the way it fails is worth recording.**
+Marking these `entropy_gated=True` reuses the registry's existing mechanism for
+loose keyword=value matches, and it does suppress the identifiers. It also
+dropped four external specimens — every one of them digit- or hex-only.
+`MIN_ENTROPY_THRESHOLD` is 3.5 bits, which silently assumes a ~62-character
+alphabet: an 18-digit Discord client ID tops out at log2(10) = 3.32 and **can
+never pass, however random it is.** An absolute bit floor is a category error on
+a restricted alphabet.
+
+`_contextual` refuses identifiers by shape instead — a lookahead rejecting a
+value that contains the provider keyword. A credential that spells its own
+provider's name does not exist, so the name is the discriminator, and the
+restricted alphabets keep their coverage.
+
+### Added — a `declined` line, so a deliberate refusal is not hidden inside recall
+
+Two specimens are still unmatched, and both are the scanner working:
+
+```
+  declined            2   refused on purpose by a documented filter
+    age-secret-key — below the entropy floor
+    aws-amazon-bedrock-api-key-long-lived — documented example or placeholder
+```
+
+AWS publishes that `…EXAMPLE` key in its own documentation, and gitleaks' age sample is 58
+identical characters. Matching either would be the defect.
+
+The bucket is deliberately narrow: it accepts only a mechanism the scanner **really
+applies**, asked directly — the placeholder allowlist or the entropy floor — never a list
+of rules this benchmark has decided to excuse. A bucket that can absorb any miss has
+stopped measuring anything.
+
+The same reasoning added a `scaffold` line on the false-positive side. The harness wraps
+every specimen as `const <provider>ApiKey = "…"`, which manufactures the provider keyword
+a contextual detector needs. A match that does not survive with the provider name removed
+says more about the wrapper than the scanner, and is now reported apart — found
+mechanically, by re-testing the value in a neutral wrapper, rather than by judgement.
+
+### Changed — Tier 2 AI validation moves to `gemini-3.8-flash`
+
+From `gemini-3.6-flash`. Both bill at $0.75 / $3.75 per million tokens, so this is strictly
+more capability at identical cost, and the call was verified against a real key before the
+default changed rather than read off a price list. Tier 1 stays on `gemini-3.5-flash-lite`:
+the pre-filter's job is to be cheap and high-volume, and it is not the tier that renders a
+verdict on a critical finding.
+
+### Changed — a corpus test that only ever agreed with itself
+
+`test_public_by_design_specimens_are_marked` asserted a hand-written list of three detector
+names, so every release that added a public-by-design detector edited the test to say so.
+It now asserts the invariant that matters: a specimen the corpus calls public must be one
+the triage tier dismisses as public, and a specimen it calls a secret must not be. That
+holds without maintenance, and fails for the reason worth failing on — the two drifting
+apart.
+
+### Verified
+
+**978 tests (+72), ruff clean.** 107 detectors; ground truth 107/107 offline **and** end-to-end
+over HTTP, precision 1.000 / recall 1.000, zero mistypes, zero false positives on decoys.
+Labelled-corpus gate PASS (precision 1.000, recall 1.000). External recall 99.1%,
+false alarms 0.0%.
+
 ## [2.15.1] — Two-year-old pins, and a dependency that was never used
 
 GitHub's Security tab showed four alerts. Chasing them found one confirmed CVE and, behind

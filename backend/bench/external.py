@@ -211,6 +211,13 @@ def _expand_atom(atom: str, rng: random.Random) -> str | None:
     # A quoted literal (Go raw strings use backticks).
     if (a[0] == a[-1] == '"' and len(a) > 1) or (a[0] == a[-1] == "`" and len(a) > 1):
         return a[1:-1].replace('\\"', '"')
+    # A nested `utils.GenerateSampleSecret("provider", <expr>)`. Its second
+    # argument is the sample; expand THAT as a full expression so a `+`-joined
+    # prefix and suffix survive. Without this the fall-through below reduced the
+    # whole call to whichever character-class helper it happened to contain.
+    sm = _SAMPLE_CALL.search(a)
+    if sm:
+        return _expand_expr(_balanced(a, sm.end()), rng)
     # secrets.NewSecret(...) wrapping either a helper call or a bare char class.
     m = _NEWSECRET.search(a) or (re.fullmatch(r"secrets\.NewSecret\((.*)\)", a, re.S))
     inner = m.group(1) if m else a
@@ -258,7 +265,15 @@ def _expand_expr(expr: str, rng: random.Random) -> str | None:
 
 _FUNC_SPLIT = re.compile(r"\nfunc\s+\w+\(\)\s*\*config\.Rule\s*\{")
 _RULE_ID = re.compile(r'RuleID:\s*"([^"]+)"')
-_SAMPLE_CALL = re.compile(r'GenerateSampleSecrets\(\s*"[^"]*"\s*,\s*', re.S)
+# Both spellings. gitleaks uses the plural `GenerateSampleSecrets` for a whole
+# `tps :=` list and the singular `GenerateSampleSecret` for one entry inside a
+# []string{…}. Matching only the plural left the singular form to fall through
+# to the generic atom path, which found the first `utils.X("n")` helper in the
+# line and returned ONLY its output — silently discarding the literal prefix
+# concatenated around it. `"sk-ant-api03-" + NewSecret(…) + "AA"` became 93 bare
+# random characters, and a prefix-anchored detector cannot match a specimen with
+# its prefix removed. Five of the eleven reported misses were this.
+_SAMPLE_CALL = re.compile(r'GenerateSampleSecrets?\(\s*[`"][^`"]*[`"]\s*,\s*', re.S)
 
 
 def _balanced(text: str, i: int) -> str:
@@ -280,7 +295,14 @@ def _balanced(text: str, i: int) -> str:
 def _entries(block: str, rng: random.Random) -> list[str]:
     """Every concrete sample declared in one `tps`/`fps` region."""
     found: list[str] = []
+    # Spans of the []string{…} literals, computed before anything consumes the
+    # shared RNG. A sample call INSIDE one of them is expanded by the line loop
+    # below; expanding it here as well would add a second specimen differing
+    # only by where the RNG happened to be — a corpus inflated with near-copies.
+    spans = [m.span() for m in re.finditer(r"\[\]string\{(.*?)\n\s*\}", block, re.S)]
     for m in _SAMPLE_CALL.finditer(block):
+        if any(lo <= m.start() < hi for lo, hi in spans):
+            continue
         v = _expand_expr(_balanced(block, m.end()), rng)
         if v:
             found.append(v)
@@ -337,7 +359,13 @@ def _has_detector(provider: str) -> bool:
     names = [p.name.lower() for p in scanner.SECRET_PATTERNS]
     alias = {"gcp": "google", "googlecloud": "google"}
     p = alias.get(provider.lower(), provider.lower())
-    return any(p in n.replace(" ", "") or p in n for n in names)
+    # Left word boundary, not a bare substring. `age` is a substring of "Azure
+    # StorAGE Account Key", so a plain `in` test reported `age-secret-key` — a
+    # provider with no detector whatsoever — as an in-scope miss, the one bucket
+    # documented as "the only bucket that is a defect". Moving a not-a-defect
+    # into the defect bucket is the more expensive direction of that error.
+    pat = re.compile(rf"(?<![a-z0-9]){re.escape(p)}")
+    return any(pat.search(n) or pat.search(n.replace(" ", "")) for n in names)
 
 
 def main() -> int:
@@ -373,16 +401,49 @@ def main() -> int:
         return [h.secret_type for h in scanner.extract_secrets(
             "bench", "https://corpus.test", "https://corpus.test/app.js", asset)]
 
+    def types_bare(value: str) -> list[str]:
+        """The same value with NO provider name anywhere in the asset."""
+        asset = f'const v = "{value}";\nexport default v;\n'
+        return [h.secret_type for h in scanner.extract_secrets(
+            "bench", "https://corpus.test", "https://corpus.test/app.js", asset)]
+
     def reported(provider: str, value: str) -> bool:
         return bool(types_for(provider, value))
 
+    def declined_reason(value: str) -> str:
+        """Why a documented filter refused this value, or "" if none did.
+
+        Only mechanisms the scanner really applies, asked directly — never a
+        list of rules this benchmark has decided to excuse. If neither filter
+        claims the value, it stays a miss and stays counted.
+        """
+        if value in scanner._KNOWN_EXAMPLE_SECRETS or scanner._PLACEHOLDER_RE.search(value):
+            return "documented example or placeholder"
+        # The longest run of one character, as a share of the value. gitleaks
+        # writes some samples as `QQQQ…` filler; 58 identical characters is the
+        # shape of a redacted value, and refusing it is the entropy floor doing
+        # its job rather than failing to.
+        if len(value) >= 24 and scanner.shannon_entropy(value) < 2.5:
+            return "below the entropy floor"
+        return ""
+
+    declined: list[tuple[str, str, str, str]] = []
     for provider, rid, value, _k in tps:
         if reported(provider, value):
             detected.append((provider, rid, value))
-        elif _has_detector(provider):
-            in_scope_miss.append((provider, rid, value))
-        else:
+        elif not _has_detector(provider):
             no_detector.append((provider, rid, value))
+        elif (why := declined_reason(value)):
+            # A specimen this scanner refuses ON PURPOSE, by a filter that is
+            # documented and applies to every finding. gitleaks' tps include
+            # AWS's published `…EXAMPLE` key and a 58-character run of `Q`;
+            # matching either would be the defect. Reported in its own line so
+            # the distinction is visible rather than folded into recall — and
+            # kept deliberately narrow, because a bucket that can absorb any
+            # miss is a bucket that stops measuring anything.
+            declined.append((provider, rid, value, why))
+        else:
+            in_scope_miss.append((provider, rid, value))
 
     # gitleaks' `fps` lists mix two things that must not be scored alike:
     #
@@ -407,6 +468,7 @@ def main() -> int:
     tp_prefixes = {v[:10] for _p, _r, v, _k in tps if len(v) >= 10}
     generic_only: list[tuple] = []
     cross_rule: list[tuple] = []
+    scaffold: list[tuple] = []
     for provider, rid, value, _k in fps:
         got = types_for(provider, value)
         if not got:
@@ -415,6 +477,15 @@ def main() -> int:
             cross_rule.append((provider, rid, value))
         elif got == [GENERIC]:
             generic_only.append((provider, rid, value))
+        elif not types_bare(value):
+            # Matched only because the wrapper put the provider's name beside
+            # the value. gitleaks' own rule for these carries the same keyword
+            # precondition, so with the keyword genuinely present its rule would
+            # fire too — the value is a declared non-secret only in the bare
+            # context gitleaks tested it in. Same scaffold artefact as
+            # `generic only`, one layer up, and found the same way: by asking
+            # whether the match survives with the provider name removed.
+            scaffold.append((provider, rid, value))
         else:
             false_alarms.append((provider, rid, value))
 
@@ -425,6 +496,7 @@ def main() -> int:
     print(f"  recall           {len(detected)}/{n_tp}   "
           f"({100 * len(detected) / max(1, n_tp):.1f}%)")
     print(f"  in-scope misses  {len(in_scope_miss):>4}   <- the only bucket that is a defect")
+    print(f"  declined         {len(declined):>4}   refused on purpose by a documented filter")
     print(f"  no detector      {len(no_detector):>4}   provider never claimed")
     print()
     # gitleaks' `fps` are values IT declares must not match. They are the only
@@ -435,6 +507,7 @@ def main() -> int:
           f"({100 * len(false_alarms) / max(1, n_fp):.1f}%)   provider detector on a declared non-secret")
     print(f"    cross-rule     {len(cross_rule):>4}   a real credential gitleaks files under another rule")
     print(f"    generic only   {len(generic_only):>4}   the harness's own `…ApiKey =` wrapper supplied the keyword")
+    print(f"    scaffold       {len(scaffold):>4}   same wrapper, supplying a provider detector's keyword")
 
     def _by_provider(items: list[tuple], limit: int = 14) -> None:
         counts: dict[str, int] = {}
@@ -447,6 +520,11 @@ def main() -> int:
         print()
         print("  in-scope misses, by rule:")
         _by_provider(in_scope_miss)
+    if declined:
+        print()
+        print("  declined on purpose:")
+        for _p, rid, _v, why in declined:
+            print(f"    {rid} — {why}")
     if no_detector:
         print()
         print("  providers never claimed:")
