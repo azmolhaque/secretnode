@@ -3,6 +3,33 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed — the README's tests badge had been wrong for five releases
+
+It read **805 passing** while the suite collected 1029. Nobody noticed, because a
+badge is a number read only by strangers: the version badge was hand-corrected at
+every release and the one beside it was not.
+
+### Added — a consistency gate, so those numbers cannot drift again
+
+`test_docs_consistency.py` asserts the README's version badge, its stated pattern
+counts and its tests badge all match the code, and that `pyproject.toml` agrees
+with `version.py`. Each of these has drifted at some point and each drifted
+silently.
+
+The tests-badge check is self-referential by design — the count comes from the
+collection running it — and skips on a narrowed run (one file, `-k`, `--lf`),
+because the badge describes the whole suite and a check that cries wolf whenever
+someone runs a single file is a check that gets ignored.
+
+Verified the gate fails on all three drifts before trusting it to pass, the same
+discipline `bench/vendorshapes.py` was held to. Doing that found a defect in the
+gate itself: `config.option.last_failed` is supplied by the cacheprovider plugin
+and is absent when it is disabled, and the other branches short-circuit before
+reaching it — so assuming it existed broke exactly one invocation path, the
+whole-suite run the check exists for.
+
 ## [2.16.1] — A detector can score 100% on every benchmark and match nothing
 
 A QC/QA pass over v2.16.0. The headline finding is not any single pattern.
