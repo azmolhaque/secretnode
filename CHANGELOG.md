@@ -86,6 +86,79 @@ tests ("no DNS, no sockets"); this extends it to the API.
 decoy false positives. Vendor shapes 101/101 across 96 detectors. Labelled-corpus
 gate PASS. External 208/211 with 0 in-scope misses and 0.0% false alarms.
 
+## [2.18.0] — How long has this credential been public?
+
+SecretNode has pulled archived bundles from the Wayback CDX index since v2.9. It
+asked that index for `fl=original` — the URL field alone — and discarded the
+timestamp that comes back **free on every row**.
+
+```
+backend/historical.py:188   (before)
+  ?url={domain}&matchType=domain&output=json&fl=original&collapse=urlkey
+                                               ↑ timestamp never requested
+```
+
+Three releases scanned archived assets while throwing away the only thing in the
+scanner capable of dating them. One field name.
+
+### The question changes the answer
+
+| situation | what the report said | what it says now |
+|---|---|---|
+| key in a 2021 archived bundle **and** today's | "rotate" | "public for 5.6 years — rotate, and treat it as used" |
+| key in the archive, **gone** from today's bundle | nothing at all | "already removed or rotated" |
+
+The second case is the one worth dwelling on. It is the scanner delivering
+**good news**, which it has never previously had a way to express — and a reader
+who sees nothing cannot tell a fixed exposure from one that was never looked
+for. It still carries a warning, because the trap there is real: deleting a
+secret from a bundle does not revoke it, and the archived copy stays readable
+forever.
+
+### Keyed on the credential, not on the asset
+
+`DeepScanResult.archive_exposure()` maps **fingerprint** to window, not source
+URL. The same key in a 2019 archived bundle and in today's live one has been
+public since 2019 wherever else it appears, so the earliest capture wins across
+every host in the scan.
+
+`still_served` is decided the only way a scan honestly can: the same fingerprint
+also appearing from a source URL the archive did **not** supply. A key found
+only in an archived copy is archive-only; one found in both is still served.
+
+### What it deliberately will not say
+
+- **A finding the archive cannot date carries no window at all.** Writing
+  today's date would read as "exposed just now" — a claim the scan cannot make.
+  The CSV columns stay blank and the SARIF key is omitted entirely.
+- **A date in the future, or one that will not parse, produces nothing.** Clock
+  skew or a malformed row must not become a confident statement about a time
+  window.
+- **CommonCrawl contributes no dates.** It is queried against one collection —
+  the newest — so its timestamps describe that crawl, not when the URL first
+  appeared. Reporting a 2026 crawl date as the first-seen for a URL archived in
+  2019 would *understate* an exposure, which is the direction that matters.
+  Wayback's index spans all time and is the honest source.
+
+### In every deliverable
+
+A finding computed correctly and rendered nowhere is the defect v2.14.3 spent a
+whole release fixing, so each export is tested rather than assumed:
+
+- **CSV** — three columns, **appended** so a consumer reading by index keeps
+  working: `exposed_since`, `exposed_days`, `still_served`.
+- **SARIF** — an `exposure` object in `properties`, so a pipeline can triage by
+  how long a key has been readable rather than only by its type.
+- **Deep-scan HTML** — a badge in the impact cell, coloured to separate the two
+  cases: `EXPOSED 2021-03-14` in critical tone, `ARCHIVE ONLY` in low.
+
+### Verified
+
+**1084 tests (+33), ruff clean.** 111 detectors; ground truth 111/111 offline
+**and** end-to-end over HTTP, precision 1.000 / recall 1.000. Vendor shapes
+101/101 across 96 detectors, 0 unexplained gaps. Labelled-corpus gate PASS.
+External 208/211 with 0 in-scope misses and 0.0% false alarms.
+
 ## [Unreleased]
 
 ### Fixed — the README's tests badge had been wrong for five releases

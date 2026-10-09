@@ -484,13 +484,35 @@ def generate_json_report(scan: dict[str, Any]) -> dict[str, Any]:
 # CSV
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _exposure_cells(finding: dict[str, Any]) -> tuple[str, str, str]:
+    """`exposed_since`, `exposed_days`, `still_served` for one CSV row.
+
+    Empty when the archive could not date the finding, which is the common case:
+    only assets the Wayback index has a capture for can carry a window, and a
+    blank is the honest answer for the rest. Writing today's date, or a zero,
+    would read as "exposed just now" — a claim the scan cannot make.
+    """
+    window = finding.get("exposure") or {}
+    if not window:
+        return ("", "", "")
+    return (
+        str(window.get("first_seen", "")),
+        str(window.get("days", "")),
+        "YES" if window.get("still_served") else "NO",
+    )
+
+
 def generate_csv_report(scan: dict[str, Any]) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
+    # Exposure columns are APPENDED, never inserted: a consumer that reads this
+    # export by column index keeps working, and one that reads by header name
+    # picks the new columns up for free.
     writer.writerow([
         "status", "severity", "cwe", "secret_type", "source_url", "confidence",
         "is_new", "verified", "verified_detail", "impact", "matched_value_partial",
         "reason", "found_at",
+        "exposed_since", "exposed_days", "still_served",
     ])
     for f in sorted(scan.get("confirmed_findings", []), key=_sort_key):
         writer.writerow([
@@ -499,6 +521,7 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
             f.get("confidence", 0), "NEW" if f.get("is_new", True) else "RECURRING",
             f.get("verified", "disabled"), f.get("verified_detail", ""), f.get("impact", ""),
             redact_finding(f), f.get("reason", ""), f.get("found_at", ""),
+            *_exposure_cells(f),
         ])
     for f in scan.get("needs_review_findings", []):
         writer.writerow([
@@ -506,6 +529,7 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
             f.get("source_url", f.get("target_url", "")),
             "", "", "", "", f.get("impact", ""), redact_finding(f),
             f.get("reason", ""), f.get("found_at", ""),
+            *_exposure_cells(f),
         ])
     # Public-by-design values, at INFO. Included so the export shows the scanner
     # examined them and cleared them; a reader who sees nothing cannot tell that
@@ -516,6 +540,7 @@ def generate_csv_report(scan: dict[str, Any]) -> str:
             f.get("source_url", f.get("target_url", "")),
             f.get("confidence", 0), "", "", "", "", redact_finding(f),
             f.get("reason", ""), f.get("found_at", ""),
+            *_exposure_cells(f),
         ])
     # R8 follow-up — passive security-posture issues (missing/weak headers,
     # version disclosure, insecure cookies). These are findings the scan made and
@@ -681,6 +706,12 @@ def generate_sarif_report(scan: dict[str, Any]) -> str:
                 "found_at": str(f.get("found_at", "") or ""),
                 # Present only on deep scans: which host in the domain served it.
                 **({"host": str(f["_host"])} if f.get("_host") else {}),
+                # Present only when a public archive could date the asset. A
+                # consumer gating on SARIF can then sort by how long a key has
+                # been readable rather than only by its type — which is usually
+                # the better triage order, since a two-year-old exposure needs a
+                # different response from one introduced in last week's deploy.
+                **({"exposure": f["exposure"]} if f.get("exposure") else {}),
                 "status": status,
             },
         })
@@ -879,6 +910,33 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
     def _loc(f: dict[str, Any]) -> str:
         return html.escape(str(f.get("source_url", f.get("target_url", ""))))
 
+    def _exposure(f: dict[str, Any]) -> str:
+        """How long this credential has been readable, if an archive can date it.
+
+        Rendered into the existing impact cell rather than as a ninth column:
+        the table already carries eight and a new one costs every reader width
+        on every row, while only the minority of findings an archive has a
+        capture for can say anything here.
+
+        The two cases are coloured apart on purpose. A key present in both the
+        archive and today's bundle is worse than the severity alone suggests —
+        it has been takeable for the whole window. One present only in the
+        archive is the opposite, and is the one piece of GOOD news this report
+        has ever been able to deliver.
+        """
+        window = f.get("exposure") or {}
+        if not window:
+            return ""
+        verdict = html.escape(str(window.get("verdict", "")))
+        advice = html.escape(str(window.get("advice", "")))
+        tone = "sev-critical" if window.get("still_served") else "sev-low"
+        label = "EXPOSED {}".format(
+            html.escape(str(window.get("first_seen", "")))
+        ) if window.get("still_served") else "ARCHIVE ONLY"
+        return (f'<div class="small" style="margin-top:6px;">'
+                f'<span class="sev {tone}">{label}</span> {verdict}'
+                f'<br><em>{advice}</em></div>')
+
     def conf_row(f: dict[str, Any]) -> str:
         verified = str(f.get("verified", "")).lower()
         vbadge = ('<span class="sev sev-critical">VERIFIED ACTIVE</span>'
@@ -892,7 +950,9 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
                 f'<td class="mono small">{html.escape(redact_finding(f))}</td>'
                 f'<td style="text-align:center;">{int(f.get("confidence", 0) or 0)}%</td>'
                 f'<td class="small">{vbadge}</td>'
-                f'<td class="small">{html.escape(impact) if impact else html.escape(str(f.get("reason", "")))}</td>'
+                f'<td class="small">'
+                f'{html.escape(impact) if impact else html.escape(str(f.get("reason", "")))}'
+                f'{_exposure(f)}</td>'
                 "</tr>")
 
     def review_row(f: dict[str, Any]) -> str:
@@ -901,7 +961,8 @@ def generate_deep_scan_html(deep: dict[str, Any]) -> str:
                 f"<td>{_sev(f)}</td>"
                 f'<td>{html.escape(str(f.get("secret_type", "")))}</td>'
                 f'<td class="mono small">{_loc(f)}</td>'
-                f'<td class="small">{html.escape(str(f.get("reason", "")))}</td>'
+                f'<td class="small">{html.escape(str(f.get("reason", "")))}'
+                f'{_exposure(f)}</td>'
                 "</tr>")
 
     # Public-by-design values, aggregated across hosts. `review_row` already
