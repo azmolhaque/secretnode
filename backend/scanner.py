@@ -1641,6 +1641,522 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
 ]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-provider remediation
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `_DEFAULT_REMEDIATION` says: revoke at the provider, purge from history, serve
+# it from a secret manager. That is sound and it is the advice a reader would
+# have given themselves. 79 of 111 detectors shipped it on CRITICAL and HIGH
+# findings, which is the difference between a report that names a problem and
+# one a person can act on before lunch.
+#
+# Each entry answers the three questions the default cannot:
+#
+#   where     the specific console page that revokes this credential
+#   reach     what the holder of it can do, so severity is arguable rather
+#             than asserted
+#   after     what to check for abuse, because rotating a key that was used
+#             closes the hole and leaves the damage
+#
+# Kept as a table rather than inline on each pattern: 79 remediation strings
+# spread through a 4,000-line registry cannot be reviewed as a body of writing,
+# and consistency of voice across them is the thing a reader notices.
+_REMEDIATION: dict[str, str] = {
+    # ── Cloud platforms ───────────────────────────────────────────────────
+    "AWS Access Key": (
+        "Deactivate then delete this key in IAM -> Users -> Security credentials, "
+        "and issue a replacement only if nothing can use a role instead. Review "
+        "CloudTrail for the key's access-key ID over the whole exposure window — "
+        "an AWS key reaches every service its IAM policy allows, and the common "
+        "case is far broader than whatever the page needed."
+    ),
+    "AWS Secret Access Key": (
+        "This is the half that authenticates. Deactivate the key pair in IAM "
+        "immediately, then read CloudTrail for the matching access-key ID before "
+        "assuming it went unused. Prefer a role with a short-lived session over "
+        "reissuing a long-lived pair."
+    ),
+    "Azure Storage Account Key": (
+        "Rotate key1/key2 under the storage account's Access keys blade — rotate "
+        "one, move clients over, then rotate the other. An account key grants "
+        "full control of every container and blob in the account, so check the "
+        "storage analytics logs for reads you did not make. A scoped SAS token, "
+        "or Entra ID, is what should ship instead."
+    ),
+    "Google Cloud API Key": (
+        "Restrict or regenerate it under APIs & Services -> Credentials. A key "
+        "with no application restriction can be called by anyone against the "
+        "APIs it enables, billed to your project — check the API quota and "
+        "billing report for the exposure period. If it is a browser key, an HTTP "
+        "referrer restriction is the fix rather than hiding it."
+    ),
+    "Google OAuth Client Secret": (
+        "Reset it under APIs & Services -> Credentials -> OAuth 2.0 Client IDs. "
+        "With the client ID beside it, this secret completes the authorization-"
+        "code exchange, so anyone holding both can impersonate your application "
+        "to Google and to your own users. A browser-delivered app should be a "
+        "public client using PKCE, which has no secret to leak."
+    ),
+    "Alibaba Access Key ID": (
+        "Disable the key pair in the RAM console and check ActionTrail for calls "
+        "made with it. The ID alone cannot authenticate, so look for its secret "
+        "in the same bundle before deciding the exposure is limited."
+    ),
+    "DigitalOcean PAT": (
+        "Revoke it under API -> Tokens in the DigitalOcean control panel. A "
+        "read/write token can create, resize and destroy Droplets, databases and "
+        "Spaces across the whole team, so review the account's activity log "
+        "before reissuing — and issue the replacement read-only if it only reads."
+    ),
+
+    # ── Source control and packages ───────────────────────────────────────
+    "GitHub Personal Access Token": (
+        "Revoke it under Settings -> Developer settings -> Personal access tokens. "
+        "A classic PAT carries its scopes across EVERY repository and "
+        "organisation you can reach, so check the account's security log for "
+        "clones and pushes in the exposure window. Replace it with a "
+        "fine-grained token scoped to the one repository that needed it."
+    ),
+    "GitHub Fine-Grained PAT": (
+        "Revoke it under Settings -> Developer settings -> Personal access tokens "
+        "-> Fine-grained. Narrower than a classic PAT, but still check the "
+        "security log for the repositories it was granted, and confirm no "
+        "workflow or deploy depends on it before deleting."
+    ),
+    "GitHub OAuth Token": (
+        "Revoke the authorisation under Settings -> Applications, which "
+        "invalidates the token for that app. Then audit what the app did on your "
+        "behalf: an OAuth token acts as you, within the scopes you approved."
+    ),
+    "GitHub Server/Refresh Token": (
+        "Rotate the GitHub App's credentials in its settings page — a "
+        "server-to-server token is minted from the app's private key, so "
+        "rotating the token alone is not enough if the key also leaked. Review "
+        "the installation's audit log for the exposure window."
+    ),
+    "GitLab Personal Access Token": (
+        "Revoke it under Preferences -> Access tokens. Its scopes apply to every "
+        "project and group your account can reach, including CI variables, so "
+        "check the audit events before reissuing — and prefer a project access "
+        "token scoped to one project."
+    ),
+    "npm Access Token": (
+        "Revoke it at npmjs.com under Access Tokens. A publish token can push a "
+        "new version of every package you maintain, which is a supply-chain "
+        "exposure rather than an account one: check the publish history of each "
+        "package for versions you did not release, and enable 2FA for publishing."
+    ),
+    "PyPI Upload Token": (
+        "Revoke it in your PyPI account settings under API tokens. The same "
+        "supply-chain reasoning as npm applies — check each project's release "
+        "history for files you did not upload, and scope the replacement to a "
+        "single project rather than the whole account."
+    ),
+    "RubyGems API Token": (
+        "Revoke it in your RubyGems profile under API keys, then check the "
+        "versions page of every gem you own for a release you did not push. "
+        "Scope the replacement to the one permission it needs."
+    ),
+    "Artifactory API Key": (
+        "Revoke it in the JFrog platform under your profile's authentication "
+        "settings. An Artifactory key reaches every repository your user can "
+        "read or deploy to, so review the access log for downloads and uploads "
+        "before reissuing as a scoped access token."
+    ),
+    "Artifactory Reference Token": (
+        "Revoke it alongside any API key for the same identity in the JFrog "
+        "platform. A reference token is exchanged for a full access token, so "
+        "treat it as equivalent to the credential it stands in for."
+    ),
+    "PlanetScale API Token": (
+        "Delete it under Settings -> Service tokens in the PlanetScale "
+        "organisation. It can read and modify database branches and deploy "
+        "requests, so check the organisation's audit log before issuing a "
+        "replacement with narrower accesses."
+    ),
+    "PlanetScale OAuth Token": (
+        "Revoke the OAuth application's grant in the PlanetScale organisation "
+        "settings. It acts on behalf of the authorising user, so audit the "
+        "branches and deploy requests touched during the exposure window."
+    ),
+    "PlanetScale Password": (
+        "Delete this database password in the branch's Passwords tab and create "
+        "a new one. It is a live database credential — check the query insights "
+        "and connection history for sessions you did not open, and scope the "
+        "replacement to the branch and role that actually needs it."
+    ),
+    "Sourcegraph Access Token": (
+        "Revoke it under User settings -> Access tokens. It reads every "
+        "repository the instance has indexed and that your user can see, which "
+        "on a company instance is usually all of them — treat exposed source as "
+        "the finding, not just the token."
+    ),
+    "Sourcegraph Access Token (legacy)": (
+        "Revoke it under User settings -> Access tokens and reissue in the "
+        "current `sgp_` format. The legacy form is a bare hex string, so it is "
+        "easy to paste into a config and miss on review."
+    ),
+    "Intra42 Client Secret": (
+        "Regenerate the application's secret in the 42 intranet API settings. "
+        "With the client ID it completes the OAuth exchange, so any application "
+        "built on it should be treated as impersonable until rotated."
+    ),
+
+    # ── Payments and commerce ─────────────────────────────────────────────
+    "Stripe Secret Key": (
+        "Roll it immediately in the Stripe dashboard under Developers -> API "
+        "keys. A live secret key can create charges, issue refunds and read "
+        "every customer record — review the Events and Logs pages for API calls "
+        "you did not make, and treat the customer data it could read as "
+        "disclosed. Restricted keys exist for exactly the narrow jobs a page "
+        "usually needs."
+    ),
+    "Square Access Token": (
+        "Revoke it in the Square Developer dashboard for the matching "
+        "application, then review the transaction and refund history for the "
+        "exposure window. A production token moves real money."
+    ),
+    "Shopify Access Token": (
+        "Uninstall or rotate the app's credentials in the store's Apps and sales "
+        "channels settings. The token reads and writes whatever scopes the app "
+        "requested — commonly orders and customers — so treat that data as "
+        "disclosed and check the store's events log."
+    ),
+    "KuCoin Access Token": (
+        "Delete this API key in the KuCoin account settings now, then review "
+        "trade and withdrawal history for activity you did not initiate. An "
+        "exchange credential can move funds, so rotation alone is not the end of "
+        "the incident — reissue with the narrowest permissions and an IP "
+        "allowlist."
+    ),
+    "Adobe Client Secret": (
+        "Rotate it in the Adobe Developer Console for the matching project. With "
+        "the client ID it authenticates your integration to Adobe's APIs, so "
+        "check the project's usage before reissuing."
+    ),
+
+    # ── Messaging and communications ──────────────────────────────────────
+    "Slack Token": (
+        "Revoke it in the Slack app's OAuth & Permissions page, which "
+        "invalidates it workspace-wide. Its scopes decide the reach — a bot "
+        "token commonly reads channel history and posts as the app — so review "
+        "the workspace's audit log and treat any private channel it could read "
+        "as disclosed."
+    ),
+    "Slack App-Level Token": (
+        "Revoke it under Basic Information -> App-Level Tokens. It authorises "
+        "Socket Mode connections for the whole app rather than one workspace, so "
+        "rotate it before the next deploy and check for connections you did not "
+        "open."
+    ),
+    "Slack Webhook": (
+        "Delete the webhook in the Slack app's Incoming Webhooks page and create "
+        "a new one. It cannot read anything, but anyone holding it can post into "
+        "that channel as your app — which is a convincing phishing primitive "
+        "inside a workspace people trust."
+    ),
+    "SendGrid API Key": (
+        "Delete it under Settings -> API Keys and check the Activity feed and "
+        "suppression lists for mail you did not send. A full-access key can send "
+        "as any verified sender you own, so treat domain reputation as part of "
+        "the damage, and scope the replacement to Mail Send only."
+    ),
+    "Mailgun API Key": (
+        "Rotate it in the Mailgun dashboard under API Security, then check the "
+        "Logs for messages you did not send. Sending as your own verified domain "
+        "is what makes this worse than the quota: a phish from your domain "
+        "passes SPF and DKIM."
+    ),
+    "Brevo (Sendinblue) API Token": (
+        "Revoke it under SMTP & API -> API keys, then review the email and SMS "
+        "logs for traffic you did not send. The key also reads your contact "
+        "lists, so treat that data as disclosed."
+    ),
+    "Twilio Auth Token": (
+        "Rotate the auth token in the Twilio console's account settings. With the "
+        "Account SID it can send SMS and place calls billed to you, and read "
+        "message bodies and call logs — check the Monitor logs for traffic you "
+        "did not originate, and use an API Key pair instead of the account token."
+    ),
+    "Telegram Bot Token": (
+        "Revoke it by sending /revoke to BotFather and issuing a new token. "
+        "Anyone holding it controls the bot completely: reading every message "
+        "sent to it and posting as it in every chat it has joined."
+    ),
+    "Discord Bot Token": (
+        "Reset it in the Discord Developer Portal under the application's Bot "
+        "page. The token controls the bot in every guild it has joined, with "
+        "whatever intents and permissions were granted — check the audit logs of "
+        "those guilds before reissuing."
+    ),
+    "Discord Client Secret": (
+        "Reset it under the application's OAuth2 page. With the client ID it "
+        "completes the OAuth exchange, so anyone with both can impersonate your "
+        "application to Discord users."
+    ),
+    "Asana Client Secret": (
+        "Reset it in the Asana developer console for the matching app. With the "
+        "client ID it completes the OAuth exchange and can act for any user who "
+        "authorised the app."
+    ),
+    "LinkedIn Client Secret": (
+        "Regenerate it in the LinkedIn developer portal under the app's Auth "
+        "tab. With the client ID it completes the OAuth exchange and can act for "
+        "every member who authorised the app."
+    ),
+
+    # ── AI and ML providers ───────────────────────────────────────────────
+    "OpenAI API Key": (
+        "Revoke it at platform.openai.com under API keys and check the Usage "
+        "page for spend you did not incur — this is the most commonly abused "
+        "class of leaked key, because it is immediately resellable. A browser "
+        "that calls OpenAI directly needs a backend proxy instead, since any key "
+        "it holds is public by construction."
+    ),
+    "OpenAI Service Account Key": (
+        "Delete the service account's key in the project's settings at "
+        "platform.openai.com. A service-account key is not tied to a person, so "
+        "nobody notices it being used — check project usage over the whole "
+        "exposure window rather than recent days."
+    ),
+    "Anthropic API Key": (
+        "Revoke it in the Anthropic Console under API keys and check Usage for "
+        "spend you did not incur. Keys are billed per token and are resold, so "
+        "assume it was used if it was public for any length of time; a browser "
+        "calling the API directly needs a server-side proxy."
+    ),
+    "Groq API Key": (
+        "Revoke it in the GroqCloud console under API Keys and review usage for "
+        "the exposure window. Inference keys are billed and resold."
+    ),
+    "Hugging Face Access Token": (
+        "Revoke it at huggingface.co under Settings -> Access Tokens. A write "
+        "token can push to every model, dataset and Space you can write to, "
+        "which is a supply-chain exposure — check the commit history of each "
+        "before reissuing a read-only token."
+    ),
+    "Replicate API Token": (
+        "Revoke it in your Replicate account settings and check billing for "
+        "predictions you did not run. GPU inference is expensive enough that "
+        "abuse shows up quickly on the invoice."
+    ),
+    "Perplexity API Key": (
+        "Revoke it in the Perplexity API settings and review usage for the "
+        "exposure window. Billed per request and resold like any inference key."
+    ),
+    "xAI API Key": (
+        "Revoke it in the xAI console under API keys and check usage for calls "
+        "you did not make."
+    ),
+    "OpenRouter API Key": (
+        "Revoke it at openrouter.ai under Keys. An OpenRouter key spends real "
+        "credit across every model it can route to, so check the activity page "
+        "and set a credit limit on the replacement."
+    ),
+    "Cohere API Token": (
+        "Revoke it in the Cohere dashboard under API Keys and review usage. "
+        "Billed per token like any inference credential."
+    ),
+    "LangSmith API Key": (
+        "Revoke it in LangSmith under Settings -> API Keys. It reads your traces, "
+        "which routinely contain the prompts and responses of real users — treat "
+        "that as a data disclosure, not only an access one."
+    ),
+    "Pinecone API Key": (
+        "Rotate it in the Pinecone console for the matching project. It reads and "
+        "deletes every vector index in that project, and the vectors themselves "
+        "are derived from your source data — treat the embedded content as "
+        "disclosed."
+    ),
+
+    # ── Data, infrastructure and observability ────────────────────────────
+    "Database Connection URI": (
+        "Change the database password now and check the server's connection and "
+        "query logs for sessions you did not open. A connection string in "
+        "client-side code is a direct path to the data, so treat every table the "
+        "user can read as disclosed until the logs say otherwise — and put the "
+        "database behind an API rather than reissuing a reachable credential."
+    ),
+    "Basic-Auth URL Credentials": (
+        "Change the password on the named account and check that service's access "
+        "log. Credentials in a URL leak further than most: they appear in browser "
+        "history, proxy logs and Referer headers, so assume wider exposure than "
+        "the bundle alone."
+    ),
+    "Private Key Block": (
+        "Treat every system trusting this key as compromised. Generate a new "
+        "keypair, replace the public half everywhere it is authorised, then "
+        "revoke the old one — in that order, so nothing locks out. Check the "
+        "authentication logs of each system for sessions you did not open; a "
+        "private key gives access without any further secret."
+    ),
+    "HashiCorp Vault Token": (
+        "Revoke it with `vault token revoke` and check the audit device for "
+        "paths it read. A Vault token is a key to other keys: every secret its "
+        "policies allow must be treated as disclosed and rotated too, which is "
+        "usually the larger job."
+    ),
+    "Terraform Cloud Token": (
+        "Revoke it in HCP Terraform under the user or team's Tokens page. It can "
+        "read state files — which routinely contain the credentials Terraform "
+        "provisioned — and queue applies against real infrastructure. Audit the "
+        "workspace run history, and rotate anything the state exposed."
+    ),
+    "Doppler Token": (
+        "Revoke it in the Doppler dashboard under the project's Access tab. A "
+        "service token reads every secret in its config, so the exposure is the "
+        "whole config rather than this one value — rotate those secrets too."
+    ),
+    "Supabase Access Token": (
+        "Revoke it in the Supabase dashboard under Account -> Access Tokens. It "
+        "manages every project in your organisation through the Management API, "
+        "including database settings and other keys."
+    ),
+    "Supabase Secret Key": (
+        "Rotate it in the project's API settings. A service-role key bypasses "
+        "Row Level Security entirely — it reads and writes every row in every "
+        "table regardless of policy — so treat the whole database as disclosed "
+        "and check the logs. The anon key is what belongs in a browser."
+    ),
+    "Confluent Secret Key": (
+        "Delete the API key pair in the Confluent Cloud console and check the "
+        "audit log for consumer groups and produce requests you did not create. "
+        "It reads and writes the topics its ACLs allow, which means the message "
+        "stream itself is the exposure."
+    ),
+    "Confluent Access Token": (
+        "Delete the API key pair in the Confluent Cloud console. The key alone "
+        "cannot authenticate, so look for its secret in the same bundle before "
+        "deciding the exposure is limited."
+    ),
+    "Datadog API Key": (
+        "Revoke it under Organization Settings -> API Keys. It submits metrics, "
+        "logs and events as your organisation, so the risk is poisoned telemetry "
+        "and hidden alerts as much as data — check for series you did not send."
+    ),
+    "New Relic API Key": (
+        "Revoke it under API keys in the New Relic account settings. A user key "
+        "reads your telemetry and can change alert policies, so check the audit "
+        "events for configuration changes as well as reads."
+    ),
+    "Grafana Service Account Token": (
+        "Revoke it under Administration -> Service accounts. Its role decides the "
+        "reach: an Editor can change dashboards and alert rules, which is a way "
+        "to hide an incident rather than merely observe one."
+    ),
+    "Dynatrace API Token": (
+        "Revoke it in Dynatrace under Access tokens. Its scopes decide the reach, "
+        "and token scopes there are commonly far broader than the one endpoint a "
+        "page calls — reissue with only the scopes actually used."
+    ),
+    "Databricks Token": (
+        "Revoke it under User Settings -> Developer -> Access tokens. It can run "
+        "notebooks and jobs against your clusters and read every table the user "
+        "can — treat the data in that workspace as disclosed and check the audit "
+        "logs."
+    ),
+    "Defined Networking API Token": (
+        "Revoke it in the Defined Networking admin panel. It manages hosts and "
+        "their certificates on your overlay network, so an attacker holding it "
+        "can enrol a host of their own — review the host list for enrolments you "
+        "did not make."
+    ),
+    "Cloudflare API Token": (
+        "Roll it in the Cloudflare dashboard under My Profile -> API Tokens, and "
+        "check the account audit log. Check its permissions while you are there: "
+        "a token scoped to Zone:Edit on every zone is the common case and is far "
+        "broader than whatever the page needed."
+    ),
+
+    # ── Developer tools and SaaS ──────────────────────────────────────────
+    "Atlassian API Token": (
+        "Revoke it at id.atlassian.com under Security -> API tokens. It acts as "
+        "your user across Jira and Confluence, so every issue and page you can "
+        "read should be treated as disclosed — check the Atlassian audit log."
+    ),
+    "Postman API Key": (
+        "Revoke it in Postman under Settings -> API keys. It reads your "
+        "collections and environments, and environments are where people keep "
+        "the credentials for the APIs they are testing — treat those as exposed "
+        "too."
+    ),
+    "Linear API Key": (
+        "Revoke it in Linear under Settings -> API. It reads and writes every "
+        "issue and comment in the workspaces your account can reach."
+    ),
+    "Notion Integration Token": (
+        "Revoke it in the Notion integration's settings. It reaches every page "
+        "and database the integration was shared with, so review what is shared "
+        "with it before reissuing — that list usually grows without anyone "
+        "noticing."
+    ),
+    "Figma Personal Access Token": (
+        "Revoke it in Figma under Settings -> Security -> Personal access tokens. "
+        "It reads every file your account can open, and design files routinely "
+        "contain unreleased product and real customer data."
+    ),
+    "Airtable Personal Access Token": (
+        "Revoke it at airtable.com/create/tokens. Its scopes and base list decide "
+        "the reach, and a token granted to all current and future bases is the "
+        "common mistake — treat the records in those bases as disclosed."
+    ),
+    "Airtable API Key": (
+        "Legacy Airtable API keys reach every base your account can see, with no "
+        "scoping at all. Delete it in your account settings and replace it with a "
+        "personal access token scoped to the one base that needed it."
+    ),
+    "Heroku API Key": (
+        "Regenerate it with `heroku authorizations:rotate` or in Account "
+        "Settings. It controls every app in your account — config vars included, "
+        "which is where the rest of your secrets live — so rotate those too and "
+        "check the app activity feed."
+    ),
+    "Firebase Cloud Messaging Key": (
+        "Revoke it in the Firebase console under Project settings -> Cloud "
+        "Messaging. Anyone holding it can send push notifications to every "
+        "installed app, which is a phishing channel straight onto your users' "
+        "lock screens."
+    ),
+
+    # ── Public by design ──────────────────────────────────────────────────
+    #
+    # These three are classed public-by-design by the triage tier and reported
+    # at INFO, and they were still carrying "treat as compromised: revoke the
+    # credential immediately". That is the same defect v2.16.1 fixed for OAuth
+    # client IDs — advice that is wrong rather than merely unhelpful, on the
+    # findings a reader is most likely to skim. Wrong advice on a low-severity
+    # line teaches a reader to discount the CRITICAL ones.
+    "Stripe Publishable Key": (
+        "No action needed: a pk_ key is designed to ship in client code and can "
+        "only create payment tokens. Worth one check — confirm the secret half "
+        "(sk_) is not in the same bundle, which is the mistake this finding is "
+        "usually sitting next to."
+    ),
+    "Sentry DSN": (
+        "No action needed: a DSN is an ingest endpoint meant to be embedded in "
+        "the client, and it permits sending events rather than reading them. If "
+        "the volume matters, enable rate limiting and spike protection for the "
+        "project — a public DSN can be used to flood your quota."
+    ),
+    "PostHog Project API Key": (
+        "No action needed: a phc_ project key is a write-only ingest identifier "
+        "intended for browser use and grants no read access to captured data. "
+        "Check that it is the project key rather than a personal API key, which "
+        "is a different credential and does read."
+    ),
+
+    # ── Structural ────────────────────────────────────────────────────────
+    "JWT Token": (
+        "Revoke the session or key at the issuer named in the token's `iss` "
+        "claim — a JWT cannot be invalidated by deleting it from the bundle, "
+        "because verification is offline. If it has no expiry it stays valid "
+        "until the signing key rotates, which makes rotating that key the real "
+        "fix. Check the issuer's logs for use of this subject in the window."
+    ),
+}
+
+
 def _derive_prefilter(pattern: re.Pattern[str]) -> tuple[str, ...]:
     """A mandatory literal read off a prefix-anchored pattern, or ().
 
@@ -1681,6 +2197,17 @@ def _derive_prefilter(pattern: re.Pattern[str]) -> tuple[str, ...]:
 SECRET_PATTERNS = [
     p if (p.prefilter or p.name == GENERIC_SECRET_TYPE)
     else replace(p, prefilter=_derive_prefilter(p.regex))
+    for p in SECRET_PATTERNS
+]
+
+# Per-provider remediation, applied only where a pattern still carries the
+# default. A pattern that defines its own text always wins: the table is a
+# backstop for the 79 detectors that had none, not an override of considered
+# wording already written beside a detector.
+SECRET_PATTERNS = [
+    replace(p, remediation=_REMEDIATION[p.name])
+    if p.remediation == _DEFAULT_REMEDIATION and p.name in _REMEDIATION
+    else p
     for p in SECRET_PATTERNS
 ]
 
@@ -3468,6 +3995,49 @@ def _tier_config(thinking_level: str) -> types.GenerateContentConfig:
 _NON_RETRYABLE_AI_CODES = frozenset({400, 401, 403, 404})
 _ai_disabled_reason: "str | None" = None
 
+# Set once a Gemini call returns a verdict, so health can say "ok" on evidence
+# rather than on the absence of a recorded failure.
+_ai_calls_succeeded: bool = False
+
+
+def ai_tier_status() -> dict[str, object]:
+    """What the AI tier will actually do on the next finding.
+
+    `/api/health` reported `bool(os.environ.get("GEMINI_API_KEY"))` and called
+    that `gemini_configured`. A rejected key, or a model the key cannot call,
+    still reported true — and the operator learned otherwise by noticing AI
+    verdicts missing from a finished report. That is the same shape as the
+    coverage bug v2.14.4 fixed: an absence that reads as a clean result.
+
+    This reports the latched state instead, which is derived from real calls
+    rather than from a variable existing. No API request is made here: a health
+    endpoint polled by a monitor must not spend tokens or rate limit, and the
+    scanner already records a permanent config failure the first time it hits
+    one.
+
+    `status` is one of:
+        disabled   no key — the documented offline default, not a fault
+        failing    a key is set and a call failed permanently; `reason` says how
+        untested   a key is set and nothing has been validated yet this process
+        ok         a call has succeeded since this process started
+    """
+    configured = bool(os.environ.get("GEMINI_API_KEY"))
+    if not configured:
+        status, reason = "disabled", "no GEMINI_API_KEY — offline triage tier in use"
+    elif _ai_disabled_reason:
+        status, reason = "failing", _ai_disabled_reason
+    elif _ai_calls_succeeded:
+        status, reason = "ok", ""
+    else:
+        status, reason = "untested", "no finding has been validated yet this process"
+    return {
+        "configured": configured,
+        "status": status,
+        "reason": reason,
+        "tier1_model": GEMINI_TIER1_MODEL,
+        "tier2_model": GEMINI_TIER2_MODEL,
+    }
+
 
 def _describe_ai_config_error(code: object, exc: Exception) -> str:
     s = str(exc).lower()
@@ -3571,6 +4141,11 @@ async def _call_tier(
                 # an out-of-range / malformed verdict raises here and degrades to
                 # needs-review rather than being silently coerced.
                 verdict = GeminiVerdict.model_validate_json(text)
+            # Evidence that the tier works, for `ai_tier_status()`. Reporting
+            # "ok" on the absence of a recorded failure would call an untried
+            # key healthy, which is the claim this whole change exists to stop.
+            global _ai_calls_succeeded
+            _ai_calls_succeeded = True
             return verdict, ""
 
         except genai_errors.APIError as exc:

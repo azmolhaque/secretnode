@@ -40,7 +40,8 @@ load_dotenv()
 # so the speed-up is preserved without a module-level global side effect.
 
 import netguard
-from scanner import run_scan, ScanState, load_asset_cache, drain_asset_cache
+from scanner import (ai_tier_status, drain_asset_cache, load_asset_cache,
+                     run_scan, ScanState)
 import orchestrator
 from ops import ledger
 from storage import (
@@ -377,7 +378,11 @@ async def health() -> dict[str, Any]:
         "status": "ok",
         "service": f"SecretNode v{report_gen._TOOL_VERSION}",
         "version": report_gen._TOOL_VERSION,
+        # Kept for existing consumers, and no longer the whole story: it says a
+        # variable is set, which a rejected key also satisfies. `ai` below says
+        # what the tier will actually do.
         "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
+        "ai": ai_tier_status(),
         "discord_configured": bool(os.environ.get("DISCORD_WEBHOOK_URL")),
         "max_concurrent_scans": MAX_CONCURRENT_SCANS,
         "verification_default": os.environ.get("VERIFY_SECRETS", "false").lower() == "true",

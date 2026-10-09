@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-1084%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.18.0-blue)
+![Tests](https://img.shields.io/badge/tests-1106%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.19.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,36 +14,34 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.18.0 — how long has this credential been public?** ·
+> **v2.19.0 — the report earns its conclusions** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> SecretNode has pulled archived bundles from the Wayback index since v2.9. It
-> asked for `fl=original` — the URL field alone — and discarded the **timestamp
-> that comes back free on every row**. Three releases scanned archived assets
-> while throwing away the only thing capable of dating them. One field name.
+> Finding a credential is half the job. **79 of 111 detectors gave identical
+> advice** — revoke at the provider, purge from history, move it server-side.
+> Sound, and precisely what a reader would have told themselves.
 >
-> The question changes the answer. A key in a 2021 archived bundle **and** in
-> today's has been readable by anyone for five years, so the advice is not
-> "rotate" but **"rotate, and treat it as used"**. A key in the archive and gone
-> from today's bundle was already fixed — the scanner delivering **good news**,
-> which it has never had a way to express. That case still warns that deleting a
-> secret from a bundle does not revoke it, and the archived copy stays readable.
+> Every CRITICAL and HIGH detector now answers the three questions that default
+> cannot: **where** the console page that revokes it is, **what** the credential
+> reaches, and **what to check for abuse afterwards** — because rotating a key
+> that was already used closes the hole and leaves the damage. An AWS key points
+> at CloudTrail; a Vault token says every secret its policies allow must be
+> rotated too; a Supabase service-role key says it bypasses Row Level Security
+> entirely.
 >
-> The window is keyed on the **credential, not the asset**: the same fingerprint
-> in a 2019 bundle and today's has one exposure history, and the earliest capture
-> wins across every host. `still_served` is decided the only way a scan honestly
-> can — the same fingerprint also appearing from a URL the archive did not supply.
+> **Three findings were told to do something actively wrong.** A Stripe
+> publishable key, a Sentry DSN and a PostHog project key are public by design
+> and reported at INFO — while carrying "treat as compromised: revoke
+> immediately". Wrong advice on a low-severity line teaches a reader to discount
+> the CRITICAL ones. A test now asserts the registry and the triage tier agree.
 >
-> It is equally deliberate about what it will not say. A finding the archive
-> cannot date carries **no window at all**, because writing today's date would
-> read as "exposed just now". A future or unparseable date produces nothing.
-> And CommonCrawl contributes no dates: it is queried against one collection, so
-> its timestamps would *understate* an exposure — the direction that matters.
->
-> In the CSV (three appended columns), the SARIF (`properties.exposure`) and the
-> deep-scan HTML (a badge that colours the two cases apart), each tested rather
-> than assumed.
+> And `/api/health` reported `gemini_configured` from `bool(os.environ.get(…))`,
+> which a **rejected** key also satisfies. It now reports what the AI tier will
+> actually do — `disabled`, `untested`, `failing` with its reason, or `ok` — and
+> makes **no API call** to say so: a monitor-polled endpoint must not spend
+> tokens, and `ok` requires evidence of a successful call rather than the absence
+> of a recorded failure.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
