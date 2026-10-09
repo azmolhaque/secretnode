@@ -3,6 +3,89 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.17.0] — Checking 96 of 111 detectors against their issuers, not against ourselves
+
+v2.16.1 established that a detector can score 1.000 on the ground-truth corpus
+**and** 99.1% against gitleaks while matching zero real credentials, because both
+corpora derive their specimens from the same regex the detector uses. The answer
+was `bench/vendorshapes.py`, built from issuer documentation.
+
+It covered 16 detectors out of 108. The other 92 sat in exactly the blind spot
+that had produced the Mapbox defect. This release closes most of that gap, and
+closing it found four more defects.
+
+### The corpus grew from 16 detectors to 96
+
+Every shape names where its format comes from, and nothing is read off this
+project's own regexes. Where a format could not be stated from the issuer's
+documentation or a specification, the detector is recorded in a new
+`UNDOCUMENTED` table with the reason instead of being given a guessed shape —
+**a corpus that invents a shape to reach full coverage is the ground-truth corpus
+again, one indirection further out.**
+
+Coverage is now printed on every run, and a detector with neither a shape nor a
+recorded reason **fails the gate**. That caught its first omission immediately:
+renaming the Cloudflare shape left the prefixed detector silently uncovered.
+
+```
+  detectors        96/111 covered   (86%)
+  detected         101/101   (100.0%)
+  unchecked          15   no issuer-documented shape (0 without a recorded reason)
+```
+
+### Three disagreements, resolved in three different directions
+
+The discipline matters more than any one fix: when a construction and a pattern
+disagree, which side is wrong has to be decided before anything changes.
+
+**Hugging Face — the pattern was too narrow.** `api_org_` demanded
+`[A-Za-z]{34}`, letters only, while its sibling `hf_` detector accepted
+alphanumerics. That is a defect whichever is right, and it was the expensive
+direction: a random 34-character alphanumeric token contains no digit at all only
+**0.25%** of the time, so a letters-only class misses 99.75% of real tokens if
+digits occur. Widened rather than swapped, because gitleaks also writes
+letters-only and neither source is the issuer — accepting both costs nothing,
+since letters-only values are a subset.
+
+**Cloudflare — the pattern demanded a prefix the common form does not have.** The
+only Cloudflare token detector required `cfat_`/`cfut_`/`cfk_`. A Cloudflare API
+token is 40 characters with no prefix at all, and the corpus reported one
+reaching nothing but the generic catch-all. Split the way Sourcegraph was in
+v2.16.0: prefixed forms unconditional, the common form keyword-anchored. The
+**global API key** (37 hex, authenticates as the whole account, cannot be scoped)
+was missing entirely and is now covered at CRITICAL.
+
+**Azure — the shape was wrong and the detector was right.** The pattern requires
+the literal `AccountKey=` because an Azure connection string is the only form the
+portal hands the key out in. The bare 88-character shape was the mistake. Not
+every disagreement is a pattern defect, and a corpus that assumed otherwise would
+start breaking working detectors.
+
+### Twilio API Key SIDs reached nothing at all
+
+The only Twilio pattern here was the contextual auth token, so an `SK`-prefixed
+API Key SID was invisible. Added at HIGH rather than CRITICAL, deliberately: the
+SID identifies a key, the Key Secret beside it is what authenticates — and the
+remediation says to go looking for that secret before concluding the exposure is
+limited.
+
+### Fixed — an endpoint unit test that needed the internet
+
+`test_deep_scan_api` posted `example.com` and asserted 202. In a sandbox with no
+outbound DNS it got 400, because the SSRF guard resolves the host and fails
+closed. **Failing closed is correct; depending on the internet inside an endpoint
+unit test is not.** The fixture now stubs `netguard.resolve_host` only — the
+guard still runs, so the address classification it exists for is still
+exercised. `test_netguard.py` already stated this discipline for its own address
+tests ("no DNS, no sockets"); this extends it to the API.
+
+### Verified
+
+**1051 tests (+22), ruff clean.** 111 detectors; ground truth 111/111 offline
+**and** end-to-end over HTTP, precision 1.000 / recall 1.000, zero mistypes, zero
+decoy false positives. Vendor shapes 101/101 across 96 detectors. Labelled-corpus
+gate PASS. External 208/211 with 0 in-scope misses and 0.0% false alarms.
+
 ## [Unreleased]
 
 ### Fixed — the README's tests badge had been wrong for five releases

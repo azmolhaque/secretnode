@@ -588,6 +588,28 @@ SECRET_PATTERNS: list[SecretPattern] = [
         severity="HIGH",
     ),
     SecretPattern(
+        name="Twilio API Key SID",
+        # Twilio's only detector here was the contextual auth token, so an API
+        # Key SID — the `SK`-prefixed half of an API key pair — reached nothing.
+        # Found by the vendor-shape corpus: a credential built from Twilio's own
+        # documented SID layout was reported by no detector at all.
+        #
+        # HIGH rather than CRITICAL, deliberately. The SID identifies a key; the
+        # Key Secret beside it is what authenticates. Reporting it still matters:
+        # it names a key that exists, and in a shipped bundle the secret is
+        # usually a few characters away.
+        regex=re.compile(r"\b(SK[0-9a-fA-F]{32})\b"),
+        description="Twilio API Key SID",
+        severity="HIGH",
+        remediation=(
+            "Delete this API key in the Twilio console (Account -> API keys). The "
+            "SID alone cannot authenticate, so check the bundle for the Key "
+            "Secret that pairs with it before deciding the exposure is limited — "
+            "if the secret shipped too, treat the account as compromised and "
+            "review message and call logs for traffic you did not send."
+        ),
+    ),
+    SecretPattern(
         name="Twilio Auth Token",
         regex=re.compile(r"(?i)twilio.{0,20}['\"]([0-9a-f]{32})['\"]"),
         description="Twilio Account Auth Token",
@@ -802,7 +824,18 @@ SECRET_PATTERNS: list[SecretPattern] = [
         name="Hugging Face Organization Token",
         # api_org_ is an organisation-wide token; hf_ (below) is per-user. The
         # organisation one has the wider blast radius and was the uncovered one.
-        regex=re.compile(r"\b(api_org_[A-Za-z]{34})\b"),
+        # `[A-Za-z0-9]`, matching the `hf_` detector below. The two were written
+        # with different alphabets for the same vendor, which is a defect
+        # whichever one is right — and this one is the expensive direction: a
+        # random 34-character alphanumeric token contains no digit at all only
+        # 0.25% of the time, so a letters-only class misses 99.75% of real org
+        # tokens if digits occur.
+        #
+        # Widened rather than narrowed, deliberately. gitleaks also writes
+        # letters-only here, so the evidence is not one-sided and neither source
+        # is the issuer. Accepting both costs nothing — letters-only values are a
+        # subset — while the `api_org_` prefix keeps precision intact.
+        regex=re.compile(r"\b(api_org_[A-Za-z0-9]{34})\b"),
         description="Hugging Face organization API token",
         severity="HIGH",
         remediation=(
@@ -1129,9 +1162,45 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Cloudflare API Token",
+        # Split for the same reason as Sourcegraph: the prefixed forms carry
+        # their own discriminator, and the common form does not. A Cloudflare API
+        # token is 40 characters with no prefix at all, so a pattern demanding
+        # `cfat_`/`cfut_`/`cfk_` sees only a minority of them — the vendor-shape
+        # corpus reported a plain 40-character token reaching nothing but the
+        # generic catch-all. The unprefixed half is below, keyword-anchored,
+        # because 40 alphanumerics alone would match half a bundle.
         regex=re.compile(r"\b((?:cfat|cfut|cfk)_[A-Za-z0-9_\-]{32,})\b"),
         description="Cloudflare API token (2026 prefixed format)",
         severity="HIGH",
+    ),
+    SecretPattern(
+        name="Cloudflare API Token (unprefixed)",
+        regex=_contextual("cloudflare", r"[A-Za-z0-9_]{40}"),
+        prefilter=_keyword_prefilter("cloudflare"),
+        description="Cloudflare API token, classic 40-character form (contextual)",
+        severity="HIGH",
+        remediation=(
+            "Roll this token in the Cloudflare dashboard under My Profile -> API "
+            "Tokens. Check its permissions while you are there: a token scoped to "
+            "Zone:Edit on every zone is the common case and is far broader than "
+            "whatever the page needed it for."
+        ),
+    ),
+    SecretPattern(
+        name="Cloudflare Global API Key",
+        # A different and worse credential from the token above: the global key
+        # authenticates as the account itself, cannot be scoped, and is paired
+        # with the account email. gitleaks carries it; this registry did not.
+        regex=_contextual("cloudflare", r"[a-f0-9]{37}"),
+        prefilter=_keyword_prefilter("cloudflare"),
+        description="Cloudflare global API key (contextual)",
+        severity="CRITICAL",
+        remediation=(
+            "The global API key authenticates as the whole account and cannot be "
+            "scoped — rotate it in the Cloudflare dashboard immediately, then "
+            "replace its use with a scoped API token rather than reissuing a "
+            "second global key."
+        ),
     ),
     SecretPattern(
         name="GCP Service Account Key (JSON)",

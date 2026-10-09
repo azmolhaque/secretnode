@@ -3,51 +3,47 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-1029%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.16.1-blue)
+![Tests](https://img.shields.io/badge/tests-1051%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.17.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
 Passive Attack Surface Management scanner for detecting credential leaks in public-facing infrastructure.
-Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (108 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
+Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → regex (111 patterns) + composite/proximity rules + base64 decode → entropy filter → AI validation (Gemini) *or* deterministic offline triage → optional live verification → Discord alerts**, with a live dashboard, SQLite history, scan diffing, false-positive suppression, a **CLI + GitHub Action**, and **SARIF / HTML / CSV / JSON** report export. It scans a single target, or takes a **whole domain** and enumerates it — subdomain discovery, liveness probing, subdomain-takeover checks and historical-URL mining, then scans every live host concurrently and aggregates the result into one report. Runs anywhere Python 3.11+ runs — tuned for Raspberry Pi 5 (ARM64, 16 GB RAM).
 
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.16.1 — a detector can score 100% on every benchmark and match nothing** ·
+> **v2.17.0 — checking 96 of 111 detectors against their issuers, not against ourselves** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> A QC pass on v2.16.0. The headline is not any one pattern — it is that
-> **v2.16.0's Mapbox detector scored 1.000 on the ground-truth corpus and 99.1%
-> against gitleaks while matching zero real Mapbox tokens**, including the one
-> Mapbox publishes in its own documentation.
+> v2.16.1 found that a detector can score 1.000 on the ground-truth corpus **and**
+> 99.1% against gitleaks while matching zero real credentials, because both
+> corpora derive their specimens from the same regex the detector uses. The answer
+> was `make bench-vendor`, built from issuer documentation. **It covered 16
+> detectors out of 108.**
 >
-> Neither benchmark could have caught it, for a structural reason. Ground truth
-> generates its specimens *from* the registry's regexes, so a pattern that says
-> 60 characters gets a 60-character specimen and matches it. gitleaks' samples
-> come from *its* regex — which this project transcribed. Two copies of one
-> claim agreeing with each other is not corroboration.
+> This release takes it to 96, and the other 15 are now recorded with a reason
+> rather than left silent. Coverage prints on every run, and a detector with
+> neither a shape nor a reason fails the gate — which caught its first omission
+> within minutes of being written.
 >
-> **`make bench-vendor` is the answer**: credentials built from the issuer's
-> documented structure, owing nothing to any regex here. A Mapbox token is a JWT
-> whose payload encodes the account name, so its length varies per customer. A
-> Discord id is `(ms since 2015) << 22`, so **every application created since
-> 2022 has a 19-digit id** and the transcribed 18 could not see any of them. The
-> gate is release-blocking in CI, and it was verified to fail on the shipped bug
-> before being trusted to pass on the fix.
+> **Three disagreements, resolved three different ways.** Hugging Face's
+> `api_org_` pattern demanded letters only while its own sibling accepted
+> alphanumerics: a random 34-character token contains no digit just **0.25%** of
+> the time, so that class missed 99.75% of real tokens. Cloudflare's only token
+> detector demanded a `cfat_` prefix that the common 40-character form does not
+> have, and the **global API key** — which authenticates as the whole account and
+> cannot be scoped — was missing entirely. And Azure: the detector was right and
+> the *shape* was wrong, because an Azure key only ever ships inside a connection
+> string. Not every disagreement is a pattern defect.
 >
-> The audit also found an Airtable token reported twice, a 1Password token
-> invisible when base64url-encoded, and — underneath all of it — a shared gate
-> measuring the wrong thing: an absolute 2.5-bit entropy floor **silently
-> dropped 5.4% of genuine 16-digit ids and 2.4% of 18-digit ones**, because a
-> decimal digit carries at most log2(10) = 3.32 bits however random it is. It is
-> now a direct degeneracy test that drops 0.000% in any base.
+> Twilio API Key SIDs reached no detector at all. They do now, at HIGH rather than
+> CRITICAL — the SID names a key, the Key Secret beside it is what authenticates.
 >
-> Scans are also **~2.1× faster**. 108 patterns each made a full pass over every
-> asset; a literal pre-filter skips the ones whose provider name is absent. Its
-> soundness check found a bug in itself before it shipped — `https?://` yielded
-> the literal `https`, which would have skipped every `http://user:pass@host`.
+> Also fixed: an endpoint unit test that needed live DNS. Failing closed on an
+> unresolvable host is correct; needing the internet to test an endpoint is not.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
@@ -115,7 +111,7 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 secretnode/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + WebSocket + static server + auth/SSRF guards
-│   ├── scanner.py           # Async scan engine (108 patterns, source maps, entropy, base64, Gemini, Discord)
+│   ├── scanner.py           # Async scan engine (111 patterns, source maps, entropy, base64, Gemini, Discord)
 │   ├── verifier.py          # Optional live credential verification (off by default)
 │   ├── netguard.py          # "May this scanner request this?" — pre-flight AND every redirect hop
 │   ├── triage.py            # Deterministic verdicts with no API key, no network, no model

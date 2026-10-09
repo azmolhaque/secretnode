@@ -60,6 +60,27 @@ def authorized(tmp_path, monkeypatch):
 
     asyncio.run(_seed())
     monkeypatch.setattr(ledger, "DB_PATH", db)
+
+    # Resolve example.com deterministically instead of over the network.
+    #
+    # The endpoint runs the real SSRF guard, which resolves the host and refuses
+    # anything landing on a private or link-local address. That guard is correct
+    # and stays in the path — only its DNS lookup is stubbed, so the address
+    # classification it exists for is still exercised.
+    #
+    # Without this the test asserted 202 and got 400, because a sandbox with no
+    # outbound DNS cannot resolve example.com and `resolve_host` fails closed.
+    # Failing closed is right; depending on the internet inside an endpoint unit
+    # test is not. `test_netguard.py` already states this discipline for its own
+    # address tests ("no DNS, no sockets") — this fixture extends it to the API.
+    import ipaddress
+
+    import netguard
+
+    monkeypatch.setattr(
+        netguard, "resolve_host",
+        lambda host: [ipaddress.ip_address("93.184.216.34")],
+    )
     return auth
 
 
