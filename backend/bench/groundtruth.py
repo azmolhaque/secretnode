@@ -350,6 +350,13 @@ def _specimens(rng: random.Random) -> list[Specimen]:
     ctx("KuCoin Access Token", "kucoinAccessToken", r(HEX, 24))
     ctx("Airtable API Key", "airtableApiKey", r(ALNUM, 17))
     ctx("Sourcegraph Access Token (legacy)", "sourcegraphToken", r(HEX, 40))
+
+    # v2.17.0: the unprefixed Cloudflare forms. The vendor-shape corpus reported
+    # a plain 40-character Cloudflare token reaching nothing but the generic
+    # catch-all, because the only Cloudflare detector demanded a prefix.
+    ctx("Cloudflare API Token (unprefixed)", "cloudflareApiToken", r(ALNUM + "_", 40))
+    ctx("Cloudflare Global API Key", "cloudflareGlobalKey", r(HEX, 37))
+    add(plain("Twilio API Key SID", "SK" + r(HEX, 32)))
     return out
 
 
