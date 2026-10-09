@@ -108,6 +108,10 @@ class DeepScanResult:
     hosts: list[HostScan] = field(default_factory=list)
     scans: list[dict] = field(default_factory=list)   # raw per-host scan dicts
     historical_urls: int = 0        # historical URLs discovered (0 if not requested)
+    # Archived URL -> earliest capture date, from the Wayback CDX index.
+    # The index returns this on every row for free; recovering it is what lets
+    # a finding say how long it has been readable rather than only that it is.
+    archive_first_seen: dict[str, str] = field(default_factory=dict)
     takeover_findings: list[dict] = field(default_factory=list)  # dangling-CNAME hijack risks
     duration_seconds: float = 0.0   # wall-clock for the whole run
     error: str | None = None
@@ -140,17 +144,65 @@ class DeepScanResult:
     def _sum_scans(self, key: str) -> int:
         return sum(int(s.get(key, 0) or 0) for s in self.scans)
 
-    def _aggregate(self, key: str) -> list[dict]:
+    _FINDING_KEYS = ("confirmed_findings", "needs_review_findings",
+                     "informational_findings")
+
+    def archive_exposure(self) -> dict[str, dict]:
+        """Fingerprint -> how long that credential has been readable.
+
+        Keyed on the CREDENTIAL, not on the asset it turned up in. The same key
+        in a 2019 archived bundle and in today's live one has been public since
+        2019 wherever else it also appears, so the earliest archive date wins
+        across every host in the scan.
+
+        `still_served` is decided the only way the scan can know it: the same
+        fingerprint also appearing from a source URL the archive did NOT supply.
+        That distinction is the whole value — a credential in both the archive
+        and the live bundle needs "rotate and assume use", while one present
+        only in the archive is the scanner delivering good news, which it has
+        never previously had a way to say.
+        """
+        if not self.archive_first_seen:
+            return {}
+        earliest: dict[str, str] = {}
+        served_live: set[str] = set()
+        for scan in self.scans:
+            for key in self._FINDING_KEYS:
+                for f in scan.get(key, []):
+                    fingerprint = f.get("fingerprint")
+                    if not fingerprint:
+                        continue
+                    captured = self.archive_first_seen.get(f.get("source_url", ""))
+                    if captured:
+                        if fingerprint not in earliest or captured < earliest[fingerprint]:
+                            earliest[fingerprint] = captured
+                    else:
+                        served_live.add(fingerprint)
+        out: dict[str, dict] = {}
+        for fingerprint, captured in earliest.items():
+            window = historical.exposure_window(
+                captured, still_served=fingerprint in served_live)
+            if window:
+                out[fingerprint] = window.to_dict()
+        return out
+
+    def _aggregate(self, key: str, exposure: dict[str, dict] | None = None) -> list[dict]:
         """Flatten a per-host finding list across all scans, tagging each finding
         with the host it came from so the combined report can show provenance."""
+        exposure = exposure or {}
         out: list[dict] = []
         for scan in self.scans:
             host = recon._host_of(scan.get("target_url", "")) or scan.get("target_url", "")
             for f in scan.get(key, []):
-                out.append({**f, "_host": host})
+                entry = {**f, "_host": host}
+                window = exposure.get(f.get("fingerprint", ""))
+                if window:
+                    entry["exposure"] = window
+                out.append(entry)
         return out
 
     def to_dict(self) -> dict:
+        exposure = self.archive_exposure()
         return {
             "domain": self.domain,
             "subdomains": self.subdomains,
@@ -158,8 +210,8 @@ class DeepScanResult:
             "live_hosts": self.live_hosts,
             "hosts": [h.to_dict() for h in self.hosts],
             "historical_urls": self.historical_urls,
-            "confirmed_findings": self._aggregate("confirmed_findings"),
-            "needs_review_findings": self._aggregate("needs_review_findings"),
+            "confirmed_findings": self._aggregate("confirmed_findings", exposure),
+            "needs_review_findings": self._aggregate("needs_review_findings", exposure),
             # Omitting this is why a Firebase web apiKey sitting in plain sight
             # in a client's bundle appeared in no deep-scan deliverable at all.
             # It was detected, triaged and correctly classed public-by-design at
@@ -167,7 +219,7 @@ class DeepScanResult:
             # of which already render this bucket) had nothing to render. An
             # absent finding and an examined-and-cleared one look identical to
             # the reader, and only one of them is true.
-            "informational_findings": self._aggregate("informational_findings"),
+            "informational_findings": self._aggregate("informational_findings", exposure),
             "posture_findings": self._aggregate("posture_findings"),
             # Filtered against the scanned domain, not just each host's own base:
             # a sibling subdomain is the target's own infrastructure, and listing
@@ -497,6 +549,7 @@ async def run_deep_scan(
             await emit(log("Recovering historical URLs from public archives (Wayback/CommonCrawl)…"))
             hist = await discover_historical_fn(client, domain)
             result.historical_urls = hist.count
+            result.archive_first_seen = dict(hist.first_seen)
             hist_hosts = [recon._host_of(u) for u in hist.urls]
             for u in hist.js_urls():
                 js_by_host.setdefault(recon._host_of(u), []).append(u)
