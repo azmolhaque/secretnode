@@ -159,6 +159,85 @@ whole release fixing, so each export is tested rather than assumed:
 101/101 across 96 detectors, 0 unexplained gaps. Labelled-corpus gate PASS.
 External 208/211 with 0 in-scope misses and 0.0% false alarms.
 
+## [2.19.0] — The report earns its conclusions
+
+Finding a credential is half the job. The output is read by someone deciding
+what to do before lunch, and two things got in their way.
+
+### 79 of 111 detectors gave identical advice
+
+They fell back to one paragraph — revoke at the provider, purge from history,
+move it server-side. Sound, and precisely what a reader would have told
+themselves. Every CRITICAL and HIGH detector now carries its own, answering the
+three questions the default cannot:
+
+| | |
+|---|---|
+| **where** | the specific console page that revokes this credential |
+| **reach** | what the holder can do, so the severity is arguable rather than asserted |
+| **after** | what to check for abuse — rotating a key that was already used closes the hole and leaves the damage |
+
+So an AWS key says *"Deactivate then delete in IAM → Users → Security
+credentials… review CloudTrail for the key's access-key ID over the whole
+exposure window"*. A Vault token says *"a Vault token is a key to other keys:
+every secret its policies allow must be treated as disclosed and rotated too,
+which is usually the larger job"*. A Supabase secret key says *"a service-role
+key bypasses Row Level Security entirely"*.
+
+Written as a reviewable table rather than inline on 79 patterns: consistency of
+voice across them is the thing a reader notices, and 79 strings scattered
+through a 4,000-line registry cannot be read as a body of writing. A pattern
+that defines its own text always wins — the table is a backstop for detectors
+that had none, never an override of wording already considered.
+
+### Three findings were told to do something actively wrong
+
+A Stripe publishable key, a Sentry DSN and a PostHog project key are classed
+**public by design** by the triage tier and reported at INFO — while carrying
+"treat as compromised: revoke the credential immediately". That is the same
+defect v2.16.1 fixed for OAuth client IDs, and it is worse than unhelpful:
+**wrong advice on a low-severity line teaches a reader to discount the CRITICAL
+ones.** A test now asserts the registry and the triage tier agree — a type
+triage dismisses as public cannot be a type the report tells you to revoke.
+
+Two detectors keep the default on purpose: `Bearer Token` is an HTTP scheme and
+`Generic High-Entropy Secret` is a shape, so there is no console to send anyone
+to.
+
+### `/api/health` reported a variable's presence as a fact
+
+```python
+"gemini_configured": bool(os.environ.get("GEMINI_API_KEY"))
+```
+
+A rejected key, or a model the key cannot call, still read `true`. The operator
+found out by noticing AI verdicts missing from a finished report — the same
+shape as the coverage bug v2.14.4 fixed: an absence that reads as a clean
+result.
+
+`ai_tier_status()` reports what the tier will actually do, in four states:
+
+| status | means |
+|---|---|
+| `disabled` | no key — the documented offline default, not a fault |
+| `untested` | a key is set and nothing has been validated yet this process |
+| `failing` | a call failed permanently; `reason` carries the error |
+| `ok` | a call has succeeded since this process started |
+
+**No API request is made to answer it.** A health endpoint polled by a monitor
+must not spend tokens or hit a rate limit, and the scanner already latches a
+permanent config failure the first time it meets one. `ok` requires evidence of
+a successful call rather than the absence of a recorded failure — reporting an
+untried key as healthy is the claim this change exists to stop. A failure
+outranks an earlier success, so a key that worked and then stopped reads
+`failing`. `gemini_configured` stays for existing consumers.
+
+### Verified
+
+**1106 tests (+22), ruff clean.** 111 detectors; ground truth 111/111 offline
+**and** end-to-end over HTTP, precision 1.000 / recall 1.000. Vendor shapes
+101/101 across 96 detectors, 0 unexplained gaps. Labelled-corpus gate PASS.
+
 ## [Unreleased]
 
 ### Fixed — the README's tests badge had been wrong for five releases
