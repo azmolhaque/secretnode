@@ -3,6 +3,260 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.20.0] — The bucket name was the part being thrown away
+
+`extract_referenced_hosts` keeps the hostname of every external URL a bundle
+references and discards the path. That is right for an associated-host graph,
+and it is exactly wrong for cloud storage: for S3 path style, GCS path style,
+Azure Blob, Cloudflare R2 and Backblaze B2, **the bucket name is in the path.**
+The host names the service, or the account, and nothing else.
+
+So a bundle shipping
+
+```
+backups: "https://s3.amazonaws.com/acme-db-backups/nightly.sql.gz"
+```
+
+was reported as `s3.amazonaws.com` — true, and useless. Every scanned target
+using path-style URLs produced the same row, which is the shape of a field that
+is being collected rather than read.
+
+### Added — `storage_references`, a separate class of fact
+
+A bucket is not a third-party dependency like `fonts.googleapis.com`. It names
+storage the application reaches, it is often the client's own, and — the reason
+it belongs in a credential scanner's report at all — **a bucket can be exposed
+to the world without any credential leaking.** It gets its own section in both
+HTML reports, its own key in the JSON export, and its own line in the scan log.
+
+Eleven URL shapes across seven providers:
+
+| Provider | Shapes recognised |
+|---|---|
+| AWS S3 | virtual-hosted, regional (`.s3.<region>.` and legacy `.s3-<region>.`), transfer acceleration, path style |
+| Google Cloud Storage | virtual-hosted, path style |
+| Azure Blob Storage | `<account>.blob.core.windows.net/<container>/…` |
+| Cloudflare R2 | `<account-id>.r2.cloudflarestorage.com/<bucket>/…` |
+| DigitalOcean Spaces | `<space>.<region>.digitaloceanspaces.com` |
+| Backblaze B2 | `f<nnn>.backblazeb2.com/file/<bucket>/…` |
+
+### What this deliberately does not do
+
+**It issues no request.** Deciding whether a bucket is publicly readable means
+sending a LIST or a GET to third-party infrastructure — infrastructure the
+authorization covering the scanned target does not cover, and which the client
+may not own. A bucket named in someone's bundle is frequently a *vendor's*
+bucket. The reference is the finding; the check belongs to whoever knows which
+buckets are theirs. The report says so in as many words, so nobody reads a row
+as "SecretNode confirmed this is open".
+
+### Three shapes where the obvious reading is the wrong one
+
+**Azure and R2 hosts do not name the bucket.** `acmecorp.blob.core.windows.net`
+names the storage *account*; the container is the first path segment, and the
+container is the unit of public access. Taking the leftmost label — the obvious
+move, and what the virtual-hosted branch does for every other provider — would
+have filled the table with account names and reported the same string for ten
+different containers. Same for R2, where the leftmost label is an account id.
+
+**DigitalOcean puts the region between the two.**
+`<space>.<region>.digitaloceanspaces.com`, so the suffix strip leaves
+`space.region` and the leftmost label is the one to keep.
+
+**Backblaze's host names a cluster, not a tenant.** `f002.backblazeb2.com` is
+shared; only a `/file/<bucket>/` path is a bucket reference, so anything else on
+that host is refused rather than guessed at.
+
+### Bucket names shorter than three characters are refused
+
+S3 and GCS both set three characters as the minimum, so a one- or two-character
+first path segment on a storage host is something else wearing a bucket-shaped
+URL — an API version, a locale, a route. The minimum is now asserted by a test
+rather than being an incidental property of the regex's `{1,61}` quantifier.
+
+`fonts.googleapis.com` and `storage.googleapis.com` share a parent domain and
+are unrelated services; matching on the parent would have put a font request in
+the bucket table. Also asserted.
+
+### Comments are stripped first, and buckets are deduplicated per bucket
+
+A bucket named in a `//` comment is documentation, not infrastructure the
+application reaches — the same rule `extract_referenced_hosts` already applies,
+for the same reason.
+
+Rows are deduplicated on `(provider, bucket)` rather than on the whole record.
+One bucket is routinely referenced through both URL styles and from several
+subdomains; that is one piece of infrastructure to check, not four rows to read
+past. The record kept is the first seen, so `host` and `style` are an example of
+where the bucket was referenced rather than a claim that it was the only place.
+
+The single-target scan and the cross-host deep scan both need that rule, and an
+end-to-end render found the single-target path still emitting one row per URL.
+The rule now lives in one function that both call, because two copies are free
+to drift and the one that drifts is the one nobody rereads. A bucket name is a
+per-provider namespace, so `backups` on S3 and `backups` on GCS stay two rows —
+collapsing them would hide one of them.
+
+### Fixed — this changelog's own ordering
+
+The 2.17.0, 2.18.0 and 2.19.0 sections had been inserted in **ascending** order
+above a stale `## [Unreleased]` heading, so the file opened on the oldest of the
+three and the newest release was buried in the middle. The `[Unreleased]`
+content had in fact shipped in 2.17.0 (its commit is an ancestor of the tag) and
+is now folded into that section. Entries are newest-first again.
+
+## [2.19.0] — The report earns its conclusions
+
+Finding a credential is half the job. The output is read by someone deciding
+what to do before lunch, and two things got in their way.
+
+### 79 of 111 detectors gave identical advice
+
+They fell back to one paragraph — revoke at the provider, purge from history,
+move it server-side. Sound, and precisely what a reader would have told
+themselves. Every CRITICAL and HIGH detector now carries its own, answering the
+three questions the default cannot:
+
+| | |
+|---|---|
+| **where** | the specific console page that revokes this credential |
+| **reach** | what the holder can do, so the severity is arguable rather than asserted |
+| **after** | what to check for abuse — rotating a key that was already used closes the hole and leaves the damage |
+
+So an AWS key says *"Deactivate then delete in IAM → Users → Security
+credentials… review CloudTrail for the key's access-key ID over the whole
+exposure window"*. A Vault token says *"a Vault token is a key to other keys:
+every secret its policies allow must be treated as disclosed and rotated too,
+which is usually the larger job"*. A Supabase secret key says *"a service-role
+key bypasses Row Level Security entirely"*.
+
+Written as a reviewable table rather than inline on 79 patterns: consistency of
+voice across them is the thing a reader notices, and 79 strings scattered
+through a 4,000-line registry cannot be read as a body of writing. A pattern
+that defines its own text always wins — the table is a backstop for detectors
+that had none, never an override of wording already considered.
+
+### Three findings were told to do something actively wrong
+
+A Stripe publishable key, a Sentry DSN and a PostHog project key are classed
+**public by design** by the triage tier and reported at INFO — while carrying
+"treat as compromised: revoke the credential immediately". That is the same
+defect v2.16.1 fixed for OAuth client IDs, and it is worse than unhelpful:
+**wrong advice on a low-severity line teaches a reader to discount the CRITICAL
+ones.** A test now asserts the registry and the triage tier agree — a type
+triage dismisses as public cannot be a type the report tells you to revoke.
+
+Two detectors keep the default on purpose: `Bearer Token` is an HTTP scheme and
+`Generic High-Entropy Secret` is a shape, so there is no console to send anyone
+to.
+
+### `/api/health` reported a variable's presence as a fact
+
+```python
+"gemini_configured": bool(os.environ.get("GEMINI_API_KEY"))
+```
+
+A rejected key, or a model the key cannot call, still read `true`. The operator
+found out by noticing AI verdicts missing from a finished report — the same
+shape as the coverage bug v2.14.4 fixed: an absence that reads as a clean
+result.
+
+`ai_tier_status()` reports what the tier will actually do, in four states:
+
+| status | means |
+|---|---|
+| `disabled` | no key — the documented offline default, not a fault |
+| `untested` | a key is set and nothing has been validated yet this process |
+| `failing` | a call failed permanently; `reason` carries the error |
+| `ok` | a call has succeeded since this process started |
+
+**No API request is made to answer it.** A health endpoint polled by a monitor
+must not spend tokens or hit a rate limit, and the scanner already latches a
+permanent config failure the first time it meets one. `ok` requires evidence of
+a successful call rather than the absence of a recorded failure — reporting an
+untried key as healthy is the claim this change exists to stop. A failure
+outranks an earlier success, so a key that worked and then stopped reads
+`failing`. `gemini_configured` stays for existing consumers.
+
+### Verified
+
+**1106 tests (+22), ruff clean.** 111 detectors; ground truth 111/111 offline
+**and** end-to-end over HTTP, precision 1.000 / recall 1.000. Vendor shapes
+101/101 across 96 detectors, 0 unexplained gaps. Labelled-corpus gate PASS.
+
+## [2.18.0] — How long has this credential been public?
+
+SecretNode has pulled archived bundles from the Wayback CDX index since v2.9. It
+asked that index for `fl=original` — the URL field alone — and discarded the
+timestamp that comes back **free on every row**.
+
+```
+backend/historical.py:188   (before)
+  ?url={domain}&matchType=domain&output=json&fl=original&collapse=urlkey
+                                               ↑ timestamp never requested
+```
+
+Three releases scanned archived assets while throwing away the only thing in the
+scanner capable of dating them. One field name.
+
+### The question changes the answer
+
+| situation | what the report said | what it says now |
+|---|---|---|
+| key in a 2021 archived bundle **and** today's | "rotate" | "public for 5.6 years — rotate, and treat it as used" |
+| key in the archive, **gone** from today's bundle | nothing at all | "already removed or rotated" |
+
+The second case is the one worth dwelling on. It is the scanner delivering
+**good news**, which it has never previously had a way to express — and a reader
+who sees nothing cannot tell a fixed exposure from one that was never looked
+for. It still carries a warning, because the trap there is real: deleting a
+secret from a bundle does not revoke it, and the archived copy stays readable
+forever.
+
+### Keyed on the credential, not on the asset
+
+`DeepScanResult.archive_exposure()` maps **fingerprint** to window, not source
+URL. The same key in a 2019 archived bundle and in today's live one has been
+public since 2019 wherever else it appears, so the earliest capture wins across
+every host in the scan.
+
+`still_served` is decided the only way a scan honestly can: the same fingerprint
+also appearing from a source URL the archive did **not** supply. A key found
+only in an archived copy is archive-only; one found in both is still served.
+
+### What it deliberately will not say
+
+- **A finding the archive cannot date carries no window at all.** Writing
+  today's date would read as "exposed just now" — a claim the scan cannot make.
+  The CSV columns stay blank and the SARIF key is omitted entirely.
+- **A date in the future, or one that will not parse, produces nothing.** Clock
+  skew or a malformed row must not become a confident statement about a time
+  window.
+- **CommonCrawl contributes no dates.** It is queried against one collection —
+  the newest — so its timestamps describe that crawl, not when the URL first
+  appeared. Reporting a 2026 crawl date as the first-seen for a URL archived in
+  2019 would *understate* an exposure, which is the direction that matters.
+  Wayback's index spans all time and is the honest source.
+
+### In every deliverable
+
+A finding computed correctly and rendered nowhere is the defect v2.14.3 spent a
+whole release fixing, so each export is tested rather than assumed:
+
+- **CSV** — three columns, **appended** so a consumer reading by index keeps
+  working: `exposed_since`, `exposed_days`, `still_served`.
+- **SARIF** — an `exposure` object in `properties`, so a pipeline can triage by
+  how long a key has been readable rather than only by its type.
+- **Deep-scan HTML** — a badge in the impact cell, coloured to separate the two
+  cases: `EXPOSED 2021-03-14` in critical tone, `ARCHIVE ONLY` in low.
+
+### Verified
+
+**1084 tests (+33), ruff clean.** 111 detectors; ground truth 111/111 offline
+**and** end-to-end over HTTP, precision 1.000 / recall 1.000. Vendor shapes
+101/101 across 96 detectors, 0 unexplained gaps. Labelled-corpus gate PASS.
+External 208/211 with 0 in-scope misses and 0.0% false alarms.
+
 ## [2.17.0] — Checking 96 of 111 detectors against their issuers, not against ourselves
 
 v2.16.1 established that a detector can score 1.000 on the ground-truth corpus
@@ -85,160 +339,6 @@ tests ("no DNS, no sockets"); this extends it to the API.
 **and** end-to-end over HTTP, precision 1.000 / recall 1.000, zero mistypes, zero
 decoy false positives. Vendor shapes 101/101 across 96 detectors. Labelled-corpus
 gate PASS. External 208/211 with 0 in-scope misses and 0.0% false alarms.
-
-## [2.18.0] — How long has this credential been public?
-
-SecretNode has pulled archived bundles from the Wayback CDX index since v2.9. It
-asked that index for `fl=original` — the URL field alone — and discarded the
-timestamp that comes back **free on every row**.
-
-```
-backend/historical.py:188   (before)
-  ?url={domain}&matchType=domain&output=json&fl=original&collapse=urlkey
-                                               ↑ timestamp never requested
-```
-
-Three releases scanned archived assets while throwing away the only thing in the
-scanner capable of dating them. One field name.
-
-### The question changes the answer
-
-| situation | what the report said | what it says now |
-|---|---|---|
-| key in a 2021 archived bundle **and** today's | "rotate" | "public for 5.6 years — rotate, and treat it as used" |
-| key in the archive, **gone** from today's bundle | nothing at all | "already removed or rotated" |
-
-The second case is the one worth dwelling on. It is the scanner delivering
-**good news**, which it has never previously had a way to express — and a reader
-who sees nothing cannot tell a fixed exposure from one that was never looked
-for. It still carries a warning, because the trap there is real: deleting a
-secret from a bundle does not revoke it, and the archived copy stays readable
-forever.
-
-### Keyed on the credential, not on the asset
-
-`DeepScanResult.archive_exposure()` maps **fingerprint** to window, not source
-URL. The same key in a 2019 archived bundle and in today's live one has been
-public since 2019 wherever else it appears, so the earliest capture wins across
-every host in the scan.
-
-`still_served` is decided the only way a scan honestly can: the same fingerprint
-also appearing from a source URL the archive did **not** supply. A key found
-only in an archived copy is archive-only; one found in both is still served.
-
-### What it deliberately will not say
-
-- **A finding the archive cannot date carries no window at all.** Writing
-  today's date would read as "exposed just now" — a claim the scan cannot make.
-  The CSV columns stay blank and the SARIF key is omitted entirely.
-- **A date in the future, or one that will not parse, produces nothing.** Clock
-  skew or a malformed row must not become a confident statement about a time
-  window.
-- **CommonCrawl contributes no dates.** It is queried against one collection —
-  the newest — so its timestamps describe that crawl, not when the URL first
-  appeared. Reporting a 2026 crawl date as the first-seen for a URL archived in
-  2019 would *understate* an exposure, which is the direction that matters.
-  Wayback's index spans all time and is the honest source.
-
-### In every deliverable
-
-A finding computed correctly and rendered nowhere is the defect v2.14.3 spent a
-whole release fixing, so each export is tested rather than assumed:
-
-- **CSV** — three columns, **appended** so a consumer reading by index keeps
-  working: `exposed_since`, `exposed_days`, `still_served`.
-- **SARIF** — an `exposure` object in `properties`, so a pipeline can triage by
-  how long a key has been readable rather than only by its type.
-- **Deep-scan HTML** — a badge in the impact cell, coloured to separate the two
-  cases: `EXPOSED 2021-03-14` in critical tone, `ARCHIVE ONLY` in low.
-
-### Verified
-
-**1084 tests (+33), ruff clean.** 111 detectors; ground truth 111/111 offline
-**and** end-to-end over HTTP, precision 1.000 / recall 1.000. Vendor shapes
-101/101 across 96 detectors, 0 unexplained gaps. Labelled-corpus gate PASS.
-External 208/211 with 0 in-scope misses and 0.0% false alarms.
-
-## [2.19.0] — The report earns its conclusions
-
-Finding a credential is half the job. The output is read by someone deciding
-what to do before lunch, and two things got in their way.
-
-### 79 of 111 detectors gave identical advice
-
-They fell back to one paragraph — revoke at the provider, purge from history,
-move it server-side. Sound, and precisely what a reader would have told
-themselves. Every CRITICAL and HIGH detector now carries its own, answering the
-three questions the default cannot:
-
-| | |
-|---|---|
-| **where** | the specific console page that revokes this credential |
-| **reach** | what the holder can do, so the severity is arguable rather than asserted |
-| **after** | what to check for abuse — rotating a key that was already used closes the hole and leaves the damage |
-
-So an AWS key says *"Deactivate then delete in IAM → Users → Security
-credentials… review CloudTrail for the key's access-key ID over the whole
-exposure window"*. A Vault token says *"a Vault token is a key to other keys:
-every secret its policies allow must be treated as disclosed and rotated too,
-which is usually the larger job"*. A Supabase secret key says *"a service-role
-key bypasses Row Level Security entirely"*.
-
-Written as a reviewable table rather than inline on 79 patterns: consistency of
-voice across them is the thing a reader notices, and 79 strings scattered
-through a 4,000-line registry cannot be read as a body of writing. A pattern
-that defines its own text always wins — the table is a backstop for detectors
-that had none, never an override of wording already considered.
-
-### Three findings were told to do something actively wrong
-
-A Stripe publishable key, a Sentry DSN and a PostHog project key are classed
-**public by design** by the triage tier and reported at INFO — while carrying
-"treat as compromised: revoke the credential immediately". That is the same
-defect v2.16.1 fixed for OAuth client IDs, and it is worse than unhelpful:
-**wrong advice on a low-severity line teaches a reader to discount the CRITICAL
-ones.** A test now asserts the registry and the triage tier agree — a type
-triage dismisses as public cannot be a type the report tells you to revoke.
-
-Two detectors keep the default on purpose: `Bearer Token` is an HTTP scheme and
-`Generic High-Entropy Secret` is a shape, so there is no console to send anyone
-to.
-
-### `/api/health` reported a variable's presence as a fact
-
-```python
-"gemini_configured": bool(os.environ.get("GEMINI_API_KEY"))
-```
-
-A rejected key, or a model the key cannot call, still read `true`. The operator
-found out by noticing AI verdicts missing from a finished report — the same
-shape as the coverage bug v2.14.4 fixed: an absence that reads as a clean
-result.
-
-`ai_tier_status()` reports what the tier will actually do, in four states:
-
-| status | means |
-|---|---|
-| `disabled` | no key — the documented offline default, not a fault |
-| `untested` | a key is set and nothing has been validated yet this process |
-| `failing` | a call failed permanently; `reason` carries the error |
-| `ok` | a call has succeeded since this process started |
-
-**No API request is made to answer it.** A health endpoint polled by a monitor
-must not spend tokens or hit a rate limit, and the scanner already latches a
-permanent config failure the first time it meets one. `ok` requires evidence of
-a successful call rather than the absence of a recorded failure — reporting an
-untried key as healthy is the claim this change exists to stop. A failure
-outranks an earlier success, so a key that worked and then stopped reads
-`failing`. `gemini_configured` stays for existing consumers.
-
-### Verified
-
-**1106 tests (+22), ruff clean.** 111 detectors; ground truth 111/111 offline
-**and** end-to-end over HTTP, precision 1.000 / recall 1.000. Vendor shapes
-101/101 across 96 detectors, 0 unexplained gaps. Labelled-corpus gate PASS.
-
-## [Unreleased]
 
 ### Fixed — the README's tests badge had been wrong for five releases
 
@@ -2566,7 +2666,6 @@ everywhere else, and turned up two correctness bugs that had nothing to do with 
 
 - `test_v280.py`: 35 tests covering each fix, including a mutation check that the leak guards can
   actually fail, and a reproduction of the false all-clear. Suite: 347 → 382.
-
 
 ## [2.7.9] — Deep QA before release: reports no longer leak the credential
 
