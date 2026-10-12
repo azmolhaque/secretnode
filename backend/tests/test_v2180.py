@@ -193,12 +193,29 @@ class TestEveryDeliverableCarriesIt:
     shipped a whole release to fix. Each export is checked, not assumed."""
 
     def test_csv_appends_three_columns_without_moving_the_others(self):
+        """The day count is derived, not written down.
+
+        This asserted a literal `2035`, which was the distance from the archive
+        date to the day the test was written. It passed that day and failed
+        three days later — a test that depends on the calendar rather than on
+        the code, the same family as the DNS-dependent endpoint test v2.17.0
+        fixed.
+
+        The arithmetic itself is covered exhaustively by `TestExposureWindow`
+        against a frozen clock, so what this test owes the reader is the column
+        LAYOUT: that three columns were appended and the existing ones did not
+        move.
+        """
         d = _result([_finding("fp1", ARCHIVED), _finding("fp1", LIVE)]).to_dict()
         rows = report.generate_csv_report(d).splitlines()
         header = rows[0].split(",")
         assert header[:4] == ["status", "severity", "cwe", "secret_type"]
         assert header[-3:] == ["exposed_since", "exposed_days", "still_served"]
-        assert rows[1].split(",")[-3:] == ["2021-03-14", "2035", "YES"]
+
+        since, days, served = rows[1].split(",")[-3:]
+        assert since == "2021-03-14"
+        assert served == "YES"
+        assert int(days) == (date.today() - date(2021, 3, 14)).days
 
     def test_csv_leaves_the_columns_blank_when_the_archive_cannot_date_it(self):
         d = _result([_finding("fp3", LIVE)]).to_dict()
