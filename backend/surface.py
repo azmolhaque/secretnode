@@ -23,6 +23,8 @@ matching the scanner's regex-safety guarantees.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
 # Absolute (or protocol-relative) URLs. Bounded character classes only.
@@ -308,6 +310,184 @@ def extract_referenced_hosts(text: str, base_url: str) -> set[str]:
         if _valid_host(host):
             hosts.add(host)
     return hosts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cloud-storage references
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `extract_referenced_hosts` keeps the hostname and throws the path away, which
+# is correct for an associated-host graph and loses the bucket name for half the
+# providers: S3 and GCS both have a path style where the bucket is the first
+# path segment, and Azure always puts the container there.
+#
+# The distinction matters because these are not the same class of fact as
+# `fonts.googleapis.com`. A bucket URL in a shipped bundle names storage the
+# application reaches, and whether that storage is readable by the world is the
+# first question any reviewer asks — a bucket is also the one piece of
+# infrastructure that can be exposed without any credential leaking at all.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO
+# ----------------------------------
+# It does not request the bucket. Checking whether a bucket is public means
+# issuing a LIST or a GET against third-party infrastructure that the
+# authorization covering the target does not cover, and that is active probing
+# of a system the client may not even own. The reference is the finding; the
+# reviewer, who knows which buckets are theirs, decides what to check.
+
+_BUCKET_NAME = re.compile(r"^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$")
+
+# (host suffix, provider) for the virtual-hosted shapes, longest-meaningful first.
+_STORAGE_HOST_SUFFIX: tuple[tuple[str, str], ...] = (
+    (".s3.amazonaws.com", "AWS S3"),
+    (".s3-accelerate.amazonaws.com", "AWS S3"),
+    (".storage.googleapis.com", "Google Cloud Storage"),
+    (".blob.core.windows.net", "Azure Blob Storage"),
+    (".r2.cloudflarestorage.com", "Cloudflare R2"),
+    (".digitaloceanspaces.com", "DigitalOcean Spaces"),
+)
+
+# Virtual-hosted S3 with a region in the middle: <bucket>.s3.<region>.amazonaws.com
+# and the older <bucket>.s3-<region>.amazonaws.com.
+_S3_REGIONAL_HOST = re.compile(
+    r"^(?P<bucket>[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9])\.s3[.\-][a-z0-9\-]{3,20}\.amazonaws\.com$"
+)
+# Path style, where the host names no bucket at all.
+_S3_PATH_HOST = re.compile(r"^s3([.\-][a-z0-9\-]{3,20})?\.amazonaws\.com$")
+
+
+@dataclass(frozen=True)
+class StorageRef:
+    """One cloud-storage location an asset refers to.
+
+    `bucket` is kept verbatim. Masking or truncating it would make the finding
+    unactionable: the reviewer needs the exact name to look it up, and a bucket
+    name is not a secret — it is infrastructure, which is the whole reason this
+    is reported separately from a credential.
+    """
+
+    provider: str
+    bucket: str
+    host: str
+    style: str          # "virtual-hosted" or "path"
+
+    def to_dict(self) -> dict:
+        return {"provider": self.provider, "bucket": self.bucket,
+                "host": self.host, "style": self.style}
+
+
+def _first_path_segment(path: str) -> str:
+    for part in (path or "").split("/"):
+        if part:
+            return part.lower()
+    return ""
+
+
+def classify_storage_url(url: str) -> "StorageRef | None":
+    """Recognise one cloud-storage URL, or None. Pure function.
+
+    Host-first rather than one combined regex: each provider's shape is checked
+    on its own, which keeps every pattern bounded and makes an unrecognised
+    provider a miss rather than a mis-attribution.
+    """
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if not host:
+        return None
+
+    # Virtual-hosted: the bucket is the label in front of a known suffix.
+    for suffix, provider in _STORAGE_HOST_SUFFIX:
+        if host.endswith(suffix):
+            bucket = host[: -len(suffix)]
+            # DigitalOcean puts the region between bucket and suffix
+            # (<space>.<region>.digitaloceanspaces.com); keep the leftmost label.
+            if provider == "DigitalOcean Spaces" and "." in bucket:
+                bucket = bucket.split(".", 1)[0]
+            # Azure's host names the ACCOUNT; the container is the first path
+            # segment, and the container is what a reviewer needs.
+            if provider == "Azure Blob Storage":
+                container = _first_path_segment(parts.path)
+                if not container or not _BUCKET_NAME.match(container):
+                    return None
+                return StorageRef(provider, container, host, "path")
+            # Cloudflare R2's host names the ACCOUNT id, bucket is in the path.
+            if provider == "Cloudflare R2":
+                bucket = _first_path_segment(parts.path)
+                if not bucket or not _BUCKET_NAME.match(bucket):
+                    return None
+                return StorageRef(provider, bucket, host, "path")
+            if bucket and _BUCKET_NAME.match(bucket):
+                return StorageRef(provider, bucket, host, "virtual-hosted")
+            return None
+
+    m = _S3_REGIONAL_HOST.match(host)
+    if m:
+        return StorageRef("AWS S3", m.group("bucket"), host, "virtual-hosted")
+
+    # Path style: s3.amazonaws.com/<bucket>/… and storage.googleapis.com/<bucket>/…
+    if _S3_PATH_HOST.match(host):
+        bucket = _first_path_segment(parts.path)
+        if bucket and _BUCKET_NAME.match(bucket):
+            return StorageRef("AWS S3", bucket, host, "path")
+        return None
+    if host == "storage.googleapis.com":
+        bucket = _first_path_segment(parts.path)
+        if bucket and _BUCKET_NAME.match(bucket):
+            return StorageRef("Google Cloud Storage", bucket, host, "path")
+        return None
+    # Backblaze serves files as f<nnn>.backblazeb2.com/file/<bucket>/<key>.
+    if host.endswith(".backblazeb2.com"):
+        segments = [p for p in (parts.path or "").split("/") if p]
+        if len(segments) >= 2 and segments[0].lower() == "file":
+            bucket = segments[1].lower()
+            if _BUCKET_NAME.match(bucket):
+                return StorageRef("Backblaze B2", bucket, host, "path")
+        return None
+    return None
+
+
+def extract_storage_references(text: str, base_url: str) -> set[StorageRef]:
+    """Every distinct cloud-storage location referenced by absolute URLs in
+    `text`. Pure, and makes no request of its own.
+
+    Comments are stripped first, for the same reason `extract_referenced_hosts`
+    strips them: a bucket named in a code comment is documentation rather than
+    infrastructure the application reaches.
+    """
+    found: set[StorageRef] = set()
+    for m in _ABS_URL.finditer(strip_js_comments(text)):
+        raw = m.group(0)
+        absu = urljoin(base_url or "", raw) if raw.startswith("//") else raw
+        ref = classify_storage_url(absu)
+        if ref is not None:
+            found.add(ref)
+    return found
+
+
+def dedupe_storage_references(refs: Iterable[dict]) -> list[dict]:
+    """One row per `(provider, bucket)`, in a stable order.
+
+    The same bucket is routinely referenced through more than one URL style and
+    from more than one host — a path-style backup URL in one bundle and a
+    virtual-hosted asset URL in another name one piece of infrastructure, and a
+    reviewer checking it checks it once. The record kept is the first seen,
+    which keeps `host`/`style` as an example of where the bucket was referenced
+    rather than a claim that it was the only place.
+
+    Both the single-target scan and the cross-host deep scan need exactly this
+    rule, so it lives here instead of being written twice: two copies would be
+    free to drift, and the one that drifted would be the one nobody reread.
+    """
+    by_bucket: dict[tuple[str, str], dict] = {}
+    for ref in refs:
+        key = (str(ref.get("provider", "")), str(ref.get("bucket", "")))
+        if not key[1]:
+            continue
+        by_bucket.setdefault(key, dict(ref))
+    return [by_bucket[k] for k in sorted(by_bucket)]
 
 
 def same_scope(base_host: str, candidate_host: str) -> bool:

@@ -4620,6 +4620,12 @@ async def run_scan(
         "posture_findings":   [],
         "discovered_endpoints": [],   # slice 5: same-site URLs/paths referenced in JS/HTML
         "associated_hosts":   [],     # slice 4: external hosts the assets talk to
+        # Cloud-storage locations the assets reach. Reported apart from
+        # `associated_hosts` because an S3 bucket and fonts.googleapis.com are
+        # not the same class of fact — one names storage whose readability is a
+        # reviewer's first question, and a bucket can be exposed with no
+        # credential leaking at all.
+        "storage_references": [],
         "errors":             [],
         "duration_seconds":   0.0,
     }
@@ -4689,9 +4695,11 @@ async def run_scan(
             base_host = urlparse(target_url).hostname or ""
             all_eps: set[str] = set()
             ext_hosts: set[str] = set()
+            storage: set[surface.StorageRef] = set()
             for src_url, body in list(assets):
                 all_eps.update(surface.extract_endpoints(body, src_url))
                 ext_hosts.update(surface.extract_referenced_hosts(body, src_url))
+                storage.update(surface.extract_storage_references(body, src_url))
             same_eps, _assoc = surface.classify_endpoints(sorted(all_eps), base_host)
 
             have = {u.split("?", 1)[0] for u, _ in assets}
@@ -4719,11 +4727,20 @@ async def run_scan(
             result["associated_hosts"] = sorted(
                 h for h in ext_hosts if h and not surface.same_scope(base_host, h)
             )
-            if result["discovered_endpoints"] or result["associated_hosts"]:
+            # One row per bucket, not per URL: a bundle naming the same bucket
+            # through both the path and virtual-hosted styles names one piece of
+            # infrastructure to check.
+            result["storage_references"] = surface.dedupe_storage_references(
+                ref.to_dict() for ref in
+                sorted(storage, key=lambda r: (r.provider, r.bucket, r.host))
+            )
+            if (result["discovered_endpoints"] or result["associated_hosts"]
+                    or result["storage_references"]):
                 await emit({
                     "type": "log", "level": "INFO",
                     "message": (f"Surface intel: {len(result['discovered_endpoints'])} endpoint(s), "
-                                f"{len(result['associated_hosts'])} associated host(s)"),
+                                f"{len(result['associated_hosts'])} associated host(s), "
+                                f"{len(result['storage_references'])} cloud-storage reference(s)"),
                 })
 
         # The budget engaging means this scan deliberately read less than the

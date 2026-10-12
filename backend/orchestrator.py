@@ -186,6 +186,18 @@ class DeepScanResult:
                 out[fingerprint] = window.to_dict()
         return out
 
+    def _storage_references(self) -> list[dict]:
+        """Cloud-storage locations across every host, one row per bucket.
+
+        The per-host scans already deduplicate within themselves; this collapses
+        the same bucket referenced from several subdomains, using the same rule
+        rather than a second copy of it.
+        """
+        return surface.dedupe_storage_references(
+            ref for scan in self.scans
+            for ref in scan.get("storage_references", [])
+        )
+
     def _aggregate(self, key: str, exposure: dict[str, dict] | None = None) -> list[dict]:
         """Flatten a per-host finding list across all scans, tagging each finding
         with the host it came from so the combined report can show provenance."""
@@ -230,6 +242,11 @@ class DeepScanResult:
                 for h in s.get("associated_hosts", [])
                 if not surface.same_scope(self.domain, h)
             }),
+            # Deduplicated on (provider, bucket), not on the whole record: the
+            # same bucket is routinely referenced through both URL styles and
+            # from several subdomains, and that is one piece of infrastructure
+            # to check rather than four lines to read.
+            "storage_references": self._storage_references(),
             "takeover_findings": self.takeover_findings,
             # Scan-level metrics, rolled up from the per-host scans. These are
             # top-level (not nested under "totals") because report.py reads them

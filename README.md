@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-1106%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.19.0-blue)
+![Tests](https://img.shields.io/badge/tests-1148%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.20.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,34 +14,35 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.19.0 — the report earns its conclusions** ·
+> **v2.20.0 — the bucket name was the part being thrown away** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> Finding a credential is half the job. **79 of 111 detectors gave identical
-> advice** — revoke at the provider, purge from history, move it server-side.
-> Sound, and precisely what a reader would have told themselves.
+> The external-host extractor keeps a URL's hostname and discards its path. That
+> is right for a dependency graph and **exactly wrong for cloud storage**: for S3
+> path style, GCS path style, Azure Blob, Cloudflare R2 and Backblaze, the bucket
+> name *is* the path. A bundle shipping
+> `s3.amazonaws.com/acme-db-backups/nightly.sql.gz` was reported as
+> `s3.amazonaws.com` — true, and useless.
 >
-> Every CRITICAL and HIGH detector now answers the three questions that default
-> cannot: **where** the console page that revokes it is, **what** the credential
-> reaches, and **what to check for abuse afterwards** — because rotating a key
-> that was already used closes the hole and leaves the damage. An AWS key points
-> at CloudTrail; a Vault token says every secret its policies allow must be
-> rotated too; a Supabase service-role key says it bypasses Row Level Security
-> entirely.
+> SecretNode now reports `storage_references` as its own class of fact: **11 URL
+> shapes across 7 providers**, in both HTML reports and the JSON export. A bucket
+> is not a third-party dependency — it is usually the client's own, and it is the
+> one piece of infrastructure that can be exposed to the world **without any
+> credential leaking at all**.
 >
-> **Three findings were told to do something actively wrong.** A Stripe
-> publishable key, a Sentry DSN and a PostHog project key are public by design
-> and reported at INFO — while carrying "treat as compromised: revoke
-> immediately". Wrong advice on a low-severity line teaches a reader to discount
-> the CRITICAL ones. A test now asserts the registry and the triage tier agree.
+> **It issues no request.** Deciding whether a bucket is publicly readable means
+> sending a LIST or a GET to third-party infrastructure the target's
+> authorization does not cover, and which the client may not own. The reference is
+> the finding; the check belongs to whoever knows which buckets are theirs, and
+> the report says so in as many words.
 >
-> And `/api/health` reported `gemini_configured` from `bool(os.environ.get(…))`,
-> which a **rejected** key also satisfies. It now reports what the AI tier will
-> actually do — `disabled`, `untested`, `failing` with its reason, or `ok` — and
-> makes **no API call** to say so: a monitor-polled endpoint must not spend
-> tokens, and `ok` requires evidence of a successful call rather than the absence
-> of a recorded failure.
+> Three shapes where the obvious reading is wrong: Azure and R2 hosts name the
+> *account*, not the bucket — the container is the first path segment, so taking
+> the leftmost label would report one string for ten containers. DigitalOcean puts
+> the region between space and suffix. `f002.backblazeb2.com` is a shared cluster,
+> so only a `/file/<bucket>/` path is a bucket reference. And
+> `fonts.googleapis.com` is not `storage.googleapis.com`, which a test now asserts.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
