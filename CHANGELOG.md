@@ -3,6 +3,141 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.21.0] — Six detectors disagreed with their own issuer
+
+v2.17.0 built `bench/vendorshapes.py` because a detector can score 1.000 on the
+ground-truth corpus **and** 99.1% against gitleaks while matching zero real
+credentials: both corpora derive their specimens from the same regex the
+detector uses. It covered 96 of 111 detectors. The remaining 15 carried a
+recorded reason — "format not independently confirmed; needs a doc lookup" —
+which is an honest note and also a list of the patterns that had never been
+compared to anything but themselves.
+
+The lookups were done. **Six of those detectors were wrong**, and 11 of the 21
+new specimens were invisible to the patterns that shipped in v2.20.0.
+
+### The anchor that was a hostname
+
+PyPI documents a token as `pypi-` plus the base64 of a PyMacaroon. The v2 binary
+form is a version byte, then `{tag 0x01, length, location}` — so **the location
+lands in the first bytes.** The pattern anchored on `pypi-AgEIcHlwaS`, which is
+the base64 of `{v2, length 8, "pypi.org"}`: one deployment's hostname, baked in.
+
+A TestPyPI token encodes `test.pypi.org` and begins `AgENdGVzdC5weXBpLm9yZ`.
+Every one of them was invisible, as was every `upload.pypi.org` token.
+
+The anchor is now the macaroon header alone. `0x02 0x01` — "version 2, location
+field" — always base64s to `AgE`, and anything past those three characters is an
+assertion about *which* PyPI issued the token. Verified by serializing real
+macaroons for each location; the construction was cross-checked byte-for-byte
+against the `pymacaroons` library and then written inline, because a corpus
+should not need a dependency to state a format.
+
+### The fix that was applied where it was noticed, and nowhere else
+
+v2.16.0 corrected the Discord **Client ID** detector from `{18}` to `{17,20}`,
+because a snowflake is `(ms since 2015) << 22` and ids crossed 19 digits in 2022.
+
+A Discord **bot token** is `base64url(bot user id).base64url(timestamp).hmac`.
+Its first segment *is* that same snowflake. It was still hard-coded to 24
+characters — an 18-digit id — so **effectively every bot alive was invisible to
+the pattern.** The calendar argument had been made, accepted, and applied to one
+of the two places it was true.
+
+17 digits base64 to 23 characters, 18 to 24, 19 to 26, 20 to 27. 25 is
+unreachable: 19 bytes is six full triples plus one. The range is `{23,27}`, and
+the unreachable width in the middle costs nothing — which is asserted, so the
+next reader does not have to rediscover why a gap is harmless.
+
+### The issuer's own example did not match us
+
+HashiCorp's user-tokens API reference shows `6tL24nM38M7XWQ.atlasv1.…`. The
+prefix class was `[a-z0-9]{14}` — lowercase only — so **the example HashiCorp
+publishes was rejected by our pattern.**
+
+### Two things Doppler publishes and we did not read
+
+Doppler documents a format per token type. A service token carries an optional
+label between the prefix and the random part: `dp.st.prd.<40-44>`, which is the
+form Doppler's own docs use, and the shape a token leaked from a CI config
+actually has. Requiring the body to follow `dp.st.` directly missed all of them.
+
+`dp.said.` — short-lived service-account identity — was absent from the
+alternation entirely.
+
+Adding it needed care: alternation is leftmost-first, so with `sa` listed first
+`dp.said.` matches `sa`, then demands a `.` it cannot find before the `id`, and
+the whole match fails. `said` precedes `sa`, and a test asserts the ordering
+rather than trusting it to survive the next edit.
+
+### A width nobody published
+
+Google states the `GOCSPX-` prefix and nothing about length. The pattern
+asserted exactly 28 characters — a figure that traces to secret-scanning
+samples, not to Google. **An unpublished fixed width is precisely how the Mapbox
+detector came to match zero real tokens.** The prefix carries all the precision
+here; the width carried only risk, so it is now a range wide enough not to be a
+claim.
+
+### The documented prefix we could not see
+
+Pinecone's Admin API reference states: *"New keys will have the format
+`pckey_<public-label>_<unique-key>`"*. The pattern matched `pcsk_` only — a
+prefix that appears in secret-scanning rules rather than in anything Pinecone
+publishes. So the one form the issuer documents was the one we missed. Both are
+kept: the older prefix is plausibly still live, and dropping it to chase the new
+one would trade a silent miss for a different silent miss.
+
+### Two detectors were right, and that is also a result
+
+Legacy Grafana keys are the base64 of `{"k":…,"n":…,"id":…}`, so their length
+moves with the key's *name* — the same property that defeated Mapbox. The
+pattern handles it. Supabase's `sb_secret_` pattern states a floor rather than a
+width, so there is no fixed claim in it to be wrong. Both are now covered by
+construction instead of by assumption.
+
+### Coverage, and the mirror of the gap check
+
+```
+  shapes           122
+  detectors        104/111 covered   (94%)
+  detected         122/122   (100.0%)
+  unchecked           7   no issuer-documented shape (0 without a recorded reason)
+```
+
+The gate already failed when a detector had neither a shape nor a reason — that
+caught a renamed shape leaving a detector silently uncovered. It could not catch
+the opposite: **a reason left behind for a gap that has since closed, or written
+against a name the registry no longer uses.** Both make the file assert
+something untrue about the code, and a typo'd key is indistinguishable from a
+missing one — which is how the Cloudflare rename hid in the first place. The
+gate now fails on stale entries too, and was verified to fail on both cases
+before being trusted to pass.
+
+### The seven that stay unchecked, with sharper reasons
+
+Perplexity and LangSmith document their **prefixes** and nothing more — not a
+length, not a character set. Every width quoted elsewhere traces back to
+secret-scanning samples, so a shape built from one would measure another
+scanner's guess. Those reasons now say so explicitly rather than "needs a doc
+lookup", because the lookup was done and this is its outcome. The rest are
+genuinely issuer-less: a keyword catch-all, a bundler naming convention, the
+generic `client_secret` spelling, retired FCM keys, and Cloudflare's prefixed
+form, which this registry asserts and Cloudflare does not document.
+
+**A corpus that invents a shape to reach 111/111 is the ground-truth corpus
+again, one indirection further out.** 104 with reasons for the other seven is
+the honest number.
+
+### Precision did not move
+
+Every one of the six fixes relaxed a constraint, and a relaxed pattern that
+starts claiming fragments has traded a false negative for the worse error. All
+four runnable benchmarks are unchanged: ground truth 111/111 at 1.000/1.000 with
+zero decoys misreported, the labelled gate still 1.000/1.000, external still
+208/211 with zero in-scope misses. A test asserts that each widened pattern
+still refuses prefixes with no body, bodies under the floor, and a JWT header.
+
 ## [2.20.0] — The bucket name was the part being thrown away
 
 `extract_referenced_hosts` keeps the hostname of every external URL a bundle

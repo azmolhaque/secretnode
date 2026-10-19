@@ -103,6 +103,56 @@ def _jwt_token(rng: random.Random, prefix: str, account: str) -> str:
     return f"{prefix}.{claims}.{sig}"
 
 
+def _macaroon_v2(rng: random.Random, location: str) -> str:
+    """Base64url of a PyMacaroon v2, which is what PyPI documents a token to be.
+
+    The v2 binary form is a version byte, then {tag 0x01, length, location},
+    {tag 0x02, length, identifier}, a section terminator, and the signature.
+    The location therefore lands in the FIRST bytes, which is why a pattern
+    anchored on more than the header is anchored on one deployment's hostname.
+
+    Cross-checked byte-for-byte against the `pymacaroons` library's own
+    BinarySerializer for pypi.org, test.pypi.org and upload.pypi.org before this
+    was written inline — the corpus must not need a dependency to state a format.
+    """
+    ident = ("gh-oidc:" + r_hex(rng, 24)).encode()
+    raw = (b"\x02"
+           + b"\x01" + bytes([len(location)]) + location.encode()
+           + b"\x02" + bytes([len(ident)]) + ident
+           + b"\x00"
+           + b"\x06" + bytes([32]) + bytes(rng.randrange(256) for _ in range(32)))
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def r_hex(rng: random.Random, n: int) -> str:
+    return "".join(rng.choice(HEX) for _ in range(n))
+
+
+def _discord_bot_token(rng: random.Random, year_ms: int) -> str:
+    """`base64url(bot user id).base64url(timestamp).hmac`.
+
+    The first segment encodes the bot's snowflake, so its width follows the
+    calendar exactly as the id's own digit count does: 17 digits base64 to 23
+    characters, 18 to 24, 19 to 26, 20 to 27.
+    """
+    uid = _snowflake(rng, year_ms)
+    seg1 = base64.urlsafe_b64encode(uid.encode()).decode().rstrip("=")
+    seg2 = "".join(rng.choice(URLSAFE) for _ in range(6))
+    seg3 = "".join(rng.choice(URLSAFE) for _ in range(27))
+    return f"{seg1}.{seg2}.{seg3}"
+
+
+def _grafana_legacy(rng: random.Random, name: str, org: int) -> str:
+    """Legacy Grafana API key: base64 of `{"k":"<key>","n":"<name>","id":<org>}`.
+
+    Length moves with the key's NAME, so no fixed width is correct — the same
+    property that defeated the Mapbox pattern.
+    """
+    body = '{"k":"%s","n":"%s","id":%d}' % (
+        "".join(rng.choice(ALNUM) for _ in range(32)), name, org)
+    return base64.b64encode(body.encode()).decode()
+
+
 def shapes() -> list[Shape]:
     rng = random.Random(SEED)
 
@@ -388,6 +438,79 @@ def shapes() -> list[Shape]:
         Shape("AWS Secret Access Key", r(B64, 40),
               "AWS secret access key: 40 base64 characters",
               context="awsSecretAccessKey"),
+
+        # ── v2.21.0: the fifteen that had never been checked against an issuer ──
+        #
+        # Every entry below was reached by finding the issuer's own statement of
+        # the format and building a value from it. Six detectors disagreed with
+        # their issuer; those disagreements are the release.
+
+        # PyPI documents a token as `pypi-` + base64 of a PyMacaroon. The
+        # location lands in the first bytes, so a pattern anchored past the
+        # macaroon header is anchored on one hostname.
+        Shape("PyPI Upload Token", "pypi-" + _macaroon_v2(rng, "pypi.org"),
+              "PyPI: pypi- + base64(PyMacaroon v2), location pypi.org"),
+        Shape("PyPI Upload Token", "pypi-" + _macaroon_v2(rng, "test.pypi.org"),
+              "same structure on TestPyPI — the pattern's old anchor missed it"),
+        Shape("PyPI Upload Token", "pypi-" + _macaroon_v2(rng, "upload.pypi.org"),
+              "same structure, upload endpoint — also missed"),
+
+        # A bot token's first segment is the bot's snowflake, base64'd.
+        Shape("Discord Bot Token", _discord_bot_token(rng, 1_451_606_400_000),
+              "bot id minted 2016 — 18 digits, so a 24-character first segment"),
+        Shape("Discord Bot Token", _discord_bot_token(rng, 1_672_531_200_000),
+              "bot id minted 2023 — 19 digits, 26 characters; previously missed"),
+        Shape("Discord Bot Token", _discord_bot_token(rng, 1_756_944_000_000),
+              "bot id minted today — still 19 digits, still 26 characters"),
+        Shape("Discord Bot Token", _discord_bot_token(rng, 1_893_456_000_000),
+              "bot id minted 2030 — the segment keeps widening with the clock"),
+
+        # HashiCorp's user-tokens API reference shows a mixed-case prefix.
+        Shape("Terraform Cloud Token",
+              r(ALNUM, 14) + ".atlasv1." + r(URLSAFE, 67),
+              "HashiCorp user-tokens API: <14 mixed-case>.atlasv1.<body>"),
+
+        # Doppler publishes a format per token type.
+        Shape("Doppler Token", "dp.st." + r(ALNUM, 43),
+              "Doppler service token, no label segment"),
+        Shape("Doppler Token", "dp.st.prd." + r(ALNUM, 43),
+              "Doppler service token WITH the documented optional label — the "
+              "form Doppler's own docs use, and previously missed"),
+        Shape("Doppler Token", "dp.st." + r(LOWER + DIGITS + "-_", 35) + "." + r(ALNUM, 40),
+              "same, longest documented label (35) and shortest body (40)"),
+        Shape("Doppler Token", "dp.pt." + r(ALNUM, 44),
+              "Doppler personal token, documented 40-44 body at its maximum"),
+        Shape("Doppler Token", "dp.ct." + r(ALNUM, 40),
+              "Doppler CLI token at the documented minimum body length"),
+        Shape("Doppler Token", "dp.said." + r(ALNUM, 42),
+              "Doppler service-account identity token — a documented prefix the "
+              "alternation did not contain at all"),
+        Shape("Doppler Token", "dp.scim." + r(ALNUM, 41),
+              "Doppler SCIM token"),
+
+        # Pinecone's Admin API reference states the new key format outright.
+        Shape("Pinecone API Key", "pckey_" + r(LOWER + DIGITS, 8) + "_" + r(ALNUM, 40),
+              "Pinecone Admin API: \"pckey_<public-label>_<unique-key>\" — the "
+              "documented form, which only the undocumented prefix had covered"),
+
+        # Supabase documents the prefix; the pattern makes no length claim.
+        Shape("Supabase Secret Key", "sb_secret_" + r(URLSAFE, 40),
+              "Supabase: sb_secret_ replaces the service_role JWT"),
+
+        # Legacy Grafana keys are base64 of a JSON object, so length is variable.
+        Shape("Grafana Legacy API Key", _grafana_legacy(rng, "admin", 1),
+              "legacy Grafana key: base64 of {k, n, id} — short name"),
+        Shape("Grafana Legacy API Key",
+              _grafana_legacy(rng, "terraform-provisioner-readonly", 42),
+              "same, long name — the encoded length moves with it"),
+
+        # Google states the prefix and nothing about length.
+        Shape("Google OAuth Client Secret", "GOCSPX-" + r(URLSAFE, 28),
+              "Google: GOCSPX- prefix; the 28 here is one observed width, not a "
+              "published rule, which is why the pattern now accepts a range"),
+        Shape("Google OAuth Client Secret", "GOCSPX-" + r(URLSAFE, 35),
+              "same prefix, a different width — a fixed-width pattern would miss "
+              "this, and nothing Google publishes rules it out"),
     ]
     return out
 
@@ -410,18 +533,18 @@ UNDOCUMENTED: dict[str, str] = {
         "no issuer — the generic `client_secret` spelling, shared across providers",
     "Firebase Cloud Messaging Key":
         "legacy FCM server keys are retired; no current issuer format to check against",
-    "Google OAuth Client Secret":
-        "format not stated by Google beyond a GOCSPX- prefix; needs a doc lookup",
-    "Perplexity API Key": "format not independently confirmed; needs a doc lookup",
-    "Pinecone API Key": "format not independently confirmed; needs a doc lookup",
-    "PyPI Upload Token": "format not independently confirmed; needs a doc lookup",
-    "LangSmith API Key": "format not independently confirmed; needs a doc lookup",
-    "Doppler Token": "format not independently confirmed; needs a doc lookup",
-    "Supabase Secret Key": "format not independently confirmed; needs a doc lookup",
-    "Grafana Legacy API Key": "format not independently confirmed; needs a doc lookup",
-    "Terraform Cloud Token": "format not independently confirmed; needs a doc lookup",
-    "Discord Bot Token": "format not independently confirmed; needs a doc lookup",
-    "Discord Client ID": "covered above by the snowflake construction",
+    "Perplexity API Key":
+        "Perplexity documents the pplx- prefix and nothing else: not a length, "
+        "not a character set. The widths quoted anywhere else all trace back to "
+        "secret-scanning samples, so a shape built from one would be measuring "
+        "another scanner's guess. The pattern states a range rather than a "
+        "width, so there is no fixed claim here left to be wrong",
+    "LangSmith API Key":
+        "LangChain documents the two prefixes (lsv2_pt_ personal, lsv2_sk_ "
+        "service) and the difference in scope, but never the body. The 32-plus-10 "
+        "hex structure this pattern asserts comes from scanner examples — the "
+        "exact provenance that made the Mapbox pattern wrong, so it is recorded "
+        "here instead of being dressed up as issuer-documented",
 }
 
 
@@ -460,6 +583,15 @@ def main() -> int:
     uncovered = [n for n in registry if n not in covered]
     unexplained = [n for n in uncovered if n not in UNDOCUMENTED]
 
+    # And the mirror case. The gate already fails when a detector has no shape
+    # and no recorded reason — that caught a renamed shape leaving a detector
+    # silently uncovered. It could not catch the opposite: a reason left behind
+    # for a gap that has since closed, or written against a name the registry no
+    # longer uses. Both are a file asserting something untrue about the code,
+    # and a typo'd key is indistinguishable from a missing one, which is how the
+    # Cloudflare rename hid in the first place.
+    stale = sorted(n for n in UNDOCUMENTED if n not in uncovered)
+
     print(f"  shapes           {len(all_shapes)}")
     print(f"  detectors        {len(covered)}/{len(registry)} covered   "
           f"({100 * len(covered) / max(1, len(registry)):.0f}%)")
@@ -496,7 +628,14 @@ def main() -> int:
         print()
         print("  A detector with neither a shape nor a recorded reason is the exact")
         print("  condition the Mapbox defect survived in. Add one or the other.")
-    return 1 if (missed or mistyped or unexplained) else 0
+    if stale:
+        print()
+        print("  STALE EXPLANATIONS — recorded as unchecked, but no longer are:")
+        for name in stale:
+            print(f"    {name}")
+        print("  Either the gap closed and the entry should go, or the key names a")
+        print("  detector the registry does not have. Both make this file lie.")
+    return 1 if (missed or mistyped or unexplained or stale) else 0
 
 
 if __name__ == "__main__":
