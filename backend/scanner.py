@@ -882,7 +882,14 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Pinecone API Key",
-        regex=re.compile(r"\b(pcsk_[A-Za-z0-9_]{40,90})\b"),
+        # Pinecone's Admin API reference states "New keys will have the format
+        # pckey_<public-label>_<unique-key>" and that the whole string is the
+        # credential. Only `pcsk_` was matched here, and that prefix appears in
+        # secret-scanning rules rather than in anything Pinecone publishes — so
+        # the documented form was the one we could not see. Both are kept: the
+        # older prefix is still plausibly live, and dropping it to chase the new
+        # one would trade a silent miss for a different silent miss.
+        regex=re.compile(r"\b((?:pcsk_|pckey_)[A-Za-z0-9_]{40,90})\b"),
         description="Pinecone vector-database API key",
         severity="CRITICAL",
     ),
@@ -900,7 +907,17 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="PyPI Upload Token",
-        regex=re.compile(r"\b(pypi-AgEIcHlwaS[A-Za-z0-9_\-]{50,})\b"),
+        # `pypi-` + base64url of a PyMacaroon v2 (PyPI's own documented
+        # structure). The anchor is the macaroon HEADER — bytes 0x02 0x01,
+        # "version 2, location field", which base64 always renders as "AgE".
+        #
+        # It used to be `AgEIcHlwaS`, which is the base64 of {v2, length 8,
+        # "pypi.org"} — one deployment's hostname baked into the pattern. A
+        # TestPyPI token encodes "test.pypi.org" instead and begins
+        # `AgENdGVzdC5weXBpLm9yZ`, so every one of them was missed. Verified by
+        # serializing real macaroons for each location with the library PyPI
+        # documents (see bench/vendorshapes.py).
+        regex=re.compile(r"\b(pypi-AgE[A-Za-z0-9_\-]{50,})\b"),
         description="PyPI API upload token",
         severity="CRITICAL",
     ),
@@ -918,7 +935,12 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Google OAuth Client Secret",
-        regex=re.compile(r"\b(GOCSPX-[A-Za-z0-9_\-]{28})\b"),
+        # Google states the `GOCSPX-` prefix and nothing about length. The
+        # exact `{28}` here came from scanner samples, not from Google, and an
+        # unpublished fixed width is precisely how the Mapbox detector came to
+        # match zero real tokens. The prefix carries the precision; the width
+        # only carried risk, so it is now a range wide enough to be wrong-proof.
+        regex=re.compile(r"\b(GOCSPX-[A-Za-z0-9_\-]{20,45})\b"),
         description="Google OAuth 2.0 client secret",
         severity="HIGH",
     ),
@@ -948,7 +970,17 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Discord Bot Token",
-        regex=re.compile(r"\b([MNO][A-Za-z0-9_\-]{23}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,38})\b"),
+        # `base64url(bot user id).base64url(timestamp).hmac`. The first segment
+        # is the bot's SNOWFLAKE, so its width is a function of the calendar —
+        # the same fact the Discord Client ID detector was already corrected
+        # for, and which was never carried across to the token that embeds it.
+        #
+        # A 17-digit id base64s to 23 chars, 18 digits to 24, 19 to 26 and 20
+        # to 27 (25 is unreachable — 19 bytes is 6 full triples plus one).
+        # Hard-coding 24 meant every bot created since ids crossed 19 digits in
+        # 2022 — effectively every bot alive — was invisible to this pattern.
+        regex=re.compile(
+            r"\b([MNO][A-Za-z0-9_\-]{22,26}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,38})\b"),
         description="Discord bot token",
         severity="HIGH",
     ),
@@ -1092,7 +1124,10 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Terraform Cloud Token",
-        regex=re.compile(r"\b([a-z0-9]{14}\.atlasv1\.[A-Za-z0-9_\-]{60,})\b"),
+        # The 14-character prefix is MIXED case. HashiCorp's own user-tokens
+        # API reference shows `6tL24nM38M7XWQ.atlasv1.…`, which a lowercase-only
+        # class rejects — the issuer's published example did not match us.
+        regex=re.compile(r"\b([A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_\-]{60,})\b"),
         description="HCP Terraform (Terraform Cloud) API token",
         severity="CRITICAL",
     ),
@@ -1131,7 +1166,21 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Doppler Token",
-        regex=re.compile(r"\b(dp\.(?:pt|st|ct|sa|scim|audit)\.[A-Za-z0-9]{40,44})\b"),
+        # Doppler publishes a format per token type. Two things were missing.
+        #
+        # A SERVICE token carries an optional label (in practice the config
+        # name) between the prefix and the random part: `dp.st.prd.<40-44>`,
+        # which is the form the docs themselves use. Requiring the random part
+        # to follow `dp.st.` directly missed it — and a service token in a CI
+        # config is the Doppler credential most likely to leak.
+        #
+        # `dp.said.` (short-lived service-account identity) was absent. Note it
+        # must precede `sa` in the alternation: regex alternation is
+        # leftmost-first, so `sa` would match, then demand a `.` it cannot find
+        # before the `id`, and the whole match would fail.
+        regex=re.compile(
+            r"\b(dp\.(?:pt|said|sa|st|ct|scim|audit)\."
+            r"(?:[a-z0-9_\-]{2,35}\.)?[A-Za-z0-9]{40,44})\b"),
         description="Doppler service/personal/CLI token",
         severity="CRITICAL",
     ),

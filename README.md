@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-1148%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.20.0-blue)
+![Tests](https://img.shields.io/badge/tests-1178%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.21.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,35 +14,50 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.20.0 — the bucket name was the part being thrown away** ·
+> **v2.21.0 — six detectors disagreed with their own issuer** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> The external-host extractor keeps a URL's hostname and discards its path. That
-> is right for a dependency graph and **exactly wrong for cloud storage**: for S3
-> path style, GCS path style, Azure Blob, Cloudflare R2 and Backblaze, the bucket
-> name *is* the path. A bundle shipping
-> `s3.amazonaws.com/acme-db-backups/nightly.sql.gz` was reported as
-> `s3.amazonaws.com` — true, and useless.
+> A detector can score **1.000** on the ground-truth corpus and 99.1% against
+> gitleaks while matching **zero real credentials** — both corpora derive their
+> specimens from the same regex the detector uses. `bench/vendorshapes.py` exists
+> to break that circle, and it covered 96 of 111 detectors. The other 15 carried
+> an honest note: *"format not independently confirmed; needs a doc lookup."*
 >
-> SecretNode now reports `storage_references` as its own class of fact: **11 URL
-> shapes across 7 providers**, in both HTML reports and the JSON export. A bucket
-> is not a third-party dependency — it is usually the client's own, and it is the
-> one piece of infrastructure that can be exposed to the world **without any
-> credential leaking at all**.
+> The lookups were done. **Six detectors were wrong**, and 11 of 21 new specimens
+> were invisible to the patterns that shipped last release.
 >
-> **It issues no request.** Deciding whether a bucket is publicly readable means
-> sending a LIST or a GET to third-party infrastructure the target's
-> authorization does not cover, and which the client may not own. The reference is
-> the finding; the check belongs to whoever knows which buckets are theirs, and
-> the report says so in as many words.
+> **PyPI's anchor was a hostname.** `pypi-AgEIcHlwaS` is the base64 of
+> `{macaroon v2, length 8, "pypi.org"}` — one deployment, baked in. TestPyPI
+> tokens begin `AgENdGVzdC5weXBpLm9yZ` and were all invisible. The anchor is now
+> the macaroon header alone.
 >
-> Three shapes where the obvious reading is wrong: Azure and R2 hosts name the
-> *account*, not the bucket — the container is the first path segment, so taking
-> the leftmost label would report one string for ten containers. DigitalOcean puts
-> the region between space and suffix. `f002.backblazeb2.com` is a shared cluster,
-> so only a `/file/<bucket>/` path is a bucket reference. And
-> `fonts.googleapis.com` is not `storage.googleapis.com`, which a test now asserts.
+> **A Discord bot token's first segment is a snowflake.** v2.16.0 already
+> corrected the Client *ID* detector from 18 digits to 17–20 — ids crossed 19
+> digits in 2022. The bot *token* embeds that same id, base64'd, and was still
+> hard-coded to a width only an 18-digit id produces: **effectively every bot
+> alive was invisible.** The calendar argument had been made, accepted, and
+> applied to one of the two places it was true.
+>
+> **HashiCorp's own documented example did not match us** — `6tL24nM38M7XWQ…`,
+> rejected by a lowercase-only prefix class. **Doppler publishes a format per
+> token type**, and two were unreachable: the optional label a CI service token
+> actually carries (`dp.st.prd.…`), and the `dp.said.` prefix, absent entirely.
+> **Google publishes no length for `GOCSPX-`**, yet the pattern asserted exactly
+> 28 — the same unpublished-fixed-width mistake as Mapbox. **Pinecone documents
+> `pckey_<public-label>_<unique-key>`**, and we matched only a prefix that
+> appears in scanner rules rather than in Pinecone's docs.
+>
+> Coverage is **104/111**, with a recorded reason for each of the seven that
+> remain — Perplexity and LangSmith publish prefixes and nothing else, and a
+> shape built from a scanner's sample would measure that scanner's guess. **A
+> corpus that invents a shape to reach 111/111 is the ground-truth corpus again,
+> one indirection further out.** The gate now also fails on a reason left behind
+> for a gap that has closed — verified failing before being trusted to pass.
+>
+> Every fix relaxed a constraint and precision did not move: all four runnable
+> benchmarks unchanged, and a test asserts each widened pattern still refuses
+> fragments.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
