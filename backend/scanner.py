@@ -964,7 +964,23 @@ SECRET_PATTERNS: list[SecretPattern] = [
     ),
     SecretPattern(
         name="Telegram Bot Token",
-        regex=re.compile(r"\b([0-9]{8,10}:[A-Za-z0-9_\-]{35})\b"),
+        # `<bot id>:<secret>`, and BOTH halves were wrong.
+        #
+        # The bot id is a Telegram USER id, and Telegram documents those as
+        # "at most 52 significant bits" while its own changelog warns that
+        # ids will grow past 2^31-1. 52 bits is 16 decimal digits; the cap
+        # here was 10, which real ids already reach. Same defect family as
+        # the Discord snowflake, except Telegram published the fuse.
+        #
+        # The secret half was pinned to 35. The example token on Telegram's
+        # own Bot API page has 34 characters after the colon, so the
+        # issuer's published token did not match us — and neither endpoint
+        # of a range is something Telegram states, so both are observations:
+        # 34 from that example, the ceiling for headroom. The precision
+        # comes from the structure (a digit run, a colon, a urlsafe run, all
+        # word-boundary delimited), which is where it should come from when
+        # the issuer publishes no width.
+        regex=re.compile(r"\b([0-9]{8,16}:[A-Za-z0-9_\-]{34,46})\b"),
         description="Telegram Bot API token",
         severity="HIGH",
     ),
@@ -2206,26 +2222,65 @@ _REMEDIATION: dict[str, str] = {
 }
 
 
+def _alternation_is_nested_below(src: str, depth: int, start: int) -> bool:
+    """True if every `|` from `start` onward sits deeper than `depth`.
+
+    This is the whole question a literal prefix turns on, and getting it wrong
+    in either direction costs something:
+
+        abcd(?:x|y)   the `|` is inside a group opened AFTER the literal, so
+                      every match contains "abcd" — requiring it is sound
+        abcd|efgh     the `|` is at the literal's OWN level, so "efgh" matches
+                      with no "abcd" in sight — requiring it drops that branch
+
+    "The literal comes before the first `|`" is true of both and therefore
+    cannot separate them. Depth can.
+    """
+    i = start
+    while i < len(src):
+        ch = src[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "[":                      # a class may contain | harmlessly
+            i += 1
+            while i < len(src) and src[i] != "]":
+                i += 2 if src[i] == "\\" else 1
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "|" and depth <= 0:
+            return False
+        i += 1
+    return True
+
+
 def _derive_prefilter(pattern: re.Pattern[str]) -> tuple[str, ...]:
     """A mandatory literal read off a prefix-anchored pattern, or ().
 
     Deliberately timid, because an unsound prefilter is a silent false negative
-    and this runs over the whole registry. Three conditions, all required:
+    and this runs over the whole registry. Conditions, all required:
 
-      * no `|` anywhere in the source — an alternation could offer a branch that
-        does not contain the prefix, and skipping text for a literal only SOME
-        branches need is exactly the mistake worth being afraid of here;
       * the pattern opens with the usual `(?i)? \b? (` scaffolding and then at
         least four ordinary characters;
-      * those characters are not themselves a character class or quantifier.
+      * those characters are not themselves a character class or quantifier;
+      * any `|` that follows is NESTED strictly deeper than the literal, so the
+        literal is still mandatory. A top-level alternation offers a branch the
+        literal never reaches, and skipping text for a literal only SOME
+        branches need is exactly the mistake worth being afraid of here.
+
+    That last condition used to be "no `|` anywhere", which was sound but
+    refused eleven patterns whose alternation is nested — `sgp_(?:…|…)`,
+    `(?:pcsk_|pckey_)…`, `-----BEGIN (?:RSA |EC )?PRIVATE KEY-----` — and a
+    prefilter is the difference between running one regex over every asset and
+    running it over the few that could possibly match.
 
     Everything else keeps an empty prefilter and is scanned as before. A
     detector losing a speed-up costs milliseconds; a detector losing a match
     costs the entire point of the tool.
     """
     src = pattern.pattern
-    if "|" in src:
-        return ()
     i = 0
     if src.startswith("(?i)"):
         i = 4
@@ -2237,8 +2292,35 @@ def _derive_prefilter(pattern: re.Pattern[str]) -> tuple[str, ...]:
         i += 2
     while i < len(src) and src[i] in "(":
         i += 1
+    # The literal's own level is zero by definition — the groups opened above it
+    # are the scaffolding it lives inside, not nesting it is protected by. A `|`
+    # at level 0 is a sibling alternative that bypasses the literal entirely,
+    # and a `)` dropping below 0 means we have left the literal's group, where
+    # an outer `|` can bypass it just as well. Passing the ABSOLUTE depth here
+    # instead of 0 is the first thing I got wrong, and it declared `nrak-` a
+    # mandatory literal for a pattern whose other branch is `NRAA-…`. Both the
+    # `aaaa_x|bbbb_y` counterexample and a ground-truth specimen caught it.
+    # A leading alternation of pure literals — `(?:pcsk_|pckey_)`, `(?:ABSK|AXSK)`
+    # — is sound when EVERY branch yields one, the same all-or-nothing rule
+    # `_keyword_prefilter` uses: one branch without a literal means the pattern
+    # can match text containing none of the others.
+    if src.startswith("(?:", i) or src.startswith("(", i):
+        head = i + (3 if src.startswith("(?:", i) else 1)
+        close = src.find(")", head)
+        inner = src[head:close] if close != -1 else ""
+        if close != -1 and "|" in inner and not any(c in inner for c in "()[]{}"):
+            branches = [_literal_prefix(a) for a in inner.split("|")]
+            if all(len(b) >= 4 for b in branches) and \
+                    _alternation_is_nested_below(src, 0, close + 1):
+                return tuple(dict.fromkeys(branches))
+        return ()
+
     literal = _literal_prefix(src[i:])
-    return (literal,) if len(literal) >= 4 else ()
+    if len(literal) < 4:
+        return ()
+    if not _alternation_is_nested_below(src, 0, i + len(literal)):
+        return ()
+    return (literal,)
 
 
 # Fill in prefilters for the prefix-anchored patterns that did not declare one.

@@ -49,10 +49,12 @@ from __future__ import annotations
 
 import base64
 import json
+import re as _re
 import os
 import random
 import string
 import sys
+from collections import Counter
 from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -511,6 +513,24 @@ def shapes() -> list[Shape]:
         Shape("Google OAuth Client Secret", "GOCSPX-" + r(URLSAFE, 35),
               "same prefix, a different width — a fixed-width pattern would miss "
               "this, and nothing Google publishes rules it out"),
+
+        # ── Telegram: an id bound the issuer itself warns will be exceeded ────
+        #
+        # A bot token is `<bot id>:<secret>`, and the bot id is a Telegram USER
+        # id. Telegram documents those as "at most 52 significant bits" — 16
+        # decimal digits — and its changelog warns ids will pass 2^31-1. An
+        # upper bound below that is the Discord snowflake defect with a
+        # published fuse.
+        Shape("Telegram Bot Token", r(DIGITS, 9) + ":" + r(URLSAFE, 34),
+              "Telegram's own Bot API example: 9-digit id, 34-character secret "
+              "— the issuer's published token, which a width of 35 rejected"),
+        Shape("Telegram Bot Token", r(DIGITS, 10) + ":" + r(URLSAFE, 35),
+              "the width real tokens commonly have today"),
+        Shape("Telegram Bot Token", r(DIGITS, 11) + ":" + r(URLSAFE, 35),
+              "one digit past the old cap — ids are already at 10, so this is "
+              "the next order of magnitude, not a hypothetical"),
+        Shape("Telegram Bot Token", r(DIGITS, 16) + ":" + r(URLSAFE, 35),
+              "Telegram's documented 52-bit ceiling, which is 16 digits"),
     ]
     return out
 
@@ -601,6 +621,21 @@ def main() -> int:
     print(f"  wrong detector   {len(mistyped):>4}   matched, but attributed elsewhere")
     print(f"  unchecked        {len(uncovered):>4}   no issuer-documented shape "
           f"({len(unexplained)} without a recorded reason)")
+
+    # The condition Mapbox, Google OAuth and Telegram all shared: a pattern
+    # asserting an EXACT width, with one specimen agreeing. One specimen is not
+    # nothing — a shape built from the issuer's stated length IS corroboration —
+    # but it cannot disagree about a width, so it cannot catch a width the
+    # issuer never published. This is a risk register, not a defect list, and
+    # it is printed because a risk that is not a number is a risk nobody works.
+    exact = _re.compile(r"\{(\d+)\}")
+    per_detector = Counter(s.expect for s in all_shapes)
+    single = [p.name for p in scanner.SECRET_PATTERNS
+              if exact.search(p.regex.pattern) and per_detector.get(p.name, 0) == 1]
+    critical = [n for n in single
+                if scanner.PATTERN_BY_NAME[n].severity == "CRITICAL"]
+    print(f"  single-width     {len(single):>4}   assert an exact width that one "
+          f"specimen agrees with ({len(critical)} CRITICAL)")
 
     for label, rows in (("NOT MATCHED", missed), ("WRONG DETECTOR", mistyped)):
         if not rows:
