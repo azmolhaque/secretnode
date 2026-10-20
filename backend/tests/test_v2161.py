@@ -207,10 +207,43 @@ class TestPrefilterSoundness:
         assert scanner._literal_prefix("[A-Z]{4}") == ""
         assert scanner._literal_prefix("colou?r") == "colo"
 
-    def test_alternation_is_never_prefiltered(self):
-        """A branch without the literal makes the whole prefilter unsound."""
+    def test_a_sibling_alternative_is_never_prefiltered(self):
+        """A branch without the literal makes the whole prefilter unsound.
+
+        `aaaa_x|bbbb_y` matches "bbbb_y" with no "aaaa_" anywhere, so requiring
+        "aaaa_x" before running the regex drops that branch silently.
+        """
         import re as _re
         assert scanner._derive_prefilter(_re.compile(r"\b(aaaa_x|bbbb_y)\b")) == ()
+        # The same shape at the registry's own scale: both NRAK- and NRAA- are
+        # New Relic keys, and either literal alone would skip the other.
+        assert not scanner.PATTERN_BY_NAME["New Relic API Key"].prefilter
+        assert not scanner.PATTERN_BY_NAME["Square Access Token"].prefilter
+
+    def test_an_alternation_nested_below_the_literal_is_still_prefiltered(self):
+        """The distinction the depth rule exists to make.
+
+        `abcd(?:x|y)` cannot match without "abcd", so the literal is mandatory
+        and requiring it is sound. "The literal comes before the first `|`" is
+        true of this AND of `aaaa_x|bbbb_y`, which is why depth — not position —
+        is what the derivation tests. Passing the absolute paren depth instead
+        of treating the literal's own level as zero made this rule declare
+        `nrak-` mandatory for New Relic; the test above is what caught it.
+        """
+        import re as _re
+        assert scanner._derive_prefilter(_re.compile(r"\b(abcd(?:x|y))\b")) == ("abcd",)
+        # And a `)` that leaves the literal's group puts any later `|` back at
+        # an outer level, where it can bypass the literal again.
+        assert scanner._derive_prefilter(_re.compile(r"\b(abcd(?:x|y))|zzzz\b")) == ()
+
+    def test_the_patterns_that_gained_one_from_the_depth_rule_are_sound(self):
+        """Each of these has a nested alternation and a mandatory literal."""
+        for name, literal in (("Private Key Block", "-----begin "),
+                              ("LangSmith API Key", "lsv2_"),
+                              ("Intra42 Client Secret", "s-s4t2")):
+            pat = scanner.PATTERN_BY_NAME[name]
+            assert pat.prefilter == (literal,), name
+            assert "|" in pat.regex.pattern, f"{name} no longer has an alternation"
 
     def test_a_keyword_prefilter_needs_every_branch_to_yield_one(self):
         assert scanner._keyword_prefilter("cohere|co_api_key") == ("cohere", "co_api_key")

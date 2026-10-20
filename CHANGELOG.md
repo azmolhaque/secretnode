@@ -3,6 +3,129 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.22.0] — A QA pass, and the one question that found the next defect
+
+v2.21.0 corrected six detectors by comparing each to its issuer. This release
+asked the follow-up that matters more than any single fix: **where else does
+that class of defect live?**
+
+It came down to one mechanical question. Mapbox's length varied with the account
+name; a Discord bot token's first segment varies with the calendar. Both are
+cases of a pattern pinning a field that moves on its own — and an **identifier**
+is the one field that moves without anybody shipping a change. So: which
+detectors bound a run of digits?
+
+Three. Two had already been corrected. The third had not.
+
+### Telegram, where both halves were wrong
+
+A bot token is `<bot id>:<secret>`.
+
+**The secret half rejected Telegram's own published token.** The example on
+Telegram's Bot API page has **34** characters after the colon. The pattern
+required exactly 35. This is precisely the v2.21.0 Terraform finding repeating
+itself — the issuer's documented example did not match us — and it was found by
+asking the same question of a detector that had not been asked.
+
+**The id half was capped below a ceiling the issuer had already announced.** A
+bot id is a Telegram *user* id, and Telegram documents those as *"at most 52
+significant bits"* while its changelog warns developers that ids will grow past
+2³¹−1. 52 bits is **16 decimal digits**. The cap here was 10 — a width real ids
+already reach. Not a future problem: the next order of magnitude was one bot
+away, and Telegram had published the fuse years ago.
+
+Both bounds are now traceable. 16 is where 52 bits runs out, asserted
+arithmetically so it cannot be mistaken for a round number someone liked. The
+secret half is a range, because neither endpoint is something Telegram states:
+the floor is its documented example, and the precision comes from the structure
+— a digit run, a colon, a urlsafe run, all word-boundary delimited — which is
+where precision should come from when the issuer publishes no width.
+
+### Asana was fine, and that needed writing down
+
+The third bounded digit-run is Asana's client id at `{15,19}`, and **19 is not a
+guess**: Asana gids were 64-bit integers, and a signed int64 maxes at
+9223372036854775807 — 19 digits. The range spans the entire space those ids
+could ever occupy.
+
+That is now recorded in a comment and a test, because a bound that *looks*
+arbitrary is at risk of being "fixed" into something wrong by the next reader —
+including a later version of whoever wrote this. Asana is migrating to string
+gids and advises storing them as variable-length strings; if non-numeric gids
+ever ship, this detector is wrong in a way no width can repair and needs
+rewriting rather than widening. That is written down too.
+
+The question itself is now a standing test: it fails when the set of
+digit-bounded detectors changes, so a new one is a deliberate decision rather
+than a surprise.
+
+### The risk register that was invisible
+
+Mapbox, Google OAuth and Telegram shared one condition: a pattern asserting an
+**exact** width, with a single specimen agreeing. One specimen is not nothing —
+a shape built from an issuer's *stated* length is real corroboration — but it
+cannot **disagree** about a width, so it cannot catch a width the issuer never
+published.
+
+The vendor benchmark now reports that number:
+
+```
+  single-width       63   assert an exact width that one specimen agrees with (28 CRITICAL)
+```
+
+It is a risk register, not a defect list, and it does not fail the gate. It is
+printed because **a risk that is not a number is a risk nobody works** — the
+same reason the coverage gap became a number in v2.17.0, which is what made
+this release's six fixes findable at all.
+
+### The prefilter rule was sound for the wrong reason
+
+A prefilter decides whether to *run* a regex, never whether a match counts, so
+an unsound one is a silent false negative. The derivation refused any pattern
+containing `|` anywhere, reasoning that an alternation might offer a branch the
+literal never reaches.
+
+True of some alternations, and **not** of the shape that actually appears most:
+
+```
+abcd(?:x|y)   the `|` is inside a group opened AFTER the literal, so every
+              match contains "abcd" — requiring it is sound
+abcd|efgh     the `|` is at the literal's OWN level, so "efgh" matches with no
+              "abcd" anywhere — requiring it drops that branch silently
+```
+
+"The literal comes before the first `|`" is true of both and therefore cannot
+separate them. **Depth** can. The rule now tests whether every later `|` is
+nested strictly below the literal's own level, which recovers prefilters for
+`-----BEGIN (?:RSA |EC )?PRIVATE KEY-----`, `lsv2_(?:pt|sk)_…` and
+`s-s4t2(?:ud|af)-…` — 72 prefiltered patterns to 75.
+
+**The first version of this was wrong**, and the way it was wrong is the useful
+part. Passing the *absolute* paren depth instead of treating the literal's own
+level as zero made the rule declare `nrak-` a mandatory literal for New Relic —
+whose other branch is `NRAA-`, so every NRAA key would have been skipped without
+the regex ever running. The `aaaa_x|bbbb_y` counterexample test caught it
+immediately, and so did a ground-truth specimen. A safety net that has never
+been seen to catch anything is a decoration; this one is not, and the
+counterexample it caught is now in the suite beside it, along with the New Relic
+and Square cases at the registry's own scale.
+
+### Measured, not assumed
+
+Each of the six v2.21.0 fixes and both Telegram bounds **relaxed** a constraint,
+and a relaxed pattern that starts claiming fragments has traded a false negative
+for the worse error. Adversarial inputs aimed at every widened quantifier — long
+runs of exactly the characters each one accepts — stay at 2–3 ms with no
+backtracking blowup, and a bundle of near-miss shapes (an SRI hash, a git sha, a
+UUID, a timestamp with colons, a 14-digit id, `pypi-AgE` with no body,
+`dp.st.production`, `GOCSPX-short`) produces **zero** findings while a real token
+planted in that same bundle is still found.
+
+All four runnable benchmarks are unchanged: ground truth 111/111 at 1.000/1.000
+with zero decoys misreported, vendor 126/126 across 104/111 detectors, the
+labelled gate still 1.000/1.000, external still 208/211 with zero in-scope
+misses.
+
 ## [2.21.0] — Six detectors disagreed with their own issuer
 
 v2.17.0 built `bench/vendorshapes.py` because a detector can score 1.000 on the

@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-1178%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.21.0-blue)
+![Tests](https://img.shields.io/badge/tests-1199%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.22.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,50 +14,47 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.21.0 — six detectors disagreed with their own issuer** ·
+> **v2.22.0 — a QA pass, and the one question that found the next defect** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> A detector can score **1.000** on the ground-truth corpus and 99.1% against
-> gitleaks while matching **zero real credentials** — both corpora derive their
-> specimens from the same regex the detector uses. `bench/vendorshapes.py` exists
-> to break that circle, and it covered 96 of 111 detectors. The other 15 carried
-> an honest note: *"format not independently confirmed; needs a doc lookup."*
+> v2.21.0 corrected six detectors against their issuers. This release asked the
+> follow-up that matters more than any single fix: **where else does that class
+> of defect live?**
 >
-> The lookups were done. **Six detectors were wrong**, and 11 of 21 new specimens
-> were invisible to the patterns that shipped last release.
+> It reduced to one mechanical question. Mapbox's length varied with the account
+> name; a Discord bot token's first segment varies with the calendar. Both pin a
+> field that moves on its own — and an **identifier** is the one field that moves
+> without anybody shipping a change. So: which detectors bound a run of digits?
+> **Three.** Two were already corrected. The third was not.
 >
-> **PyPI's anchor was a hostname.** `pypi-AgEIcHlwaS` is the base64 of
-> `{macaroon v2, length 8, "pypi.org"}` — one deployment, baked in. TestPyPI
-> tokens begin `AgENdGVzdC5weXBpLm9yZ` and were all invisible. The anchor is now
-> the macaroon header alone.
+> **Telegram, where both halves were wrong.** The secret half required exactly
+> 35 characters; the example on Telegram's own Bot API page has **34**, so the
+> issuer's published token did not match us — the Terraform finding repeating
+> itself in a detector nobody had asked. And the bot id was capped at 10 digits
+> while Telegram documents user ids as *"at most 52 significant bits"* (16
+> digits) and its changelog warns ids will pass 2³¹. Real ids already reach 10.
+> **The fuse had been published years ago.**
 >
-> **A Discord bot token's first segment is a snowflake.** v2.16.0 already
-> corrected the Client *ID* detector from 18 digits to 17–20 — ids crossed 19
-> digits in 2022. The bot *token* embeds that same id, base64'd, and was still
-> hard-coded to a width only an 18-digit id produces: **effectively every bot
-> alive was invisible.** The calendar argument had been made, accepted, and
-> applied to one of the two places it was true.
+> **Asana was fine, and that needed writing down.** Its `{15,19}` is not a guess:
+> gids were 64-bit integers and a signed int64 maxes at 19 digits. A bound that
+> *looks* arbitrary risks being "fixed" into something wrong by the next reader,
+> so the arithmetic is now a test. The question itself is a standing check too —
+> it fails when the set of digit-bounded detectors changes.
 >
-> **HashiCorp's own documented example did not match us** — `6tL24nM38M7XWQ…`,
-> rejected by a lowercase-only prefix class. **Doppler publishes a format per
-> token type**, and two were unreachable: the optional label a CI service token
-> actually carries (`dp.st.prd.…`), and the `dp.said.` prefix, absent entirely.
-> **Google publishes no length for `GOCSPX-`**, yet the pattern asserted exactly
-> 28 — the same unpublished-fixed-width mistake as Mapbox. **Pinecone documents
-> `pckey_<public-label>_<unique-key>`**, and we matched only a prefix that
-> appears in scanner rules rather than in Pinecone's docs.
+> **The invisible risk is now a number.** Mapbox, Google OAuth and Telegram
+> shared one condition: an exact width with a single specimen agreeing. One
+> specimen can corroborate a documented length but can never *disagree* about a
+> width. The benchmark reports it: **63 single-width detectors, 28 CRITICAL**. A
+> risk that is not a number is a risk nobody works.
 >
-> Coverage is **104/111**, with a recorded reason for each of the seven that
-> remain — Perplexity and LangSmith publish prefixes and nothing else, and a
-> shape built from a scanner's sample would measure that scanner's guess. **A
-> corpus that invents a shape to reach 111/111 is the ground-truth corpus again,
-> one indirection further out.** The gate now also fails on a reason left behind
-> for a gap that has closed — verified failing before being trusted to pass.
->
-> Every fix relaxed a constraint and precision did not move: all four runnable
-> benchmarks unchanged, and a test asserts each widened pattern still refuses
-> fragments.
+> **And the prefilter rule was sound for the wrong reason.** It refused any
+> pattern containing `|`, but `abcd(?:x|y)` cannot match without `abcd` while
+> `abcd|efgh` can — "before the first `|`" cannot separate them, and depth can.
+> 72 prefiltered patterns to 75. The first version of this was **wrong**: it
+> declared `nrak-` mandatory for New Relic, whose other branch is `NRAA-`. The
+> counterexample test caught it immediately. A safety net never seen to catch
+> anything is a decoration; this one is not.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
