@@ -3,6 +3,90 @@
 All notable changes to SecretNode are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.23.0] — The detector registry gets its own module
+
+`scanner.py` was **5,208 lines**, and roughly 2,000 of them were the registry:
+111 detectors, their per-provider remediation, and the helpers that build them.
+A long flat table that every single release edits was sharing one file with HTTP
+fetching, an adaptive per-host throttle, an asset cache, the Gemini validation
+engine and the scan orchestrator.
+
+```
+backend/scanner.py    5,208  ->  3,189 lines
+backend/patterns.py       -  ->  2,084 lines
+```
+
+### Why this is not tidiness
+
+v2.21.0 found six detectors that disagreed with their issuers, and the worst of
+them was the Discord bot token: **the calendar fact that fixed it had already
+been established and applied to a sibling detector forty lines away.** The id
+width was corrected where someone noticed it and not where the same fact also
+mattered.
+
+A registry you can read end to end is a registry where that kind of
+inconsistency is visible. A registry buried in the middle of the file that also
+owns the network path is one where it is not.
+
+### What moved, and what deliberately did not
+
+`patterns.py` holds declarations and the functions that construct them: the
+`SecretPattern` model, `_contextual` for keyword-anchored providers, the
+prefilter derivation, the 111 patterns and the remediation table. Everything in
+it is pure, and a test asserts that: it imports **only** `re` and `dataclasses`,
+contains no environment read, no `open(`, no `httpx` and no `async`, and never
+imports `scanner` back. One direction only — the registry is a declaration, the
+scanner reads it — because a circular import would invite the table to start
+reaching for fetch state.
+
+Entropy scoring, degeneracy tests, redaction, fetching, spidering, validation
+and orchestration all stay. `scanner.py` re-exports every moved name, including
+the private ones this project's own tests and benchmarks reach for
+(`scanner._derive_prefilter`, `scanner._literal_prefix`,
+`scanner._DEFAULT_REMEDIATION`). **Callers were not asked to care that this
+moved**, and a test checks each re-exported name is the *same object* as the one
+in `patterns`, not merely present.
+
+### The split stopped at one cut, on purpose
+
+The obvious next cuts are the HTTP layer (~1,290 lines), the Gemini engine
+(~400) and the orchestrator. They are not taken, and the reason is specific
+rather than caution.
+
+This project's tests patch module-level constants on the `scanner` module:
+`RETRY_ATTEMPTS`, `ASSET_CACHE_ENABLED`, `SCAN_INLINE_JSON`, `GEMINI_API_KEY`,
+`_UA_OVERRIDE`, `MAX_SOURCEMAP_SOURCES`. If the code that *reads* one of those
+moved to another module, the patch would have no effect — and **the test would
+still pass**, having quietly stopped testing the thing it names. A test that
+cannot fail is worse than a missing one, because it reports success. Those cuts
+need the constants rehomed deliberately, test by test, which is its own piece of
+work and not a line-count exercise.
+
+### Proving a refactor changed nothing
+
+A behavioural fingerprint was taken before the cut and after it: every pattern's
+name, regex source, flags, severity, CWE, remediation and derived prefilter,
+plus the findings each of the 126 vendor specimens produces through the real
+extraction path, hashed. **Byte-identical** before and after
+(`96f521d9…`), and all four runnable benchmarks unchanged — ground truth 111/111
+at 1.000/1.000, vendor 126/126 across 104/111, labelled gate PASS, external
+208/211 with zero in-scope misses.
+
+### The one hazard the split could have introduced, and the test for it
+
+Several tests stub `scanner.SECRET_PATTERNS` to isolate a single detector. Had
+`extract_secrets` kept reading the list through `patterns.SECRET_PATTERNS`
+instead of its own module global, that stub would have quietly done nothing: the
+real registry would answer, the detector under test would never be isolated, and
+**the test would still pass**.
+
+That bug was introduced on purpose to see what would catch it. **All 1,198
+pre-existing tests passed with it in place.** Only the new test fails, and it
+fails on the right thing — the stub's detector absent, the real registry still
+answering. The check is in the suite now, along with an assertion that
+`scanner.py` stays under 3,600 lines so a future merge cannot quietly paste the
+table back.
+
 ## [2.22.0] — A QA pass, and the one question that found the next defect
 
 v2.21.0 corrected six detectors by comparing each to its issuer. This release

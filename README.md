@@ -3,8 +3,8 @@
 ![CI](https://github.com/azmolhaque/secretnode/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
-![Tests](https://img.shields.io/badge/tests-1199%20passing-brightgreen)
-![Version](https://img.shields.io/badge/version-2.22.0-blue)
+![Tests](https://img.shields.io/badge/tests-1205%20passing-brightgreen)
+![Version](https://img.shields.io/badge/version-2.23.0-blue)
 ![SARIF](https://img.shields.io/badge/export-SARIF%202.1.0-8a2be2)
 ![Verification](https://img.shields.io/badge/detection-verification--first-critical)
 
@@ -14,47 +14,46 @@ Pipeline: **browser-like spider (+ source-map mining, guarded redirects) → reg
 > **⚠ Authorized use only.** This is a passive, read-only tool for finding *your own* exposed credentials on
 > infrastructure you own or are explicitly authorized to test. See [`SECURITY.md`](SECURITY.md).
 
-> **v2.22.0 — a QA pass, and the one question that found the next defect** ·
+> **v2.23.0 — the detector registry gets its own module** ·
 > [full changelog](CHANGELOG.md) ·
 > [releases](https://github.com/azmolhaque/secretnode/releases)
 >
-> v2.21.0 corrected six detectors against their issuers. This release asked the
-> follow-up that matters more than any single fix: **where else does that class
-> of defect live?**
+> `scanner.py` was **5,208 lines**, and ~2,000 of them were the registry: 111
+> detectors, their remediation, and the helpers that build them. A flat table
+> that every release edits was sharing one file with HTTP fetching, an adaptive
+> throttle, an asset cache, the Gemini engine and the orchestrator.
 >
-> It reduced to one mechanical question. Mapbox's length varied with the account
-> name; a Discord bot token's first segment varies with the calendar. Both pin a
-> field that moves on its own — and an **identifier** is the one field that moves
-> without anybody shipping a change. So: which detectors bound a run of digits?
-> **Three.** Two were already corrected. The third was not.
+> ```
+> backend/scanner.py    5,208  ->  3,189 lines
+> backend/patterns.py       -  ->  2,084 lines
+> ```
 >
-> **Telegram, where both halves were wrong.** The secret half required exactly
-> 35 characters; the example on Telegram's own Bot API page has **34**, so the
-> issuer's published token did not match us — the Terraform finding repeating
-> itself in a detector nobody had asked. And the bot id was capped at 10 digits
-> while Telegram documents user ids as *"at most 52 significant bits"* (16
-> digits) and its changelog warns ids will pass 2³¹. Real ids already reach 10.
-> **The fuse had been published years ago.**
+> **This is not tidiness.** v2.21.0's worst finding was the Discord bot token,
+> and it was wrong *because* the calendar fact that fixed it had already been
+> established and applied to a sibling detector forty lines away. A registry you
+> can read end to end is one where that inconsistency is visible.
 >
-> **Asana was fine, and that needed writing down.** Its `{15,19}` is not a guess:
-> gids were 64-bit integers and a signed int64 maxes at 19 digits. A bound that
-> *looks* arbitrary risks being "fixed" into something wrong by the next reader,
-> so the arithmetic is now a test. The question itself is a standing check too —
-> it fails when the set of digit-bounded detectors changes.
+> `patterns.py` is pure, and a test asserts it: **only** `re` and `dataclasses`
+> imported, no environment read, no `open(`, no `httpx`, no `async`, and it never
+> imports `scanner` back. Every moved name is re-exported — including the private
+> ones this project's tests reach for — and a test checks each is the *same
+> object*, not merely present. Callers were not asked to care that this moved.
 >
-> **The invisible risk is now a number.** Mapbox, Google OAuth and Telegram
-> shared one condition: an exact width with a single specimen agreeing. One
-> specimen can corroborate a documented length but can never *disagree* about a
-> width. The benchmark reports it: **63 single-width detectors, 28 CRITICAL**. A
-> risk that is not a number is a risk nobody works.
+> **The split stopped at one cut on purpose.** Tests patch constants like
+> `RETRY_ATTEMPTS` and `ASSET_CACHE_ENABLED` on the `scanner` module; if the code
+> reading one moved, the patch would do nothing and **the test would still pass**,
+> having quietly stopped testing what it names. Those cuts need the constants
+> rehomed test by test.
 >
-> **And the prefilter rule was sound for the wrong reason.** It refused any
-> pattern containing `|`, but `abcd(?:x|y)` cannot match without `abcd` while
-> `abcd|efgh` can — "before the first `|`" cannot separate them, and depth can.
-> 72 prefiltered patterns to 75. The first version of this was **wrong**: it
-> declared `nrak-` mandatory for New Relic, whose other branch is `NRAA-`. The
-> counterexample test caught it immediately. A safety net never seen to catch
-> anything is a decoration; this one is not.
+> **Proving a refactor changed nothing:** a fingerprint of every pattern's regex,
+> flags, severity, CWE, remediation and prefilter, plus the findings all 126
+> vendor specimens produce through the real path — byte-identical before and
+> after, with all four benchmarks unchanged.
+>
+> And the hazard worth naming: several tests stub `scanner.SECRET_PATTERNS`. Had
+> `extract_secrets` kept reading the list from the other module, those stubs would
+> silently do nothing. That bug was introduced on purpose to see what caught it.
+> **All 1,198 pre-existing tests passed with it in place.** Only the new one fails.
 >
 > Release notes live in [`CHANGELOG.md`](CHANGELOG.md), which is the single source of truth — this
 > README no longer keeps a second copy that can drift out of date.
